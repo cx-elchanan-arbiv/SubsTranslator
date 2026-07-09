@@ -190,6 +190,7 @@ def embed_subtitles_ffmpeg(video_path: str, srt_path: str, output_path: str) -> 
             '-i', video_path,  # Input video
             '-vf', f"subtitles={srt_path_escaped}",  # Burn-in subtitles
             '-c:a', 'copy',  # Copy audio without re-encoding
+            '-movflags', '+faststart',  # moov atom at front, so WhatsApp/players show a video preview
             output_path
         ]
 
@@ -363,6 +364,7 @@ def add_watermark_to_video(
             '-i', logo_path,
             '-filter_complex', filter_complex,
             '-c:a', 'copy',  # Copy audio
+            '-movflags', '+faststart',  # moov atom at front, so WhatsApp/players show a video preview
             output_path
         ]
 
