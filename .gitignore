@@ -48,6 +48,9 @@ backend/uploads/
 !backend/downloads/.gitkeep
 !backend/uploads/.gitkeep
 
+# User-uploaded watermark logos - saved at runtime by watermark_routes.py
+backend/assets/custom_logo_*
+
 # Specific file patterns (backup)
 *.mp4
 
