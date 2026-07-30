@@ -97,7 +97,18 @@
     "translationService": "Translation Service",
     "watermark": "Watermark",
     "transcriptionOnly": "Transcription & subtitles only (no translation)",
-    "transcriptionOnlyHint": "Subtitles will be in the video's source language"
+    "transcriptionOnlyHint": "Subtitles will be in the video's source language",
+    "subtitleQuality": "Subtitle improvements (experimental)",
+    "subtitleQualityHint": "Each improvement works on its own. With all of them off the pipeline is exactly as before.",
+    "spottingV2": "Smart cue spotting",
+    "spottingV2Hint": "Builds cues from word timings instead of speech segments — fewer flashes and cut sentences",
+    "translationV2": "Whole-scene translation",
+    "translationV2Hint": "Translates the whole scene in one request, with punctuation and a reading-speed limit",
+    "translationStyle": "Translation style",
+    "translationStyleClean": "Clean (remove filler words)",
+    "translationStyleFaithful": "Faithful (keep filler words)",
+    "renderV2": "Improved burn-in (ASS)",
+    "renderV2Hint": "Correct Hebrew glyph shaping, at most two lines, consistent placement at any resolution"
   },
   "models": {
     "tiny": "Tiny - Fastest (Default)",

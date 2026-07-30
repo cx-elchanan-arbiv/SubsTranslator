@@ -1,7 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from '../i18n/TranslationContext';
 import { useI18n } from '../i18n/I18nProvider';
-import type { WhisperModel, TranslationService as TranslationServiceType } from '../types';
+import type {
+  WhisperModel,
+  TranslationService as TranslationServiceType,
+  SubtitleQualityFlags,
+  TranslationStyle,
+} from '../types';
 
 interface TranslationService {
   name: string;
@@ -31,6 +36,8 @@ interface OptionsProps {
   onTranslationServiceChange: (service: TranslationServiceType) => void;
   transcriptionOnly: boolean;
   onTranscriptionOnlyChange: (checked: boolean) => void;
+  subtitleFlags: SubtitleQualityFlags;
+  onSubtitleFlagsChange: (flags: SubtitleQualityFlags) => void;
   disabled: boolean;
   activeTab?: 'upload' | 'youtube';
 }
@@ -44,6 +51,8 @@ const Options: React.FC<OptionsProps> = ({
   onTranslationServiceChange,
   transcriptionOnly,
   onTranscriptionOnlyChange,
+  subtitleFlags,
+  onSubtitleFlagsChange,
   disabled,
   activeTab = 'youtube',
 }) => {
@@ -288,6 +297,89 @@ const Options: React.FC<OptionsProps> = ({
             {translationServices[translationService].description}
           </div>
         )}
+      </div>
+
+      {/*
+        Experimental subtitle-quality toggles. Four INDEPENDENT switches so each
+        improvement can be judged on its own; all default to off, which runs the
+        pipeline exactly as it ran before they existed.
+      */}
+      <div
+        className="subtitle-quality-options"
+        style={{
+          marginTop: '15px',
+          padding: '10px 12px',
+          border: '1px dashed #b0bec5',
+          borderRadius: '6px',
+        }}
+      >
+        <label style={{ fontWeight: 600 }}>{t('options.subtitleQuality')}</label>
+        <div className="option-hint" style={{ fontSize: '0.8em', color: '#666', marginBottom: '8px' }}>
+          {t('options.subtitleQualityHint')}
+        </div>
+
+        <div className="checkbox-option">
+          <input
+            type="checkbox"
+            id="spottingV2"
+            checked={subtitleFlags.spotting_v2}
+            onChange={(e) => onSubtitleFlagsChange({ ...subtitleFlags, spotting_v2: e.target.checked })}
+            disabled={disabled}
+          />
+          <label htmlFor="spottingV2">{t('options.spottingV2')}</label>
+          <span className="option-hint" style={{ fontSize: '0.8em', color: '#666' }}>
+            {t('options.spottingV2Hint')}
+          </span>
+        </div>
+
+        <div className="checkbox-option">
+          <input
+            type="checkbox"
+            id="translationV2"
+            checked={subtitleFlags.translation_v2}
+            onChange={(e) => onSubtitleFlagsChange({ ...subtitleFlags, translation_v2: e.target.checked })}
+            disabled={disabled || transcriptionOnly}
+          />
+          <label htmlFor="translationV2">{t('options.translationV2')}</label>
+          <span className="option-hint" style={{ fontSize: '0.8em', color: '#666' }}>
+            {t('options.translationV2Hint')}
+          </span>
+        </div>
+
+        {/* Style is a property of translation_v2, so it is only live while that is on. */}
+        <div className={`translation-style-selection ${!subtitleFlags.translation_v2 ? 'disabled-section' : ''}`}>
+          <label htmlFor="translationStyle">{t('options.translationStyle')}</label>
+          <div className="model-controls">
+            <select
+              id="translationStyle"
+              value={subtitleFlags.translation_style}
+              onChange={(e) =>
+                onSubtitleFlagsChange({
+                  ...subtitleFlags,
+                  translation_style: e.target.value as TranslationStyle,
+                })
+              }
+              disabled={disabled || !subtitleFlags.translation_v2}
+            >
+              <option value="clean">{t('options.translationStyleClean')}</option>
+              <option value="faithful">{t('options.translationStyleFaithful')}</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="checkbox-option">
+          <input
+            type="checkbox"
+            id="renderV2"
+            checked={subtitleFlags.render_v2}
+            onChange={(e) => onSubtitleFlagsChange({ ...subtitleFlags, render_v2: e.target.checked })}
+            disabled={disabled || !autoCreateVideo}
+          />
+          <label htmlFor="renderV2">{t('options.renderV2')}</label>
+          <span className="option-hint" style={{ fontSize: '0.8em', color: '#666' }}>
+            {t('options.renderV2Hint')}
+          </span>
+        </div>
       </div>
 
     </div>

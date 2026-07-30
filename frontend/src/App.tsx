@@ -4,7 +4,10 @@ import { useApi } from './hooks/useApi';
 import { useI18n } from './i18n/I18nProvider';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from './contexts/AuthContext';
-import type { WhisperModel, TranslationService, WatermarkConfig } from './types';
+import type { WhisperModel, TranslationService, WatermarkConfig, SubtitleQualityFlags } from './types';
+// Imported from the leaf module, not the ./types barrel: the barrel re-exports the
+// zod validation schemas, and a runtime import of it would pull zod into the bundle.
+import { DEFAULT_SUBTITLE_QUALITY_FLAGS } from './types/api';
 import LanguageSelection from './components/LanguageSelection';
 import LanguageSelector from './components/LanguageSelector';
 import Options from './components/Options';
@@ -41,6 +44,8 @@ function App() {
   const [whisperModel, setWhisperModel] = useState<WhisperModel>('base');
   const [translationService, setTranslationService] = useState<TranslationService>('openai');
   const [transcriptionOnly, setTranscriptionOnly] = useState(false);
+  // Experimental subtitle-quality toggles — all off by default (= legacy pipeline).
+  const [subtitleFlags, setSubtitleFlags] = useState<SubtitleQualityFlags>(DEFAULT_SUBTITLE_QUALITY_FLAGS);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [selectedAdvancedFeature, setSelectedAdvancedFeature] = useState<string | null>(null);
   const [watermarkConfig, setWatermarkConfig] = useState<WatermarkConfig>({
@@ -252,6 +257,8 @@ function App() {
                 onTranslationServiceChange={setTranslationService}
                 transcriptionOnly={transcriptionOnly}
                 onTranscriptionOnlyChange={setTranscriptionOnly}
+                subtitleFlags={subtitleFlags}
+                onSubtitleFlagsChange={setSubtitleFlags}
                 disabled={isProcessing}
                 activeTab={activeTab}
               />
@@ -273,7 +280,7 @@ function App() {
                       <button
                         className="btn-primary"
                         onClick={() => {
-                          onFileUpload(selectedFile, sourceLang, transcriptionOnly ? '' : targetLang, autoCreateVideo, whisperModel, translationService, watermarkConfig);
+                          onFileUpload(selectedFile, sourceLang, transcriptionOnly ? '' : targetLang, autoCreateVideo, whisperModel, translationService, watermarkConfig, subtitleFlags);
                           setSelectedFile(null);
                         }}
                         disabled={isProcessing}
@@ -286,7 +293,7 @@ function App() {
               )}
               {activeTab === 'youtube' && (
                 <YoutubeForm
-                  onYoutubeSubmit={(url) => onYoutubeSubmit(url, sourceLang, transcriptionOnly ? '' : targetLang, autoCreateVideo, whisperModel, translationService, watermarkConfig)}
+                  onYoutubeSubmit={(url) => onYoutubeSubmit(url, sourceLang, transcriptionOnly ? '' : targetLang, autoCreateVideo, whisperModel, translationService, watermarkConfig, undefined, undefined, subtitleFlags)}
                   onQuickDownload={handleQuickDownload}
                   isProcessing={isProcessing}
                   sourceLang={sourceLang}

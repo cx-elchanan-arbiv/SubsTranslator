@@ -97,7 +97,18 @@
     "translationService": "שירות תרגום",
     "watermark": "סימן מים",
     "transcriptionOnly": "תמלול וכתוביות בלבד (ללא תרגום)",
-    "transcriptionOnlyHint": "הכתוביות יהיו בשפת המקור של הסרטון"
+    "transcriptionOnlyHint": "הכתוביות יהיו בשפת המקור של הסרטון",
+    "subtitleQuality": "שיפורי כתוביות (ניסיוני)",
+    "subtitleQualityHint": "כל שיפור פועל בנפרד. כשהכול כבוי — התהליך זהה לחלוטין לקודם.",
+    "spottingV2": "חלוקת כתוביות חכמה",
+    "spottingV2Hint": "בונה כתוביות לפי תזמון מילים במקום קטעי דיבור — פחות הבזקים ומשפטים קטועים",
+    "translationV2": "תרגום עם הקשר מלא",
+    "translationV2Hint": "מתרגם את כל הסצנה בבקשה אחת, עם פיסוק ומהירות קריאה תקנית",
+    "translationStyle": "סגנון תרגום",
+    "translationStyleClean": "נקי (הסרת מילות מילוי)",
+    "translationStyleFaithful": "נאמן למקור (שמירת מילות מילוי)",
+    "renderV2": "צריבה משופרת (ASS)",
+    "renderV2Hint": "צורת אותיות עבריות נכונה, עד שתי שורות ומיקום עקבי בכל רזולוציה"
   },
   "models": {
     "tiny": "Tiny - הכי מהיר (ברירת מחדל)",
