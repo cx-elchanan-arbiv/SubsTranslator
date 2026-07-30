@@ -588,6 +588,255 @@ def transcribe_video(
         raise
 
 
+def _extract_audio_np(video_path, progress_callback=None):
+    """
+    Decode a video's audio to the 16 kHz mono float32 array Whisper expects.
+
+    Extracted for the v2 subtitle pipeline (:func:`transcribe_with_words`). The two
+    legacy entry points keep their own inlined copy on purpose: with all feature flags
+    off their behaviour — including log wording and ordering — must stay byte-identical
+    to what shipped, so they are deliberately not refactored onto this helper.
+
+    Returns:
+        ``(audio_np, audio_duration_seconds)``
+    """
+    ffprobe_cmd = [
+        "ffprobe", "-v", "quiet", "-print_format", "json",
+        "-show_streams", "-select_streams", "a", video_path,
+    ]
+    try:
+        probe_result = subprocess.run(
+            ffprobe_cmd, capture_output=True, text=True,
+            check=True, timeout=config.FFPROBE_TIMEOUT,
+        )
+        streams = probe_result.stdout
+    except subprocess.TimeoutExpired:
+        raise FFmpegTimeoutError("audio_probe", config.FFPROBE_TIMEOUT)
+    except subprocess.CalledProcessError as e:
+        raise FFmpegProcessError(
+            "audio_probe", e.stderr.decode() if e.stderr else "Unknown error"
+        )
+
+    try:
+        audio_streams = json.loads(streams).get("streams", [])
+    except json.JSONDecodeError:
+        audio_streams = []
+
+    if not audio_streams:
+        raise ValueError("No audio stream found in the video file")
+
+    audio_info = audio_streams[0]
+    codec = audio_info.get("codec_name")
+    sample_rate = int(audio_info.get("sample_rate", 0))
+    channels = int(audio_info.get("channels", 0))
+
+    if codec == "pcm_s16le" and sample_rate == 16000 and channels == 1:
+        logger.info("✅ Audio already in optimal format")
+        ffmpeg_cmd = [
+            "ffmpeg", "-i", video_path, "-nostdin",
+            "-f", "s16le", "-acodec", "copy", "-",
+        ]
+    else:
+        logger.info(
+            f"🔄 Re-encoding audio: {codec} @ {sample_rate}Hz, {channels}ch → 16kHz mono"
+        )
+        ffmpeg_cmd = [
+            "ffmpeg", "-i", video_path, "-nostdin",
+            "-f", "s16le", "-ac", "1", "-ar", "16000", "-",
+        ]
+
+    if progress_callback:
+        progress_callback(15, "Processing audio...", 60, "Step 1: Audio processing", 5)
+
+    try:
+        process = subprocess.Popen(
+            ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        audio_buffer, stderr = process.communicate(timeout=config.FFMPEG_RUN_TIMEOUT)
+        if process.returncode != 0:
+            raise AudioExtractionError(video_path, stderr.decode())
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise FFmpegTimeoutError("audio_extraction", config.FFMPEG_RUN_TIMEOUT)
+
+    if progress_callback:
+        progress_callback(20, "Preparing audio data...", 75, "Step 1: Data preparation", 5)
+
+    audio_np = np.frombuffer(audio_buffer, dtype=np.int16).astype(np.float32) / 32768.0
+    audio_duration = len(audio_np) / 16000  # 16kHz sample rate
+    logger.info(f"📊 Audio extracted: {audio_duration:.1f}s duration")
+    return audio_np, audio_duration
+
+
+def transcribe_with_words(
+    video_path,
+    source_lang="auto",
+    quality="balanced",
+    model_preference="large",
+    progress_callback=None,
+    model_callback=None,
+    youtube_url=None,
+    collect_words=True,
+):
+    """
+    Transcribe only — and, unlike every legacy path, KEEP the word timestamps.
+
+    This is the transcription stage of the opt-in v2 subtitle pipeline. It exists because
+    the legacy paths both throw the words away: ``transcribe_and_translate_streamed``
+    reduces each Whisper segment to ``{start, end, text}`` while translating batches
+    overlapped with transcription, and ``whisper_smart.transcribe_smart`` does the same.
+    ``subtitle_engine.words_to_cues`` needs the words, so the v2 path transcribes first
+    and translates afterwards in one whole-scene call (see ``translation_v2``) — the
+    overlap optimisation is traded for cross-cue context, deliberately.
+
+    Model selection, Whisper options and the progress-callback contract mirror
+    ``transcribe_and_translate_streamed`` exactly, so a v2 job and a legacy job of the
+    same request transcribe identically and any quality difference is attributable to the
+    flags alone.
+
+    Args:
+        collect_words: gather per-word timestamps. Whisper is asked for them either way
+            (``word_timestamps=True``, as the legacy path already does), so this only
+            controls whether they are retained.
+
+    Returns:
+        dict: ``{"segments": [{"start","end","text"}, ...],
+        "words": [{"s","e","w"}, ...], "language": str}``.
+        ``words`` is EMPTY for the Gemini model, which returns no word timing — callers
+        that need spotting must fall back to segment-based cues in that case.
+    """
+    logger.info("🚀 === v2 transcription (word timestamps retained) ===")
+
+    # FAKE mode: deterministic output, no Whisper, no network.
+    if config.USE_FAKE_YTDLP:
+        if progress_callback:
+            progress_callback(25, "Starting FAKE transcription...", 85, "Step 1: FAKE Whisper", 5)
+        return {
+            "segments": [
+                {"start": 0.0, "end": 2.0, "text": "Hello world."},
+                {"start": 2.5, "end": 4.0, "text": "This is a test."},
+            ],
+            "words": [
+                {"s": 0.0, "e": 1.0, "w": "Hello"},
+                {"s": 1.0, "e": 2.0, "w": "world."},
+                {"s": 2.5, "e": 3.0, "w": "This"},
+                {"s": 3.0, "e": 3.3, "w": "is"},
+                {"s": 3.3, "e": 3.6, "w": "a"},
+                {"s": 3.6, "e": 4.0, "w": "test."},
+            ] if collect_words else [],
+            "language": (source_lang if source_lang != "auto" else "en"),
+        }
+
+    audio_np, audio_duration = _extract_audio_np(video_path, progress_callback)
+
+    # === Gemini: no word timestamps available ===
+    if model_preference == "gemini":
+        logger.info("🎯 Gemini requested — transcribing via smart path (no word timestamps)")
+        if progress_callback:
+            progress_callback(25, "Starting transcription with Gemini...", 25, "Step 1: Gemini AI", 5)
+        if model_callback:
+            model_callback()
+
+        result = smart_whisper.transcribe_smart(
+            audio_np,
+            language=source_lang,
+            duration=audio_duration,
+            quality_preference=quality,
+            model_preference=model_preference,
+            progress_callback=progress_callback,
+            youtube_url=youtube_url,
+        )
+        return {
+            "segments": result.get("segments", []),
+            "words": [],
+            "language": result.get("language"),
+        }
+
+    # === Whisper ===
+    if progress_callback:
+        progress_callback(25, "Starting transcription with Whisper...", 25, "Step 1: Whisper AI", 5)
+    if model_callback:
+        model_callback()
+
+    # Same selection rule as the legacy streamed path, so both paths pick the same model.
+    if model_preference and model_preference in ["tiny", "base", "medium", "large"]:
+        model_name = model_preference
+    else:
+        model_name = "tiny"
+
+    model = smart_whisper.load_model(model_name)
+
+    options = {
+        "word_timestamps": True,
+        "beam_size": 2 if model_name in ["large", "medium"] else 5,
+        "chunk_length": 30,
+        "condition_on_previous_text": True,
+    }
+    if source_lang != "auto":
+        options["language"] = source_lang
+
+    logger.info(
+        f"💾 v2 transcription settings: model={model_name}, beam_size={options['beam_size']}, "
+        f"collect_words={collect_words}"
+    )
+
+    transcription_start = time.time()
+    segments_iter, info = model.transcribe(audio_np, **options)
+    detected_language = info.language
+    logger.info(f"🌍 Detected language: {detected_language}")
+
+    segments = []
+    words = []
+    for segment in segments_iter:
+        segments.append(
+            {"start": segment.start, "end": segment.end, "text": segment.text}
+        )
+        if collect_words:
+            for word in getattr(segment, "words", None) or []:
+                text = getattr(word, "word", None)
+                if text is None or not str(text).strip():
+                    continue
+                words.append(
+                    {
+                        "s": float(getattr(word, "start", segment.start) or 0.0),
+                        "e": float(getattr(word, "end", segment.end) or 0.0),
+                        "w": str(text),
+                    }
+                )
+
+        if progress_callback and audio_duration:
+            step_progress = 30 + int((segment.end / audio_duration) * 100 * 0.55)
+            progress_callback(
+                step_progress,
+                f"Transcription: {segment.end:.0f}s/{audio_duration:.0f}s",
+                step_progress,
+                "Step 1: Whisper AI",
+                5,
+            )
+
+    transcription_duration = time.time() - transcription_start
+    performance_monitor.log_transcription_performance(
+        audio_duration, transcription_duration, model_name, segments_count=len(segments)
+    )
+
+    if collect_words and not words:
+        logger.warning(
+            "⚠️ v2 transcription: Whisper returned no word timestamps for %d segments",
+            len(segments),
+        )
+
+    logger.info(
+        f"✅ v2 transcription complete: {len(segments)} segments, {len(words)} words "
+        f"in {transcription_duration:.1f}s"
+    )
+
+    if progress_callback:
+        progress_callback(90, "Transcription completed", 90, "Step 1: Processing results", 5)
+
+    return {"segments": segments, "words": words, "language": detected_language}
+
+
 def translate_segments(
     segments, target_language, service="google", progress_callback=None
 ):

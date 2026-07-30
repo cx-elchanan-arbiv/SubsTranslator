@@ -40,6 +40,10 @@ def download_and_process_youtube_task(
     watermark_config=None,
     start_time=None,
     end_time=None,
+    spotting_v2=False,
+    translation_v2=False,
+    translation_style="clean",
+    render_v2=False,
 ):
     """
     Downloads a video from YouTube and then triggers the main processing task.
@@ -47,6 +51,11 @@ def download_and_process_youtube_task(
     Args:
         start_time: Optional start time for partial video processing (format: HH:MM:SS, MM:SS, or SS)
         end_time: Optional end time for partial video processing (format: HH:MM:SS, MM:SS, or SS)
+        spotting_v2, translation_v2, translation_style, render_v2: the user-facing
+            subtitle-quality toggles. This task only forwards them to
+            ``process_video_task`` — it never acts on them itself. They must be forwarded
+            explicitly: a flag dropped here would silently give the user the legacy
+            pipeline for every YouTube job. See :mod:`services.subtitle_pipeline`.
     """
     steps_config = [
         {"label": "Downloading", "weight": 0.1},
@@ -196,6 +205,12 @@ def download_and_process_youtube_task(
                 initial_timing,
                 processing_info,
             ],
+            kwargs={
+                "spotting_v2": spotting_v2,
+                "translation_v2": translation_v2,
+                "translation_style": translation_style,
+                "render_v2": render_v2,
+            },
             queue="processing",
         )
 

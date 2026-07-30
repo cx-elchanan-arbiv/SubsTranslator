@@ -9,6 +9,7 @@ from werkzeug.utils import secure_filename
 
 from config import get_config
 from tasks import process_video_task
+from services.subtitle_pipeline import parse_subtitle_flags
 from utils.file_probe import probe_file_safe
 from logging_config import get_logger
 from i18n.translations import t
@@ -48,6 +49,9 @@ def upload_file_async():
         )
         whisper_model = request.form.get("whisper_model", config.DEFAULT_WHISPER_MODEL)
         translation_service = request.form.get("translation_service", "google")
+
+        # Opt-in subtitle-quality toggles (form fields are strings; "false" is truthy)
+        subtitle_flags = parse_subtitle_flags(request.form)
 
         # Handle watermark configuration
         watermark_enabled = (
@@ -134,6 +138,7 @@ def upload_file_async():
                 None,  # initial_timing_summary (not applicable for uploads)
                 processing_info,  # Include metadata and user choices
             ],
+            kwargs=subtitle_flags,
             queue="processing",
         )
 

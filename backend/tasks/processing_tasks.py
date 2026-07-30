@@ -14,12 +14,17 @@ from logging_config import (
     log_task_error,
     log_task_start,
 )
+from services.subtitle_engine import words_to_cues
+from services.subtitle_pipeline import flags_summary, normalize_cues, resolve_flags
 from services.subtitle_service import subtitle_service
 from services.stats_service import save_video_stats
 from services.transcription_service import (
     transcribe_and_translate_streamed,
     transcribe_video,
+    transcribe_with_words,
+    translate_segments,
 )
+from services.translation_v2 import enforce_cps, translate_cues
 from utils.file_utils import clean_filename
 
 from .progress_manager import ProgressManager
@@ -43,9 +48,29 @@ def process_video_task(
     watermark_config=None,
     initial_timing_summary=None,
     processing_info=None,
+    spotting_v2=False,
+    translation_v2=False,
+    translation_style="clean",
+    render_v2=False,
 ):
     """
     Celery task to process a video file, with detailed, user-facing progress updates.
+
+    The last four arguments are the independent, user-facing subtitle-quality toggles
+    (see :mod:`services.subtitle_pipeline`). All four default to OFF, in which case this
+    task takes exactly the legacy path it always did:
+
+        spotting_v2       re-spot cues from Whisper WORD timestamps
+                          (``subtitle_engine.words_to_cues``) instead of using Whisper's
+                          own speech segments.
+        translation_v2    translate with whole-scene context + a reading-speed pass
+                          (``translation_v2``) instead of the legacy batch translator.
+                          Implies transcribe-then-translate rather than the legacy
+                          overlapped streaming.
+        translation_style ``"clean"`` drops spoken filler, ``"faithful"`` keeps it. Only
+                          meaningful while ``translation_v2`` is on.
+        render_v2         burn in from a generated ``.ass`` file via FFmpeg's ``ass``
+                          filter instead of SRT + the ``subtitles`` filter.
     """
     steps_config = [
         {
@@ -136,8 +161,105 @@ def process_video_task(
                 2, int(overall_progress), message=f"AI processing: {step_status}"
             )
 
+        # === Resolved subtitle-quality flags for this job (all OFF => legacy path) ===
+        flags = resolve_flags(
+            spotting_v2=spotting_v2,
+            translation_v2=translation_v2,
+            translation_style=translation_style,
+            render_v2=render_v2,
+        )
+        logger.info(f"Subtitle quality flags [task={task_id}]: {flags_summary(flags)}")
+
+        wants_translation = bool(target_lang and target_lang != "auto")
+
+        # Gemini transcription returns no word timestamps, so spotting cannot run on it.
+        if flags["spotting_v2"] and whisper_model == "gemini":
+            logger.warning(
+                "spotting_v2 is not available with the gemini model (no word timestamps) "
+                "- falling back to legacy segmentation for this job"
+            )
+            flags["spotting_v2"] = False
+
+        # The v2 stages need transcription and translation to be separate steps; the
+        # legacy path deliberately overlaps them.
+        use_v2_transcription = flags["spotting_v2"] or (
+            flags["translation_v2"] and wants_translation
+        )
+
+        if use_v2_transcription:
+            # === v2: transcribe fully, then re-spot and/or translate with full context ===
+            logger.info(f"Using v2 subtitle pipeline ({flags_summary(flags)})")
+
+            youtube_url = (
+                processing_info.get("user_choices", {}).get("url")
+                if processing_info
+                else None
+            )
+
+            transcription_result = transcribe_with_words(
+                video_path,
+                source_lang=source_lang,
+                model_preference=whisper_model,
+                progress_callback=transcription_progress_callback,
+                model_callback=model_loading_callback,
+                youtube_url=youtube_url,
+                collect_words=flags["spotting_v2"],
+            )
+            detected_language = transcription_result["language"]
+            transcribe_duration = time.time() - transcribe_start
+            timing_summary["transcribe_v2"] = f"{transcribe_duration:.1f}"
+            progress_manager.complete_step(2)
+
+            whisper_segments = transcription_result.get("segments") or []
+            words = transcription_result.get("words") or []
+            if flags["spotting_v2"] and words:
+                cues = words_to_cues(words)
+                logger.info(
+                    f"spotting_v2: {len(words)} words -> {len(cues)} cues "
+                    f"(Whisper produced {len(whisper_segments)} segments)"
+                )
+            else:
+                if flags["spotting_v2"]:
+                    logger.warning(
+                        "spotting_v2: no word timestamps returned - using Whisper segments"
+                    )
+                cues = whisper_segments
+            segments = normalize_cues(cues)
+
+            progress_manager.set_step_status(3, "in_progress")
+            if wants_translation:
+                translate_start = time.time()
+                if flags["translation_v2"]:
+                    progress_manager.log(
+                        f"Translating with whole-scene context "
+                        f"(style={flags['translation_style']})...",
+                        step_index=3,
+                    )
+                    translated = translate_cues(
+                        segments, target_lang, style=flags["translation_style"]
+                    )
+                    logger.info(f"translation_v2 usage: {translated.usage.as_dict()}")
+                    condensed = enforce_cps(translated)
+                    logger.info(f"translation_v2 enforce_cps usage: {condensed.usage.as_dict()}")
+                    segments = normalize_cues(condensed)
+                else:
+                    progress_manager.log("Translating cues...", step_index=3)
+                    segments = normalize_cues(
+                        translate_segments(
+                            segments, target_lang, service=translation_service
+                        )
+                    )
+                timing_summary["translate_v2"] = f"{time.time() - translate_start:.1f}"
+            else:
+                progress_manager.log("Skipping translation.", step_index=3)
+            progress_manager.complete_step(3)
+
+            logger.info(
+                f"v2 pipeline complete: {len(segments)} cues | {transcribe_duration:.1f}s "
+                f"transcription | {detected_language} -> {target_lang or detected_language}"
+            )
         # P1: Use pipeline overlap if translation is needed, otherwise use standard transcription
-        if target_lang and target_lang != "auto":
+        elif wants_translation:
             # === P1 Pipeline Overlap: Transcribe + Translate Simultaneously ===
             logger.info("Using P1 pipeline overlap (transcribe + translate simultaneously)")
 
@@ -256,24 +378,42 @@ def process_video_task(
                 # Convert opacity from 0-100 to 0.0-1.0 for FFmpeg
                 opacity_float = watermark_config.get("opacity", 40) / 100.0
 
-                progress_manager.log("Creating video with subtitles and watermark (combined)...", step_index=5)
-
                 # Use combined function for better performance
                 final_video_path_output = os.path.join(
                     DOWNLOADS_FOLDER, f"{base_name}_final.mp4"
                 )
 
-                video_creation_success = subtitle_service.create_video_with_subtitles_and_watermark(
-                    video_path,
-                    translated_srt_path,
-                    final_video_path_output,
-                    watermark_path,
-                    target_lang or detected_language,
-                    watermark_position=position,
-                    watermark_size_height=size_height,
-                    watermark_opacity=opacity_float,
-                    progress_callback=video_progress_callback,
-                )
+                if flags["render_v2"]:
+                    progress_manager.log(
+                        "Creating video with ASS subtitles and watermark (render_v2)...",
+                        step_index=5,
+                    )
+                    video_creation_success = subtitle_service.create_video_with_ass(
+                        video_path,
+                        segments,
+                        final_video_path_output,
+                        target_language=target_lang or detected_language,
+                        use_translation=wants_translation,
+                        watermark_path=watermark_path,
+                        watermark_position=position,
+                        watermark_size_height=size_height,
+                        watermark_opacity=opacity_float,
+                        progress_callback=video_progress_callback,
+                    )
+                else:
+                    progress_manager.log("Creating video with subtitles and watermark (combined)...", step_index=5)
+
+                    video_creation_success = subtitle_service.create_video_with_subtitles_and_watermark(
+                        video_path,
+                        translated_srt_path,
+                        final_video_path_output,
+                        watermark_path,
+                        target_lang or detected_language,
+                        watermark_position=position,
+                        watermark_size_height=size_height,
+                        watermark_opacity=opacity_float,
+                        progress_callback=video_progress_callback,
+                    )
 
                 final_video_path = final_video_path_output if video_creation_success else None
 
@@ -286,14 +426,28 @@ def process_video_task(
                 progress_manager.complete_step(6)
 
             else:
-                # No watermark - use original function
-                video_creation_success = subtitle_service.create_video_with_subtitles(
-                    video_path,
-                    translated_srt_path,
-                    video_with_subtitles_path,
-                    target_lang or detected_language,
-                    progress_callback=video_progress_callback,
-                )
+                # No watermark
+                if flags["render_v2"]:
+                    progress_manager.log(
+                        "Creating video with ASS subtitles (render_v2)...", step_index=5
+                    )
+                    video_creation_success = subtitle_service.create_video_with_ass(
+                        video_path,
+                        segments,
+                        video_with_subtitles_path,
+                        target_language=target_lang or detected_language,
+                        use_translation=wants_translation,
+                        progress_callback=video_progress_callback,
+                    )
+                else:
+                    # use original function
+                    video_creation_success = subtitle_service.create_video_with_subtitles(
+                        video_path,
+                        translated_srt_path,
+                        video_with_subtitles_path,
+                        target_lang or detected_language,
+                        progress_callback=video_progress_callback,
+                    )
 
                 progress_manager.log("Finalizing video...", step_index=5)
                 progress_manager.set_step_progress(5, 99)

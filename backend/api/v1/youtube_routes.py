@@ -6,6 +6,7 @@ from flask import Blueprint, jsonify, request
 
 from config import get_config
 from tasks import download_and_process_youtube_task, download_youtube_only_task
+from services.subtitle_pipeline import parse_subtitle_flags
 from services.url_resolver_service import resolve_video_url
 from logging_config import get_logger
 from i18n.translations import t
@@ -69,6 +70,9 @@ def process_youtube_async():
         whisper_model = data.get("whisper_model", config.DEFAULT_WHISPER_MODEL)
         translation_service = data.get("translation_service", "google")
 
+        # Opt-in subtitle-quality toggles (JSON booleans or FormData strings)
+        subtitle_flags = parse_subtitle_flags(data)
+
         # Handle watermark configuration
         watermark_enabled = data.get("watermark_enabled", False)
         watermark_config, watermark_error = build_watermark_config_from_data(watermark_enabled, data, request)
@@ -111,6 +115,7 @@ def process_youtube_async():
                 translation_service,
                 watermark_config,
             ],
+            kwargs=subtitle_flags,
             queue="processing",
         )
 
