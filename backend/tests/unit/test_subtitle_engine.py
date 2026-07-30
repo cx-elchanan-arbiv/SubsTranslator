@@ -334,3 +334,34 @@ def test_end_to_end_words_to_ass(sample_words):
     for event in events:
         body = event.split(",,", 1)[1]
         assert len(body.split("\\N")) <= 2
+
+
+@pytest.mark.unit
+class TestSparsePunctuationFallback:
+    """Unpunctuated ASR output (large-v3 artifact) must split on speech pauses."""
+
+    def _words(self):
+        # 16 unpunctuated words, clear 0.6s pauses after words 5 and 10
+        words, t = [], 0.0
+        for i in range(16):
+            words.append({"s": t, "e": t + 0.25, "w": f" word{i}"})
+            t += 0.3
+            if i in (4, 9):
+                t += 0.6  # speech pause
+        return words
+
+    def test_pause_split_engages_without_punctuation(self):
+        from services.subtitle_engine import words_to_cues
+        cues = words_to_cues(self._words())
+        assert len(cues) >= 3, "pauses should become sentence boundaries"
+        assert "word4" in cues[0]["text"] and "word5" not in cues[0]["text"]
+
+    def test_punctuated_input_unaffected(self):
+        from services.subtitle_engine import words_to_cues
+        # same words but properly punctuated: fallback must NOT engage
+        words = self._words()
+        for i in (4, 9, 15):
+            words[i]["w"] = words[i]["w"] + "."
+        cues = words_to_cues(words)
+        texts = [c["text"] for c in cues]
+        assert any(t.rstrip().endswith("word4.") for t in texts)

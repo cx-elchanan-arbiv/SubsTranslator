@@ -286,6 +286,14 @@ def build_system_prompt(
         "each cue flow from the previous one.",
         "A cue that asks a question and the cue that answers it belong to DIFFERENT "
         "speakers. Translate each so it reads naturally on its own.",
+        "The source is raw ASR output and may arrive WITHOUT punctuation or "
+        "capitalization (a known transcription artifact). Infer sentence boundaries "
+        "yourself and punctuate the translation correctly regardless of how broken "
+        "the source looks.",
+        "When a speaker's or addressee's gender cannot be determined from context, "
+        "use MASCULINE grammatical forms consistently (the broadcast convention for "
+        "Hebrew and other gendered languages). Never switch grammatical gender "
+        "mid-conversation.",
         f"Cues marked {CONTEXT_MARKER} are surrounding dialogue given only so you "
         "understand the scene. Read them, never translate them, and never include "
         "their ids in your output.",

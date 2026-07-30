@@ -48,6 +48,10 @@ MIN_CUE_DUR = 1.2
 MAX_CUE_DUR = 6.0
 MIN_CUE_GAP = 0.08
 
+#: Speech-pause length (seconds) treated as a sentence boundary when the ASR
+#: transcript arrives without punctuation (large-v3 sometimes does this).
+PAUSE_SPLIT_GAP = 0.35
+
 # --- Unicode bidi isolates (never RLO/U+202E) --------------------------------
 # Spelled as escapes on purpose: these characters are invisible, so a literal
 # would be impossible to review and trivial to delete by accident.
@@ -192,12 +196,29 @@ def words_to_cues(
 
     max_chars = max(1, int(max_line) * int(max_lines))
 
+    # Fallback for unpunctuated ASR output (a known large-v3 failure mode):
+    # when terminal punctuation is too sparse to define sentences, speech
+    # pauses become the sentence boundaries instead. Punctuated transcripts
+    # are untouched — the fallback only engages below ~1 terminal / 20 words.
+    terminals = sum(1 for w in clean if _TERMINAL_RE.search(w["w"]))
+    sparse_punctuation = len(clean) >= 8 and terminals * 20 < len(clean)
+    if sparse_punctuation:
+        logger.info(
+            "spotting: sparse punctuation (%d terminals / %d words) — "
+            "pause-based sentence fallback engaged",
+            terminals,
+            len(clean),
+        )
+
     # 1. sentences
     sentences: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
-    for word in clean:
+    for i, word in enumerate(clean):
         current.append(word)
-        if _TERMINAL_RE.search(word["w"]):
+        boundary = bool(_TERMINAL_RE.search(word["w"]))
+        if not boundary and sparse_punctuation and i + 1 < len(clean):
+            boundary = clean[i + 1]["s"] - word["e"] >= PAUSE_SPLIT_GAP
+        if boundary:
             sentences.append(current)
             current = []
     if current:

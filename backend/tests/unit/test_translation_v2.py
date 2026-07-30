@@ -594,3 +594,20 @@ class TestLegacyRetryTranslationsRegression:
 
         assert indent(lines[init_line]) <= indent(lines[first_use])
         assert first_use - init_line < 60, "init drifted far from the block it guards"
+
+
+@pytest.mark.unit
+class TestRobustnessRules:
+    """Prompt rules added after the large-v3 unpunctuated-transcript incident."""
+
+    def test_prompt_handles_unpunctuated_source(self):
+        from services.translation_v2 import build_system_prompt
+        prompt = build_system_prompt("he")
+        assert "WITHOUT punctuation" in prompt
+        assert "punctuate the translation correctly" in prompt.lower() or "punctuate the translation" in prompt
+
+    def test_prompt_defaults_unknown_gender_to_masculine(self):
+        from services.translation_v2 import build_system_prompt
+        prompt = build_system_prompt("he")
+        assert "MASCULINE" in prompt
+        assert "mid-conversation" in prompt
