@@ -321,6 +321,79 @@ class TestNormalizeCues:
         normalize_cues(source)
         assert source == [{"start": 0, "end": 1, "text": "a", "translated": "b"}]
 
+    # -- unknown keys survive the normaliser ---------------------------------------
+    def test_unknown_keys_are_carried_through(self):
+        """Normalising is about agreeing on four keys, not about being an allow-list.
+
+        This function sits between every producer and every consumer in the pipeline. If
+        it drops what it does not recognise, then a stage that starts emitting, say, a
+        speaker label finds it silently deleted by the plumbing rather than by anyone's
+        decision — and the loss is invisible, because the four keys it does know about
+        are all still there.
+        """
+        cues = normalize_cues(
+            [
+                {
+                    "start": 0,
+                    "end": 1,
+                    "text": "hello",
+                    "speaker": "HOST",
+                    "confidence": 0.93,
+                    "words": [{"w": "hello", "s": 0.0, "e": 1.0}],
+                }
+            ]
+        )
+        assert cues[0]["speaker"] == "HOST"
+        assert cues[0]["confidence"] == 0.93
+        assert cues[0]["words"] == [{"w": "hello", "s": 0.0, "e": 1.0}]
+
+    def test_the_four_known_keys_are_still_normalised_around_them(self):
+        """Passing extras through must not stop the normalisation itself happening."""
+        cues = normalize_cues(
+            [{"start": "2.5", "end": 4, "text": " x ", "translated": " כן ", "extra": 1}]
+        )
+        assert cues[0] == {
+            "start": 2.5,
+            "end": 4.0,
+            "text": "x",
+            "translated_text": "כן",
+            "extra": 1,
+        }
+
+    def test_translated_is_consumed_and_not_left_behind(self):
+        """``translated`` is the one key deliberately dropped.
+
+        It is folded into ``translated_text`` so no downstream code has to know which of
+        the two spellings it is looking at; leaving both would reintroduce exactly that
+        ambiguity.
+        """
+        cues = normalize_cues([{"start": 0, "end": 1, "text": "a", "translated": "ב"}])
+        assert cues[0]["translated_text"] == "ב"
+        assert "translated" not in cues[0]
+
+    def test_an_unknown_key_never_overwrites_a_normalised_one(self):
+        """A stage emitting a stray `text` variant must not win over the real field."""
+        cues = normalize_cues(
+            [{"start": 0, "end": 1, "text": "real", "translated_text": "תרגום", "note": "x"}]
+        )
+        assert cues[0]["text"] == "real"
+        assert cues[0]["translated_text"] == "תרגום"
+        assert cues[0]["note"] == "x"
+
+    def test_extras_survive_a_reflow_pass(self):
+        """End to end with the pass that runs straight after it in the v2 branch."""
+        from services.subtitle_engine import reflow_dangling_connectors
+
+        cues = normalize_cues(
+            [
+                {"start": 0, "end": 1, "text": "a", "translated": "המטוס נחת ו", "speaker": "A"},
+                {"start": 1.2, "end": 2, "text": "b", "translated": "הנוסעים ירדו", "speaker": "B"},
+            ]
+        )
+        out = reflow_dangling_connectors(cues)
+        assert out[1]["translated_text"] == "והנוסעים ירדו"
+        assert [cue["speaker"] for cue in out] == ["A", "B"]
+
     def test_round_trips_a_real_words_to_cues_result(self):
         """End-to-end shape check against the actual engine, not a hand-written stub."""
         from services.subtitle_engine import words_to_cues
@@ -560,14 +633,117 @@ class TestTaskSignaturesAcceptTheFlags:
                 f"{name}.{flag} must default to the legacy behaviour"
             )
 
-    def test_youtube_task_forwards_every_flag_to_the_processing_task(self):
-        """A flag parsed by the route but dropped by the chain is invisible in the UI."""
-        import inspect
+    @staticmethod
+    def _run_youtube_task(**task_kwargs):
+        """Drive ``download_and_process_youtube_task`` with the download stubbed out.
 
+        Returns ``(chained_kwargs, result)`` — the kwargs handed to
+        ``process_video_task.apply_async``, and the task's own return value.
+        """
         from tasks import download_tasks
 
-        source = inspect.getsource(download_tasks.download_and_process_youtube_task.run)
-        chain_call = source.split("process_video_task.apply_async", 1)
-        assert len(chain_call) == 2, "the chain call could not be located"
-        for flag in ALL_FLAG_KEYS:
-            assert f'"{flag}": {flag}' in chain_call[1], f"{flag} is not forwarded"
+        chained = {}
+
+        def fake_apply_async(args=None, kwargs=None, queue=None):
+            chained["args"] = args
+            chained["kwargs"] = kwargs
+            return MagicMock(id="chained-task-1")
+
+        with patch.object(download_tasks, "yt_dlp") as fake_ytdlp, patch.object(
+            download_tasks, "download_youtube_video"
+        ) as fake_download, patch.object(
+            download_tasks.process_video_task, "apply_async", fake_apply_async
+        ), patch.object(
+            download_tasks.time, "sleep", lambda *_a, **_k: None
+        ), patch.object(
+            download_tasks.download_and_process_youtube_task, "update_state", MagicMock()
+        ):
+            fake_ytdlp.YoutubeDL.return_value.__enter__.return_value.extract_info.return_value = {
+                "title": "clip",
+                "duration": 30,
+            }
+            fake_download.return_value = ("/tmp/clip.mp4", {"title": "clip"})
+
+            task = download_tasks.download_and_process_youtube_task
+            task.push_request(id="yt-task-1")
+            try:
+                result = task.run(
+                    "https://youtu.be/abc",
+                    "en",
+                    "he",
+                    True,
+                    "tiny",
+                    **task_kwargs,
+                )
+            finally:
+                task.pop_request()
+        return chained, result
+
+    def test_youtube_task_forwards_every_flag_to_the_processing_task(self):
+        """A flag parsed by the route but dropped by the chain is invisible in the UI.
+
+        Asserted on the kwargs ``apply_async`` actually receives rather than on the shape
+        of the source text: the previous version of this test matched the literal
+        ``"flag": flag`` and went red the moment the same four values were forwarded as a
+        dict, which is a refactor, not a regression. What matters is what the downstream
+        task is handed.
+        """
+        chained, _result = self._run_youtube_task(
+            spotting_v2=True,
+            translation_v2=True,
+            translation_style=STYLE_FAITHFUL,
+            render_v2=True,
+        )
+
+        assert chained.get("kwargs"), "the processing task was never enqueued"
+        assert set(chained["kwargs"]) == ALL_FLAG_KEYS, (
+            f"chained kwargs are {sorted(chained['kwargs'])}, expected exactly the flags"
+        )
+        assert chained["kwargs"] == {
+            "spotting_v2": True,
+            "translation_v2": True,
+            "translation_style": STYLE_FAITHFUL,
+            "render_v2": True,
+        }
+
+    def test_youtube_task_forwards_the_defaults_when_nothing_is_set(self):
+        """All four off is the legacy pipeline, and must survive the hop unchanged."""
+        chained, _result = self._run_youtube_task()
+        assert chained["kwargs"] == FLAG_DEFAULTS
+
+    def test_youtube_task_normalises_flags_before_forwarding(self):
+        """A flag that arrives as a string must not reach the task as a string.
+
+        Celery serialises through JSON, and a route or a retry can hand this task the
+        string ``"true"``. Forwarding it unresolved would make ``if spotting_v2`` true for
+        ``"false"`` as well.
+        """
+        chained, _result = self._run_youtube_task(
+            spotting_v2="true",
+            translation_v2="false",
+            translation_style="nonsense",
+            render_v2=1,
+        )
+        assert chained["kwargs"]["spotting_v2"] is True
+        assert chained["kwargs"]["translation_v2"] is False
+        assert chained["kwargs"]["render_v2"] is True
+        assert chained["kwargs"]["translation_style"] == STYLE_CLEAN, (
+            "an unrecognised style must fall back to the default, not be passed through"
+        )
+
+    def test_youtube_task_reports_the_flags_as_user_choices(self):
+        """The YouTube path must be attributable to its settings exactly like an upload."""
+        chained, result = self._run_youtube_task(
+            spotting_v2=True, translation_style=STYLE_FAITHFUL
+        )
+
+        # ...in the payload handed to the processing task,
+        processing_info = chained["args"][8]
+        choices = processing_info["user_choices"]
+        assert choices["spotting_v2"] is True
+        assert choices["translation_style"] == STYLE_FAITHFUL
+        assert set(ALL_FLAG_KEYS).issubset(choices)
+
+        # ...and in what this task returns to the API.
+        assert result["user_choices"]["spotting_v2"] is True
+        assert set(ALL_FLAG_KEYS).issubset(result["user_choices"])

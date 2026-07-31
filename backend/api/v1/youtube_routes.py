@@ -132,6 +132,7 @@ def process_youtube_async():
                         "whisper_model": whisper_model,
                         "translation_service": translation_service,
                         "url": url,
+                        **subtitle_flags,
                     },
                     "initial_request": {},
                     "video_metadata": None,

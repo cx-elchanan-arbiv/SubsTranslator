@@ -123,6 +123,7 @@ def upload_file_async():
                 "auto_create_video": auto_create_video,
                 "whisper_model": whisper_model,
                 "translation_service": translation_service,
+                **subtitle_flags,
             },
         }
 
@@ -154,6 +155,7 @@ def upload_file_async():
                         "auto_create_video": auto_create_video,
                         "whisper_model": whisper_model,
                         "translation_service": translation_service,
+                        **subtitle_flags,
                     },
                     "initial_request": {"filename": filename, "type": "upload"},
                     "file_metadata": file_metadata,

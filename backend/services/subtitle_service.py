@@ -94,8 +94,12 @@ class SubtitleService:
                         if use_translation
                         else segment.get("text", "")
                     )
-                    if text is None:
-                        text = segment.get("text", "")
+                    # Falsy, not `is None`. `subtitle_pipeline.normalize_cues`
+                    # always emits the key and writes "" when there is no
+                    # translation (spotting_v2 on, translation off), so an
+                    # identity check here wrote a whole file of blank subtitles.
+                    if not text:
+                        text = segment.get("text", "") or ""
 
                     # Clean up text
                     text = text.replace("\n", " ").replace("\r", " ")
@@ -286,6 +290,10 @@ class SubtitleService:
                 vf_filter,
                 "-c:a",
                 "copy",
+                # Move the moov atom to the front so the result starts playing
+                # before it has fully downloaded (parity with create_video_with_ass).
+                "-movflags",
+                "+faststart",
                 "-y",
                 "-progress",
                 "pipe:2",
@@ -504,7 +512,13 @@ class SubtitleService:
                 operation="combined_embedding_start",
                 video_path=os.path.basename(video_path),
                 srt_path=os.path.basename(srt_path),
-                watermark_path=os.path.basename(watermark_path),
+                # None-safe: `os.path.basename(None)` raises TypeError, and this log line
+                # runs BEFORE the missing-watermark guard below. Without the guard here
+                # too, a null logo path fails the whole render from inside a log
+                # statement — the exact failure the guard exists to prevent.
+                watermark_path=(
+                    os.path.basename(watermark_path) if watermark_path else None
+                ),
                 target_language=target_language,
             )
 
@@ -523,7 +537,11 @@ class SubtitleService:
             if not os.path.exists(srt_path):
                 raise FileNotFoundError(srt_path)
                 
-            if not os.path.exists(watermark_path):
+            # Same guard as create_video_with_ass: a missing logo must degrade to a
+            # subtitles-only render, never fail the whole job in FFmpeg. `not
+            # watermark_path` is part of the check because os.path.exists(None)
+            # raises TypeError rather than answering False.
+            if not watermark_path or not os.path.exists(watermark_path):
                 self.logger.warning(
                     "Watermark file not found, falling back to subtitles only",
                     watermark_path=watermark_path,
@@ -628,6 +646,8 @@ class SubtitleService:
                 "-map", "0:a",
                 "-c:a", "copy",
                 "-preset", "fast",
+                # Parity with create_video_with_ass: moov atom up front.
+                "-movflags", "+faststart",
                 "-y",
                 "-progress", "pipe:2",
                 output_path,

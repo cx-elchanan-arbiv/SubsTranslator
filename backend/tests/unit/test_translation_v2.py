@@ -41,9 +41,11 @@ if backend_dir not in sys.path:
 
 from services.translation_v2 import (  # noqa: E402
     CONTEXT_MARKER,
+    CPS_TOKENS_PER_CUE,
     DEFAULT_MAX_CHARS_PER_CUE,
     GERSHAYIM,
     LANGUAGE_NAMES,
+    MAX_CUES_PER_CPS_REQUEST,
     MAX_CUES_PER_REQUEST,
     OVERLAP_CUES,
     TranslationV2Error,
@@ -533,6 +535,235 @@ class TestEnforceCps:
         assert "PRESERVE sentence punctuation" in system
         assert GERSHAYIM in system
         assert client.calls[0]["response_format"] == {"type": "json_object"}
+
+
+# --------------------------------------------------------------------------------------
+# CPS batching, output budget, and partial failure
+# --------------------------------------------------------------------------------------
+
+
+def cps_violators(count, chars=60, dur=2.0):
+    """``count`` cues that all break their reading-speed budget.
+
+    2s at 17 CPS is a 34-character budget, so 60 characters violates it.
+    """
+    return [
+        {"start": i * dur, "end": (i + 1) * dur, "translated": f"{'א' * chars}{i}"}
+        for i in range(count)
+    ]
+
+
+@pytest.mark.unit
+class TestEnforceCpsBatching:
+    """Condensation is batched. One unbounded request on a long video is a lost pass.
+
+    The reply is JSON containing every cue, so an hour of subtitles in a single request
+    runs past the completion budget and comes back truncated — which
+    :func:`_parse_cue_map` rejects, discarding the whole pass rather than one batch of it.
+    """
+
+    def test_a_long_video_is_split_into_several_requests(self):
+        client = FakeClient(
+            lambda kwargs, call_no: {
+                "cues": [{"id": i, "t": "מקוצר."} for i in requested_ids(kwargs["messages"][1]["content"])]
+            }
+        )
+        violators = cps_violators(95)
+        result = enforce_cps(violators, client=client)
+
+        expected_batches = -(-95 // MAX_CUES_PER_CPS_REQUEST)  # ceil
+        assert len(client.calls) == expected_batches == 3
+
+        for index in range(len(client.calls)):
+            asked = requested_ids(client.user_prompt(index))
+            assert 0 < len(asked) <= MAX_CUES_PER_CPS_REQUEST, (
+                f"batch {index} asked for {len(asked)} cues"
+            )
+
+        # Every cue is asked for exactly once — no gaps, no duplicates.
+        asked_overall = [
+            cue_id
+            for index in range(len(client.calls))
+            for cue_id in requested_ids(client.user_prompt(index))
+        ]
+        assert sorted(asked_overall) == list(range(1, 96))
+        assert len(asked_overall) == len(set(asked_overall))
+        assert all(cue["translated"] == "מקוצר." for cue in result)
+
+    def test_exactly_one_batch_when_the_violators_fit(self):
+        client = FakeClient(
+            lambda kwargs, call_no: {
+                "cues": [{"id": i, "t": "קצר."} for i in requested_ids(kwargs["messages"][1]["content"])]
+            }
+        )
+        enforce_cps(cps_violators(MAX_CUES_PER_CPS_REQUEST), client=client)
+        assert len(client.calls) == 1
+
+    def test_every_request_declares_an_output_budget(self):
+        """``max_tokens`` scaled to the batch, so a runaway reply is cut off, not billed.
+
+        Each reply cue is by construction shorter than its input, which is itself capped
+        at ``DEFAULT_MAX_CHARS_PER_CUE``, so the per-cue allowance is generous.
+        """
+        client = FakeClient(
+            lambda kwargs, call_no: {
+                "cues": [{"id": i, "t": "קצר."} for i in requested_ids(kwargs["messages"][1]["content"])]
+            }
+        )
+        enforce_cps(cps_violators(50), client=client)
+
+        for index, call in enumerate(client.calls):
+            batch_size = len(requested_ids(client.user_prompt(index)))
+            assert call["max_tokens"] == batch_size * CPS_TOKENS_PER_CUE
+            assert call["max_tokens"] > 0
+
+    def test_translation_itself_is_not_capped(self):
+        """``translate_cues`` must NOT inherit the ceiling: its replies are full sentences."""
+        client = FakeClient(echo_responder())
+        translate_cues(make_cues(5), "he", client=client)
+        assert "max_tokens" not in client.calls[0]
+
+    def test_one_failed_batch_does_not_cost_the_others(self):
+        """A cosmetic pass must degrade per batch, not collapse entirely.
+
+        Before batching there was one request, so any failure lost the whole pass. Now a
+        bad reply must leave *its* cues untouched and let the rest through.
+        """
+
+        def responder(kwargs, call_no):
+            if call_no == 2:
+                return "}}} truncated garbage"
+            return {
+                "cues": [
+                    {"id": i, "t": "מקוצר."}
+                    for i in requested_ids(kwargs["messages"][1]["content"])
+                ]
+            }
+
+        client = FakeClient(responder)
+        originals = cps_violators(95)
+        result = enforce_cps(originals, client=client)
+
+        assert len(client.calls) == 3, "a failed batch aborted the remaining ones"
+
+        failed_ids = set(requested_ids(client.user_prompt(1)))
+        for index, cue in enumerate(result, 1):
+            if index in failed_ids:
+                assert cue["translated"] == originals[index - 1]["translated"], (
+                    f"cue {index} was in the failed batch but was modified"
+                )
+            else:
+                assert cue["translated"] == "מקוצר.", (
+                    f"cue {index} was in a successful batch but was not condensed"
+                )
+
+    def test_a_failure_in_every_batch_still_returns_the_input(self):
+        client = FakeClient(lambda kwargs, call_no: "}}} not json")
+        originals = cps_violators(50)
+        result = enforce_cps(originals, client=client)
+        assert [c["translated"] for c in result] == [
+            c["translated"] for c in originals
+        ]
+
+    def test_keep_shorter_semantics_survive_batching(self):
+        """An over-budget reply is kept only when it is shorter than the original."""
+
+        def responder(kwargs, call_no):
+            out = []
+            for cue_id in requested_ids(kwargs["messages"][1]["content"]):
+                # odd ids: shorter but still over budget; even ids: longer than the input
+                out.append({"id": cue_id, "t": "ד" * (40 if cue_id % 2 else 200)})
+            return {"cues": out}
+
+        client = FakeClient(responder)
+        originals = cps_violators(45)
+        result = enforce_cps(originals, client=client)
+
+        for index, cue in enumerate(result, 1):
+            if index % 2:
+                assert cue["translated"] == "ד" * 40, "the shorter reply should be kept"
+            else:
+                assert cue["translated"] == originals[index - 1]["translated"], (
+                    "a longer reply must be discarded in favour of the original"
+                )
+
+
+@pytest.mark.unit
+class TestProgressReporting:
+    """Translation is serial and can run for minutes; the UI must not sit frozen."""
+
+    def test_translate_cues_reports_progress_per_chunk(self):
+        client = FakeClient(echo_responder())
+        seen = []
+        cues = make_cues(MAX_CUES_PER_REQUEST * 2 + 5)
+
+        translate_cues(
+            cues, "he", client=client,
+            progress_callback=lambda done, total, message: seen.append((done, total, message)),
+        )
+
+        assert seen, "no progress was reported at all"
+        assert all(total == len(cues) for _done, total, _msg in seen)
+        assert all(0 <= done <= len(cues) for done, _total, _msg in seen)
+        assert [done for done, _t, _m in seen] == sorted(done for done, _t, _m in seen), (
+            "progress went backwards"
+        )
+        assert seen[-1][0] == len(cues), "the final report is not 100%"
+        assert all(isinstance(message, str) and message for _d, _t, message in seen)
+
+    def test_enforce_cps_reports_progress_per_batch(self):
+        client = FakeClient(
+            lambda kwargs, call_no: {
+                "cues": [{"id": i, "t": "קצר."} for i in requested_ids(kwargs["messages"][1]["content"])]
+            }
+        )
+        seen = []
+        enforce_cps(
+            cps_violators(95), client=client,
+            progress_callback=lambda done, total, message: seen.append((done, total, message)),
+        )
+        assert len(seen) >= 3
+        assert seen[-1][0] == seen[-1][1], "the reading-speed pass never reported done"
+
+    def test_no_progress_is_reported_when_nothing_violates(self):
+        """A pass that makes no request should not claim to be working."""
+        client = FakeClient(echo_responder())
+        seen = []
+        enforce_cps(
+            [{"start": 0.0, "end": 5.0, "translated": "שלום."}],
+            client=client,
+            progress_callback=lambda *args: seen.append(args),
+        )
+        assert client.calls == []
+        assert seen == []
+
+    def test_a_broken_callback_never_fails_the_translation(self):
+        """Reporting progress is best-effort; it must not be able to fail a paid job."""
+
+        def exploding(*_args):
+            raise RuntimeError("the UI channel died")
+
+        client = FakeClient(echo_responder())
+        result = translate_cues(make_cues(3), "he", client=client, progress_callback=exploding)
+        assert len(result) == 3
+        assert all(cue["translated"] for cue in result)
+
+    def test_a_broken_callback_never_fails_the_cps_pass(self):
+        def exploding(*_args):
+            raise RuntimeError("the UI channel died")
+
+        client = FakeClient(
+            lambda kwargs, call_no: {
+                "cues": [{"id": i, "t": "קצר."} for i in requested_ids(kwargs["messages"][1]["content"])]
+            }
+        )
+        result = enforce_cps(cps_violators(3), client=client, progress_callback=exploding)
+        assert all(cue["translated"] == "קצר." for cue in result)
+
+    def test_translation_works_with_no_callback_at_all(self):
+        client = FakeClient(echo_responder())
+        assert len(translate_cues(make_cues(3), "he", client=client)) == 3
+        assert len(enforce_cps(cps_violators(3), client=client)) == 3
 
 
 # --------------------------------------------------------------------------------------

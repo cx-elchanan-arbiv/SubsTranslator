@@ -157,6 +157,10 @@ def flags_summary(flags: dict[str, Any]) -> str:
     )
 
 
+#: Keys this module owns and rewrites; everything else on a cue is passed through.
+_NORMALIZED_KEYS = frozenset({"start", "end", "text", "translated_text", "translated"})
+
+
 def _coerce_time(value: Any) -> float:
     try:
         return float(value)
@@ -180,8 +184,15 @@ def normalize_cues(items: Any) -> list[dict[str, Any]]:
     ``translated_text`` would silently discard every v2 translation and burn in the source
     text while reporting success.
 
+    Keys this function does not know about are **carried through untouched**. A stage
+    that starts emitting, say, ``speaker`` or ``confidence`` must not have it silently
+    deleted by the normaliser sitting between it and its consumer; normalising is about
+    agreeing on four keys, not about being an allow-list. ``translated`` is the one
+    exception — it is consumed into ``translated_text`` and dropped, so no downstream
+    code has to know which of the two spellings it is looking at.
+
     Returns:
-        ``[{"start": float, "end": float, "text": str, "translated_text": str}, ...]``
+        ``[{"start": float, "end": float, "text": str, "translated_text": str, ...}, ...]``
         in input order. Entries whose source *and* translated text are both blank are
         dropped (they can only produce an empty subtitle event); everything else is kept
         even if only one of the two is present.
@@ -200,7 +211,8 @@ def normalize_cues(items: Any) -> list[dict[str, Any]]:
                 break
         if not text and not translated:
             continue
-        cues.append(
+        cue = {k: v for k, v in item.items() if k not in _NORMALIZED_KEYS}
+        cue.update(
             {
                 "start": _coerce_time(item.get("start")),
                 "end": _coerce_time(item.get("end")),
@@ -208,4 +220,5 @@ def normalize_cues(items: Any) -> list[dict[str, Any]]:
                 "translated_text": translated,
             }
         )
+        cues.append(cue)
     return cues

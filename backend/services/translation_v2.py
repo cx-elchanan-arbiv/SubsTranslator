@@ -62,6 +62,17 @@ DEFAULT_MODEL = "gpt-4o"
 #: One request per scene while it fits — whole-scene context is the main quality lever.
 MAX_CUES_PER_REQUEST = 40
 
+#: Cues per condensation request. The CPS pass has no cross-cue context to protect
+#: (each cue is shortened on its own), so the only thing the batch size controls is
+#: whether the reply fits in the completion budget. An unbounded batch on a long
+#: video is a truncated JSON reply, i.e. the whole pass silently lost.
+MAX_CUES_PER_CPS_REQUEST = 40
+
+#: Output budget per condensation request. Every reply cue is by construction
+#: SHORTER than its input, which is capped at DEFAULT_MAX_CHARS_PER_CUE; ~64 tokens
+#: per cue is a generous ceiling for that plus the JSON scaffolding.
+CPS_TOKENS_PER_CUE = 64
+
 #: Read-only cues added on each side of a chunk so context is never cut mid-thought.
 OVERLAP_CUES = 3
 
@@ -474,7 +485,12 @@ def _parse_cue_map(content: str) -> dict:
     return out
 
 
-def _request_cue_map(client, model: str, system: str, user: str, usage: TokenUsage) -> dict:
+def _request_cue_map(
+    client, model: str, system: str, user: str, usage: TokenUsage, max_tokens=None
+) -> dict:
+    kwargs = {}
+    if max_tokens:
+        kwargs["max_tokens"] = int(max_tokens)
     response = client.chat.completions.create(
         model=model,
         temperature=TEMPERATURE,
@@ -484,6 +500,7 @@ def _request_cue_map(client, model: str, system: str, user: str, usage: TokenUsa
             {"role": "user", "content": user},
         ],
         timeout=DEFAULT_TIMEOUT_S,
+        **kwargs,
     )
     _record_usage(usage, response, model)
     return _parse_cue_map(_extract_content(response))
@@ -502,6 +519,7 @@ def translate_cues(
     model=DEFAULT_MODEL,
     client=None,
     context_note=None,
+    progress_callback=None,
 ):
     """
     Translate subtitle cues with whole-scene context.
@@ -519,6 +537,11 @@ def translate_cues(
         context_note: optional one-line scene description injected into the system
             prompt, e.g. "An interview between host X and guest Y." Measurably improves
             register and speaker consistency.
+        progress_callback: called as ``(done, total, message)`` after each chunk.
+            Translation is serial and can be minutes long on a feature-length video,
+            so without this the UI sits on one frozen step for the whole pass.
+            Exceptions raised by the callback are logged and swallowed — reporting
+            progress must never be able to fail a translation.
 
     Returns:
         :class:`TranslationResult` — a ``list[dict]`` of cue copies each with an added
@@ -568,10 +591,19 @@ def translate_cues(
     client = _resolve_client(client)
 
     total = len(out)
-    for chunk_start, chunk_end in _chunk_bounds(total):
+    bounds = _chunk_bounds(total)
+    for chunk_index, (chunk_start, chunk_end) in enumerate(bounds):
         target_ids = [i for i in range(chunk_start + 1, chunk_end + 1) if i in texts]
         if not target_ids:
             continue
+
+        _report(
+            progress_callback,
+            chunk_start,
+            total,
+            f"Translating cues {chunk_start + 1}-{chunk_end} of {total} "
+            f"(chunk {chunk_index + 1}/{len(bounds)})",
+        )
 
         context_ids = [
             i
@@ -638,6 +670,13 @@ def translate_cues(
         for cue_id, text in translated.items():
             out[cue_id - 1]["translated"] = text
 
+        _report(
+            progress_callback,
+            chunk_end,
+            total,
+            f"Translated {chunk_end} of {total} cues",
+        )
+
     logger.info(
         "translation_v2: translated %d cues -> %s (style=%s, model=%s) | "
         "tokens in=%d out=%d requests=%d cost=$%.4f",
@@ -661,6 +700,16 @@ def _chunk_bounds(total: int):
         (start, min(start + MAX_CUES_PER_REQUEST, total))
         for start in range(0, total, MAX_CUES_PER_REQUEST)
     ]
+
+
+def _report(callback, done: int, total: int, message: str) -> None:
+    """Best-effort progress notification. A broken callback never fails a job."""
+    if not callback:
+        return
+    try:
+        callback(done, total, message)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("translation_v2: progress callback raised %s", exc)
 
 
 # --------------------------------------------------------------------------------------
@@ -690,6 +739,7 @@ def enforce_cps(
     max_chars_per_cue=DEFAULT_MAX_CHARS_PER_CUE,
     model=DEFAULT_MODEL,
     client=None,
+    progress_callback=None,
 ):
     """
     Optional pass: condense cues that break the reading-speed budget.
@@ -698,14 +748,17 @@ def enforce_cps(
     characters per cue (2 lines x 42). Per cue the effective budget is
     ``min(max_chars_per_cue, floor(max_cps * duration))``.
 
-    Exactly ONE batched request is made, containing only the violating cues (there is
-    no loop and no second pass). If a returned cue still breaks its budget, the shorter
+    Only the violating cues are sent, in batches of at most
+    :data:`MAX_CUES_PER_CPS_REQUEST`, each with an explicit ``max_tokens`` ceiling.
+    There is no second pass: if a returned cue still breaks its budget, the shorter
     of {model output, original} is kept and a warning is logged — this pass improves
-    readability but never blocks delivery, and never changes a compliant cue.
+    readability but never blocks delivery, and never changes a compliant cue. A
+    failed batch leaves that batch's cues untouched and does not abort the rest.
 
     Args:
         cues: cue dicts with ``start``, ``end`` and ``translated`` (as produced by
             :func:`translate_cues`). Not mutated; copies are returned.
+        progress_callback: ``(done, total, message)``, called per batch. Best effort.
 
     Returns:
         :class:`TranslationResult` (``list[dict]``) with a ``.usage`` attribute.
@@ -746,46 +799,73 @@ def enforce_cps(
         violators,
     )
 
-    lines = [
-        f"{cue_id}. (max {budgets[cue_id]} chars) {out[cue_id - 1]['translated'].strip()}"
-        for cue_id in violators
-    ]
-    user = (
-        f"Shorten these {len(violators)} subtitle cues so each fits its character "
-        "limit, keeping the same language, meaning and punctuation:\n\n"
-        + "\n".join(lines)
-    )
-
     client = _resolve_client(client)
-    try:
-        shortened = _request_cue_map(client, model, _CPS_SYSTEM_PROMPT, user, usage)
-    except TranslationV2Error as exc:
-        # Cosmetic pass: a failure here must not fail the job.
-        logger.warning("translation_v2.enforce_cps: condensation request failed: %s", exc)
-        return TranslationResult(out, usage)
+    batches = [
+        violators[i: i + MAX_CUES_PER_CPS_REQUEST]
+        for i in range(0, len(violators), MAX_CUES_PER_CPS_REQUEST)
+    ]
+    for batch_index, batch in enumerate(batches):
+        _report(
+            progress_callback,
+            batch_index * MAX_CUES_PER_CPS_REQUEST,
+            len(violators),
+            f"Condensing over-long cues (batch {batch_index + 1}/{len(batches)})",
+        )
+        lines = [
+            f"{cue_id}. (max {budgets[cue_id]} chars) "
+            f"{out[cue_id - 1]['translated'].strip()}"
+            for cue_id in batch
+        ]
+        user = (
+            f"Shorten these {len(batch)} subtitle cues so each fits its character "
+            "limit, keeping the same language, meaning and punctuation:\n\n"
+            + "\n".join(lines)
+        )
+        try:
+            shortened = _request_cue_map(
+                client,
+                model,
+                _CPS_SYSTEM_PROMPT,
+                user,
+                usage,
+                max_tokens=len(batch) * CPS_TOKENS_PER_CUE,
+            )
+        except TranslationV2Error as exc:
+            # Cosmetic pass: a failure here must not fail the job, and must not
+            # cost the batches that would have succeeded.
+            logger.warning(
+                "translation_v2.enforce_cps: condensation batch %d/%d failed: %s",
+                batch_index + 1,
+                len(batches),
+                exc,
+            )
+            continue
 
-    for cue_id in violators:
-        original = out[cue_id - 1]["translated"].strip()
-        candidate = shortened.get(cue_id)
-        if not candidate:
-            logger.warning(
-                "translation_v2.enforce_cps: no replacement for cue %d — keeping original",
-                cue_id,
-            )
-            continue
-        if len(candidate) > budgets[cue_id]:
-            keep = candidate if len(candidate) < len(original) else original
-            logger.warning(
-                "translation_v2.enforce_cps: cue %d still over budget "
-                "(%d chars > %d) — keeping the shorter version (%d chars)",
-                cue_id,
-                len(candidate),
-                budgets[cue_id],
-                len(keep),
-            )
-            out[cue_id - 1]["translated"] = keep
-            continue
-        out[cue_id - 1]["translated"] = candidate
+        for cue_id in batch:
+            original = out[cue_id - 1]["translated"].strip()
+            candidate = shortened.get(cue_id)
+            if not candidate:
+                logger.warning(
+                    "translation_v2.enforce_cps: no replacement for cue %d — "
+                    "keeping original",
+                    cue_id,
+                )
+                continue
+            if len(candidate) > budgets[cue_id]:
+                keep = candidate if len(candidate) < len(original) else original
+                logger.warning(
+                    "translation_v2.enforce_cps: cue %d still over budget "
+                    "(%d chars > %d) — keeping the shorter version (%d chars)",
+                    cue_id,
+                    len(candidate),
+                    budgets[cue_id],
+                    len(keep),
+                )
+                out[cue_id - 1]["translated"] = keep
+                continue
+            out[cue_id - 1]["translated"] = candidate
+
+    _report(progress_callback, len(violators), len(violators), "Reading-speed pass done")
 
     logger.info(
         "translation_v2.enforce_cps: done | tokens in=%d out=%d cost=$%.4f",

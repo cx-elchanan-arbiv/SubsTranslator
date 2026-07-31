@@ -14,8 +14,13 @@ from logging_config import (
     log_task_error,
     log_task_start,
 )
-from services.subtitle_engine import words_to_cues
-from services.subtitle_pipeline import flags_summary, normalize_cues, resolve_flags
+from services.subtitle_engine import reflow_dangling_connectors, words_to_cues
+from services.subtitle_pipeline import (
+    any_enabled,
+    flags_summary,
+    normalize_cues,
+    resolve_flags,
+)
 from services.subtitle_service import subtitle_service
 from services.stats_service import save_video_stats
 from services.transcription_service import (
@@ -24,7 +29,7 @@ from services.transcription_service import (
     transcribe_with_words,
     translate_segments,
 )
-from services.translation_v2 import enforce_cps, translate_cues
+from services.translation_v2 import cps_report, enforce_cps, translate_cues
 from utils.file_utils import clean_filename
 
 from .progress_manager import ProgressManager
@@ -34,6 +39,20 @@ config = get_config()
 logger = get_logger(__name__)
 
 DOWNLOADS_FOLDER = config.DOWNLOADS_FOLDER
+
+
+class TranslationFailedWithSalvage(Exception):
+    """Translation failed, but the source-language SRT was already written to disk.
+
+    The job still FAILS — substituting the untranslated source for a translation and
+    calling it a success is the one thing this pipeline must never do. This exception
+    only carries the name of the file that survived, so the failure payload can offer
+    it instead of leaving the user with nothing after a long transcription.
+    """
+
+    def __init__(self, message: str, original_srt: str):
+        super().__init__(message)
+        self.original_srt = original_srt
 
 
 @celery_app.task(bind=True)
@@ -170,6 +189,11 @@ def process_video_task(
         )
         logger.info(f"Subtitle quality flags [task={task_id}]: {flags_summary(flags)}")
 
+        # Experiment read-outs. Only the translation_v2 path can fill these in; every
+        # other path leaves the honest zero rather than an invented number.
+        translation_usage_totals = {"tokens": 0, "cost_usd": 0.0}
+        cps_over_budget = 0
+
         wants_translation = bool(target_lang and target_lang != "auto")
 
         # Gemini transcription returns no word timestamps, so spotting cannot run on it.
@@ -226,6 +250,21 @@ def process_video_task(
                 cues = whisper_segments
             segments = normalize_cues(cues)
 
+            # Salvage anchor: the SOURCE subtitles are on disk before a single
+            # translation token is spent. Translation failing is still a visible job
+            # failure (never a silent English substitution), but the user gets back a
+            # usable transcript instead of nothing after a long transcription.
+            progress_manager.log("Writing source subtitles...", step_index=3)
+            original_srt_path = subtitle_service.create_srt_file(
+                segments,
+                os.path.join(DOWNLOADS_FOLDER, f"{base_name}_original.srt"),
+                use_translation=False,
+            )
+            logger.info(
+                f"v2: source SRT written before translation: "
+                f"{os.path.basename(original_srt_path)}"
+            )
+
             progress_manager.set_step_status(3, "in_progress")
             if wants_translation:
                 translate_start = time.time()
@@ -235,13 +274,50 @@ def process_video_task(
                         f"(style={flags['translation_style']})...",
                         step_index=3,
                     )
-                    translated = translate_cues(
-                        segments, target_lang, style=flags["translation_style"]
+
+                    def translation_progress(done, total, message):
+                        percent = int(done * 100 / total) if total else 0
+                        progress_manager.set_step_progress(3, percent, message=message)
+                        progress_manager.log(message, step_index=3)
+
+                    try:
+                        translated = translate_cues(
+                            segments,
+                            target_lang,
+                            style=flags["translation_style"],
+                            progress_callback=translation_progress,
+                        )
+                        translation_usage = translated.usage
+                        logger.info(f"translation_v2 usage: {translation_usage.as_dict()}")
+                        condensed = enforce_cps(
+                            translated, progress_callback=translation_progress
+                        )
+                        logger.info(
+                            f"translation_v2 enforce_cps usage: {condensed.usage.as_dict()}"
+                        )
+                        translation_usage_totals = {
+                            "tokens": translation_usage.total_tokens
+                            + condensed.usage.total_tokens,
+                            "cost_usd": translation_usage.cost_usd
+                            + condensed.usage.cost_usd,
+                        }
+                        segments = normalize_cues(condensed)
+                        segments = reflow_dangling_connectors(segments)
+                    except Exception as exc:
+                        # FAIL VISIBLY — but tell the caller which file survived.
+                        logger.error(
+                            f"translation_v2 failed after the source SRT was written: {exc}"
+                        )
+                        raise TranslationFailedWithSalvage(
+                            str(exc), os.path.basename(original_srt_path)
+                        ) from exc
+
+                    over_budget = [c for c in cps_report(segments) if not c["ok"]]
+                    cps_over_budget = len(over_budget)
+                    logger.info(
+                        f"translation_v2 reading speed: {cps_over_budget}/"
+                        f"{len(segments)} cues still over 17 CPS / 84 chars"
                     )
-                    logger.info(f"translation_v2 usage: {translated.usage.as_dict()}")
-                    condensed = enforce_cps(translated)
-                    logger.info(f"translation_v2 enforce_cps usage: {condensed.usage.as_dict()}")
-                    segments = normalize_cues(condensed)
                 else:
                     progress_manager.log("Translating cues...", step_index=3)
                     segments = normalize_cues(
@@ -320,6 +396,9 @@ def process_video_task(
 
         progress_manager.set_step_status(4, "in_progress")
         progress_manager.log("Creating subtitle files...", step_index=4)
+        # Rewritten unconditionally: the v2 branch already wrote this file before
+        # translation as a salvage anchor, and `segments` may have been reflowed
+        # since. Same path, same content for the source text.
         original_srt_path = subtitle_service.create_srt_file(
             segments,
             os.path.join(DOWNLOADS_FOLDER, f"{base_name}_original.srt"),
@@ -335,6 +414,11 @@ def process_video_task(
 
         final_video_path = None
         progress_manager.set_step_status(5, "in_progress")
+        progress_manager.log(
+            f"Rendering {len(segments)} cues into the video "
+            f"({'ASS/render_v2' if flags['render_v2'] else 'SRT/legacy'})...",
+            step_index=5,
+        )
         if auto_create_video:
             video_creation_start = time.time()
             video_with_subtitles_path = os.path.join(
@@ -518,6 +602,13 @@ def process_video_task(
             final_result["video_metadata"] = processing_info.get("video_metadata") or processing_info.get("file_metadata", {})
             final_result["user_choices"] = processing_info.get("user_choices", {})
 
+        # The four subtitle-quality toggles are part of what the user chose, and the
+        # experiment they belong to is only measurable if each result says which
+        # settings produced it. Reported from the RESOLVED flags, not the raw kwargs,
+        # so e.g. the gemini/spotting_v2 fallback is visible here too.
+        final_result.setdefault("user_choices", {})
+        final_result["user_choices"] = {**final_result["user_choices"], **flags}
+
         # Structured logging for task completion
         duration = time.time() - start_time
         log_task_complete(
@@ -573,12 +664,25 @@ def process_video_task(
                 "transcription_speed_ratio": round(transcription_speed_ratio, 2),
                 "translation_service": translation_service,
                 "translation_duration": round(translation_duration, 2),
-                "translation_tokens": 0,  # Not tracked yet
-                "translation_cost_usd": 0.0,  # Not tracked yet
+                # Real numbers on the translation_v2 path (TokenUsage is accumulated
+                # across translate_cues + enforce_cps). The legacy translators do not
+                # report usage at all, so those runs still record zero rather than a
+                # made-up figure.
+                "translation_tokens": translation_usage_totals["tokens"],
+                "translation_cost_usd": round(translation_usage_totals["cost_usd"], 6),
                 "embedding_duration": round(embedding_duration, 2),
                 "total_duration": round(duration, 2),
                 "status": "success",
                 "error_message": None,
+                # The experiment's independent variables + one quality read-out, so a
+                # run can be attributed to the settings that produced it.
+                "spotting_v2": flags["spotting_v2"],
+                "translation_v2": flags["translation_v2"],
+                "translation_style": flags["translation_style"],
+                "render_v2": flags["render_v2"],
+                "subtitle_pipeline_v2": any_enabled(flags),
+                "cues": len(segments),
+                "cps_over_budget": cps_over_budget,
             }
 
             # Save to Redis
@@ -602,7 +706,17 @@ def process_video_task(
             if step["status"] == "in_progress":
                 progress_manager.set_step_error(i, str(e))
                 break
-        return {"status": "FAILURE", "error": str(e)}
+
+        failure = {"status": "FAILURE", "error": str(e)}
+        if isinstance(e, TranslationFailedWithSalvage):
+            # Still a failure — but the transcription was expensive and its output
+            # is already on disk, so hand it over instead of throwing it away.
+            failure["files"] = {"original_srt": e.original_srt}
+            failure["salvaged"] = True
+            logger.info(
+                f"Translation failed; offering salvaged source SRT {e.original_srt}"
+            )
+        return failure
 
 
 @celery_app.task(bind=True)

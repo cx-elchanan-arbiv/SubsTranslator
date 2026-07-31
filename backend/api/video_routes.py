@@ -138,7 +138,10 @@ def upload_file_async():
                 "code": probe_error
             }), 400
 
-        # Prepare processing_info with user choices and file metadata
+        # Prepare processing_info with user choices and file metadata.
+        # The four subtitle-quality toggles are user choices like any other: without
+        # them in this dict, a completed job cannot be attributed to the settings that
+        # produced it, which is the whole point of the experiment.
         processing_info = {
             "file_metadata": file_metadata,
             "user_choices": {
@@ -147,6 +150,7 @@ def upload_file_async():
                 "auto_create_video": auto_create_video,
                 "whisper_model": whisper_model,
                 "translation_service": translation_service,
+                **subtitle_flags,
             },
         }
 
@@ -178,6 +182,7 @@ def upload_file_async():
                         "auto_create_video": auto_create_video,
                         "whisper_model": whisper_model,
                         "translation_service": translation_service,
+                        **subtitle_flags,
                     },
                     "initial_request": {"filename": filename, "type": "upload"},
                     "file_metadata": file_metadata,
@@ -308,6 +313,7 @@ def process_youtube_async():
                         "whisper_model": whisper_model,
                         "translation_service": translation_service,
                         "url": url,
+                        **subtitle_flags,
                     },
                     "initial_request": {},
                     "video_metadata": None,
