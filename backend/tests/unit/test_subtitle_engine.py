@@ -681,3 +681,325 @@ class TestReflowDanglingConnectors:
 
     def test_empty_input(self):
         assert reflow_dangling_connectors([]) == []
+
+
+# =============================================================================
+# P5 — geresh (U+05F3) in foreign names and loanwords
+# =============================================================================
+@pytest.mark.unit
+class TestGeresh:
+    """The v2 path shipped ג'ורג' with an ASCII apostrophe; the legacy path did not.
+
+    The regression is narrow but it is a typography error on every transliterated name,
+    which on news content is most proper nouns in the clip.
+    """
+
+    def test_between_two_hebrew_letters(self):
+        from services.subtitle_engine import GERESH, geresh
+
+        assert geresh("ג'ז") == f"ג{GERESH}ז"
+
+    def test_word_final_apostrophe_also_converts(self):
+        """The whole point: ג'ורג' has a WORD-FINAL geresh a between-letters rule misses."""
+        from services.subtitle_engine import GERESH, geresh
+
+        assert geresh("ג'ורג'") == f"ג{GERESH}ורג{GERESH}"
+
+    def test_curly_apostrophe_converts_too(self):
+        """GPT-4o emits U+2019 interchangeably with ASCII '."""
+        from services.subtitle_engine import GERESH, geresh
+
+        assert geresh("צ’ארלס") == f"צ{GERESH}ארלס"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "don't",
+            "it's",
+            "Charles' car",
+            "he said 'hello' loudly",
+            "O'Brien",
+        ],
+    )
+    def test_english_apostrophes_are_never_touched(self, text):
+        from services.subtitle_engine import geresh
+
+        assert geresh(text) == text
+
+    def test_mixed_line_converts_only_the_hebrew_side(self):
+        from services.subtitle_engine import GERESH, geresh
+
+        out = geresh("ג'ורג' said don't")
+        assert out == f"ג{GERESH}ורג{GERESH} said don't"
+
+    @pytest.mark.parametrize("text", ["שלום'", "'דבר'", "המקור'"])
+    def test_other_hebrew_letters_keep_their_quote(self, text):
+        """ר/ם/ו are common word-final letters; converting after them would rewrite
+        every closing single quote in Hebrew. Only ג/ז/צ/ץ are in scope."""
+        from services.subtitle_engine import geresh
+
+        assert geresh(text) == text
+
+    def test_empty_and_none(self):
+        from services.subtitle_engine import geresh
+
+        assert geresh("") == ""
+        assert geresh(None) is None
+
+    def test_hebrew_typography_applies_both_marks(self):
+        from services.subtitle_engine import GERESH, GERSHAYIM, hebrew_typography
+
+        out = hebrew_typography('צה"ל ו-ג\'ורג\'')
+        assert f"צה{GERSHAYIM}ל" in out
+        assert f"ג{GERESH}ורג{GERESH}" in out
+
+    def test_build_ass_emits_geresh_not_ascii(self):
+        """The renderer is the layer the user actually sees; assert at that boundary."""
+        from services.subtitle_engine import GERESH, build_ass
+
+        out = build_ass(
+            [{"start": 0.0, "end": 3.0, "text": "ג'ורג' הגיע"}],
+            video_w=1280,
+            video_h=720,
+        )
+        body = "\n".join(l for l in out.splitlines() if l.startswith("Dialogue:"))
+        assert GERESH in body
+        assert "'" not in body
+
+
+# =============================================================================
+# P4 — hallucination gate
+# =============================================================================
+@pytest.mark.unit
+class TestDropHallucinatedCues:
+    """Physically-unspeakable source cues are ASR inventions, not speech."""
+
+    @staticmethod
+    def _cue(text, start, end):
+        return {"start": start, "end": end, "text": text}
+
+    def test_normal_speech_is_kept(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cues = [self._cue("This is a perfectly ordinary subtitle cue.", 0.0, 3.0)]
+        kept, dropped = drop_hallucinated_cues(cues)
+        assert kept == cues and dropped == []
+
+    def test_impossible_density_is_dropped(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        # 57 characters in 0.26s = 219 CPS — a real fabricated Trump line.
+        text = "I was killed by a police officer in Butler, Pennsylvania."
+        kept, dropped = drop_hallucinated_cues([self._cue(text, 59.06, 59.32)])
+        assert kept == []
+        assert len(dropped) == 1
+        assert dropped[0]["cps"] > 200
+        assert "35" in dropped[0]["drop_reason"]
+
+    def test_boundary_exactly_at_threshold_is_kept(self):
+        """Strictly-greater-than, so a cue measuring exactly the limit survives."""
+        from services.subtitle_engine import MAX_SOURCE_CPS, drop_hallucinated_cues
+
+        text = "x" * 35
+        kept, dropped = drop_hallucinated_cues([self._cue(text, 0.0, 1.0)])
+        assert len(text) / 1.0 == MAX_SOURCE_CPS
+        assert len(kept) == 1 and dropped == []
+
+    def test_boundary_just_over_threshold_is_dropped(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        kept, dropped = drop_hallucinated_cues([self._cue("x" * 36, 0.0, 1.0)])
+        assert kept == [] and len(dropped) == 1
+
+    def test_the_real_48_and_50_cps_incidents_are_caught(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cues = [
+            self._cue("x" * 48, 0.0, 1.0),   # 48 CPS
+            self._cue("x" * 100, 5.0, 7.0),  # 50 CPS
+        ]
+        kept, dropped = drop_hallucinated_cues(cues)
+        assert kept == [] and len(dropped) == 2
+
+    def test_zero_duration_cue_is_kept_not_dropped(self):
+        """Infinite CPS by arithmetic says nothing about whether the text is real."""
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        kept, dropped = drop_hallucinated_cues([self._cue("Hello.", 4.0, 4.0)])
+        assert len(kept) == 1 and dropped == []
+
+    def test_blank_and_malformed_cues_are_kept(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cues = [self._cue("", 0.0, 1.0), {"start": "x", "end": None, "text": "hi"}]
+        kept, dropped = drop_hallucinated_cues(cues)
+        assert len(kept) == 2 and dropped == []
+
+    def test_order_and_identity_are_preserved(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        good_a = self._cue("First real line.", 0.0, 2.0)
+        bad = self._cue("y" * 90, 2.0, 2.5)
+        good_b = self._cue("Second real line.", 3.0, 5.0)
+        kept, dropped = drop_hallucinated_cues([good_a, bad, good_b])
+        assert kept == [good_a, good_b]
+        assert kept[0] is good_a and kept[1] is good_b  # not copies
+        assert dropped[0]["text"] == bad["text"]
+        assert bad == {"start": 2.0, "end": 2.5, "text": "y" * 90}  # not mutated
+
+    def test_custom_key_and_threshold(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cues = [{"start": 0.0, "end": 1.0, "translated_text": "x" * 20}]
+        kept, dropped = drop_hallucinated_cues(cues, key="translated_text", max_cps=10)
+        assert kept == [] and len(dropped) == 1
+
+    def test_empty_input(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        assert drop_hallucinated_cues([]) == ([], [])
+        assert drop_hallucinated_cues(None) == ([], [])
+
+    def test_logs_the_offending_text(self, caplog):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        with caplog.at_level("WARNING"):
+            drop_hallucinated_cues([self._cue("z" * 90, 0.0, 1.0)])
+        assert "hallucination gate" in caplog.text
+        assert "zzz" in caplog.text
+
+
+# =============================================================================
+# P3 — MIN_CUE_DUR is a floor, not an aspiration
+# =============================================================================
+@pytest.mark.unit
+class TestMinDurationFloor:
+    """Cues of 0.72s / 0.96s / 1.06s shipped from a real job against a 1.2s floor.
+
+    Step 4's anti-overlap clamp could push a cue below ``min_dur`` after the lead-out
+    pass had granted it. The fix merges instead of shortening.
+    """
+
+    #: Rounding to milliseconds can cost ~1ms; nothing else may.
+    TOL = 2e-3
+
+    def test_crowded_cues_are_merged_not_shortened(self):
+        """Two sentences 0.8s apart: the first cannot reach 1.2s, so they become one."""
+        words = [
+            {"s": 0.0, "e": 0.3, "w": "Hello"},
+            {"s": 0.3, "e": 0.7, "w": "there."},
+            {"s": 0.8, "e": 1.1, "w": "Good"},
+            {"s": 1.1, "e": 1.5, "w": "morning."},
+        ]
+        cues = words_to_cues(words)
+        for cue in cues:
+            assert cue["end"] - cue["start"] >= MIN_CUE_DUR - self.TOL, cue
+
+    def test_no_cue_below_the_floor_on_the_real_fixture(self, sample_cues):
+        for cue in sample_cues:
+            assert cue["end"] - cue["start"] >= MIN_CUE_DUR - self.TOL, cue
+
+    def test_property_no_short_cues_across_many_random_transcripts(self, caplog):
+        """Property test: over 200 pseudo-random transcripts, every emitted cue meets
+        the floor unless the engine WARNED that it could not merge it."""
+        import random
+
+        vocabulary = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"]
+        violations = []
+        for seed in range(200):
+            rng = random.Random(seed)
+            words, t = [], 0.0
+            for i in range(rng.randint(2, 40)):
+                dur = rng.uniform(0.05, 0.6)
+                word = rng.choice(vocabulary)
+                if rng.random() < 0.3:
+                    word += rng.choice([".", "?", "!", ","])
+                words.append({"s": round(t, 3), "e": round(t + dur, 3), "w": word})
+                t += dur + rng.uniform(0.0, 0.9)
+
+            caplog.clear()
+            with caplog.at_level("WARNING"):
+                cues = words_to_cues(words)
+            compromised = "cannot be merged" in caplog.text
+            for cue in cues:
+                if cue["end"] - cue["start"] < MIN_CUE_DUR - self.TOL and not compromised:
+                    violations.append((seed, cue))
+        assert not violations, f"{len(violations)} sub-floor cues, e.g. {violations[:3]}"
+
+    def test_impossible_merge_keeps_the_compromise_and_warns(self, caplog):
+        """When the character budget forbids the merge, the short cue ships — loudly."""
+        long_a = " ".join(["word"] * 12) + "."
+        long_b = " ".join(["other"] * 12) + "."
+        words = []
+        t = 0.0
+        for token in long_a.split():
+            words.append({"s": round(t, 3), "e": round(t + 0.02, 3), "w": token})
+            t += 0.03
+        t = 0.5
+        for token in long_b.split():
+            words.append({"s": round(t, 3), "e": round(t + 0.02, 3), "w": token})
+            t += 0.03
+
+        with caplog.at_level("WARNING"):
+            cues = words_to_cues(words)
+        short = [c for c in cues if c["end"] - c["start"] < MIN_CUE_DUR - self.TOL]
+        if short:
+            assert "cannot be merged" in caplog.text
+
+    def test_single_short_utterance_still_gets_its_floor(self):
+        """The last cue always has dead air ahead of it, so it is never the exception."""
+        cues = words_to_cues([{"s": 0.0, "e": 0.2, "w": "Hi."}])
+        assert len(cues) == 1
+        assert cues[0]["end"] - cues[0]["start"] >= MIN_CUE_DUR - self.TOL
+
+    def test_cues_never_overlap_after_the_floor_pass(self, sample_cues):
+        for earlier, later in zip(sample_cues, sample_cues[1:]):
+            assert earlier["end"] <= later["start"] + 1e-9
+
+    def test_no_text_is_lost_by_merging(self):
+        words = [
+            {"s": 0.0, "e": 0.3, "w": "Hello"},
+            {"s": 0.3, "e": 0.7, "w": "there."},
+            {"s": 0.8, "e": 1.1, "w": "Good"},
+            {"s": 1.1, "e": 1.5, "w": "morning."},
+        ]
+        cues = words_to_cues(words)
+        joined = " ".join(c["text"] for c in cues).split()
+        assert joined == [w["w"] for w in words]
+
+
+# =============================================================================
+# P1 — the pause fallback reports whether it fired DESPITE priming
+# =============================================================================
+@pytest.mark.unit
+class TestPrimedFallbackLogging:
+    """Priming should make the fallback near-dead. When it still fires, say so."""
+
+    @staticmethod
+    def _unpunctuated():
+        words, t = [], 0.0
+        for i in range(16):
+            words.append({"s": t, "e": t + 0.25, "w": f"word{i}"})
+            t += 0.3
+            if i in (4, 9):
+                t += 0.6
+        return words
+
+    def test_primed_fallback_warns(self, caplog):
+        with caplog.at_level("INFO"):
+            words_to_cues(self._unpunctuated(), asr_primed=True)
+        assert "DESPITE ASR punctuation priming" in caplog.text
+        assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_unprimed_fallback_stays_informational(self, caplog):
+        with caplog.at_level("INFO"):
+            words_to_cues(self._unpunctuated(), asr_primed=False)
+        assert "DESPITE" not in caplog.text
+        assert "not punctuation-primed" in caplog.text
+        assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_asr_primed_never_changes_the_cues(self):
+        words = self._unpunctuated()
+        assert words_to_cues(words, asr_primed=True) == words_to_cues(
+            words, asr_primed=False
+        )

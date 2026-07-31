@@ -34,6 +34,7 @@ pipeline is untouched.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -140,6 +141,54 @@ def resolve_flags(
         ),
         "render_v2": parse_bool(render_v2, FLAG_DEFAULTS["render_v2"]),
     }
+
+
+def parse_glossary(source: Any) -> dict[str, str]:
+    """Read an optional terminology glossary out of a request/job payload.
+
+    A glossary pins a source term to one exact target rendering. Its first purpose is
+    terminology CONTRAST: a clip whose whole argument is "the language is not called
+    Hebrew, it is called Ivrit" translates into self-contradiction unless the two names
+    are kept apart, because collapsing synonyms is normally the right instinct.
+
+    Accepted shapes, because this value has to survive an HTML form, a JSON body and a
+    Celery round-trip:
+
+    * a real mapping — ``{"Ivrit": "עִברית"}``;
+    * a JSON object as a STRING — ``'{"Ivrit": "עִברית"}'`` (what a form field carries);
+    * ``None``/blank/anything else — ``{}``.
+
+    Never raises. A malformed glossary is a warning and an empty dict, because a broken
+    optional hint must not turn a working job into a failure.
+    """
+    if source is None:
+        return {}
+    if isinstance(source, str):
+        text = source.strip()
+        if not text:
+            return {}
+        try:
+            source = json.loads(text)
+        except (ValueError, TypeError):
+            logger.warning("subtitle_pipeline: glossary is not valid JSON — ignored")
+            return {}
+    if not isinstance(source, dict):
+        logger.warning(
+            "subtitle_pipeline: glossary must be an object, got %s — ignored",
+            type(source).__name__,
+        )
+        return {}
+
+    glossary: dict[str, str] = {}
+    for key, value in source.items():
+        if key is None or value is None:
+            continue
+        term, rendering = str(key).strip(), str(value).strip()
+        if term and rendering:
+            glossary[term] = rendering
+    if glossary:
+        logger.info("subtitle_pipeline: glossary with %d term(s)", len(glossary))
+    return glossary
 
 
 def any_enabled(flags: dict[str, Any]) -> bool:

@@ -24,6 +24,8 @@ volume that survives rebuilds:
         llm/NN_user.txt
         llm/NN_response.json       the raw response object, not our parse of it
         llm/NN_meta.json           model, tokens, latency, error
+        dropped_cues.json          cues the pipeline REFUSED to ship, with the reason
+                                   (absent when nothing was dropped)
         outputs/                   copies of the SRTs, the .ass and the final MP4
     <RESEARCH_DIR>/index.jsonl     one line per run, for cheap scanning
 
@@ -259,6 +261,28 @@ class ResearchRecorder:
         cues = [dict(cue) for cue in (cues or [])]
         self._write_json(f"cues_{stage}.json", cues)
         self._meta.setdefault("cue_counts", {})[str(stage)] = len(cues)
+
+    @_guard
+    def save_dropped_cues(self, cues: Any, *, reason: str = "hallucination") -> None:
+        """Archive cues the pipeline REMOVED, and why.
+
+        Kept separate from ``cues_*.json`` on purpose. Those files answer "what did the
+        pipeline produce"; this one answers "what did it decide not to produce", which no
+        other artefact in the archive records — a dropped cue leaves no trace in the
+        SRTs, the .ass or the video. It is also the only way to audit the hallucination
+        gate's false-positive rate after the fact: every cue it ever rejected, with the
+        measurement that convicted it, is here.
+
+        Writes nothing when the run dropped nothing, so an archive with no
+        ``dropped_cues.json`` means exactly "nothing was dropped" rather than "possibly
+        not recorded".
+        """
+        cues = [dict(cue) for cue in (cues or [])]
+        if not cues:
+            return
+        self._write_json("dropped_cues.json", {"reason": str(reason), "cues": cues})
+        self._meta["dropped_cues_count"] = len(cues)
+        self._meta["dropped_cues_reason"] = str(reason)
 
     @_guard
     def record_llm(

@@ -28,6 +28,100 @@ config = get_config()
 logger = get_logger(__name__)
 
 
+# =============================================================================
+# ASR punctuation priming (v2 path only)
+# =============================================================================
+#: Text handed to Whisper as ``initial_prompt`` on the v2 transcription path.
+#:
+#: The failure it fixes
+#: --------------------
+#: ``large-v3`` intermittently falls into an **unpunctuated-lowercase attractor**: it
+#: emits a whole clip as one run-on lowercase stream with not a single ``.``, ``,`` or
+#: capital letter. Everything downstream is built on sentences — ``words_to_cues``
+#: splits on terminal punctuation, the translator is asked to preserve it — so when the
+#: attractor hits, the v2 pipeline produces broken cues on ~3/4 of the clip.
+#:
+#: A 7-way ablation on a known-bad clip (beam size 2 vs 5, VAD on/off, int8 vs float32,
+#: ``chunk_length`` present/absent, ``condition_on_previous_text`` on/off, priming
+#: on/off) showed beam size, VAD, compute type and chunking change **nothing**:
+#: 0 terminals in every one of them. Only two levers moved it, and priming moved it
+#: furthest — 0 -> 13 terminals, 0 -> 18 capitals — while also recovering casing on
+#: acronyms (ICC, IDF) and correcting a real mistranscription.
+#:
+#: Why a *transcript excerpt* and not an instruction
+#: ------------------------------------------------
+#: ``initial_prompt`` is **not** a system prompt. faster-whisper feeds it to the decoder
+#: as the tokens *preceding* the audio, so the model continues in whatever style it
+#: establishes. Telling it "use punctuation" would be text to imitate, not an order to
+#: obey. So this is written as a fragment of a punctuated transcript.
+#:
+#: What it deliberately does and does not contain
+#: ---------------------------------------------
+#: * ``.`` ``,`` and ``?`` plus sentence-initial capitals — exactly the tokens the
+#:   attractor suppresses.
+#: * Spoken filler ("Well", "I mean"). Load-bearing, not decoration: a clean *written*
+#:   primer tidies the transcript, and ``style="faithful"`` only has filler to keep if
+#:   the ASR emitted it in the first place. Priming in the register actually being
+#:   transcribed — speech — is what keeps the word count honest.
+#: * **No topic, no domain, no named entity.** A primer naming "television interview",
+#:   "news" or any proper noun biases what the model hears in unclear audio.
+#: * Short. It costs prompt tokens on every window and the ceiling is 224 tokens.
+#:
+#: What it must NOT contain, learned the hard way
+#: ---------------------------------------------
+#: **No short emphatic sentences.** The first draft ended "Really? Yes, really!" and
+#: opened with "Hello." — and on the known-GOOD clip that draft made large-v3 fabricate
+#: a sentence that was never spoken, twice:
+#:
+#:     truth   "...tried to take my life in Butler, Pennsylvania, Thomas generously
+#:              mailed me one of his Purple Hearts."
+#:     output  "...tried to take my life in Butler, Pennsylvania, I was killed by a
+#:              police officer."   +   "I was killed by a police officer in Butler,
+#:                                      Pennsylvania."  (0.26s, 219 CPS)
+#:
+#: Reproduced deterministically, and absent both without a primer and with this one.
+#: The mechanism: ``initial_prompt`` is text to CONTINUE, so short punchy assertions in
+#: it are cheap for the model to imitate with invented content. Removing those two
+#: sentences — changing nothing else — removed the fabrication while keeping the entire
+#: punctuation win. A primer that reads like a stretch of ordinary connected speech
+#: gives the model a STYLE to copy without handing it a SHAPE to fill in.
+#:
+#: Verified across three clips (two known-bad, one known-good) against the unprimed
+#: baseline; see the branch's review notes for the table. Guards that looked promising
+#: and were rejected on evidence: ``hallucination_silence_threshold`` and
+#: ``no_repeat_ngram_size`` changed nothing at all, and ``repetition_penalty=1.1``
+#: suppressed the fabrication only by also thinning real speech.
+ASR_PUNCTUATION_PRIMER = (
+    "So, what do you think about that? Well, I mean, it depends, "
+    "and it is not that simple."
+)
+
+#: Whether the v2 path lets Whisper condition each window on its own previous output.
+#:
+#: This is the *other* lever the ablation moved, and the two interact. Conditioning is
+#: what LOCKS the attractor in: once one window comes out unpunctuated, it is fed back
+#: as context and every later window imitates it. Switching it off alone gave a partial
+#: recovery (0 -> 5 terminals on the known-bad clip); priming alone gave a full one.
+#:
+#: Kept ON, and this is not a preference — with it OFF the primer would be nearly
+#: useless. faster-whisper 1.2.0 builds each window's prompt from
+#: ``all_tokens[prompt_reset_since:]``, and when ``condition_on_previous_text`` is False
+#: it sets ``prompt_reset_since = len(all_tokens)`` after EVERY window. The initial
+#: prompt lives at the head of ``all_tokens``, so from window two onward it has been
+#: reset past: **priming would only ever reach the first 30 seconds.**
+#:
+#: That is not theory. Measured on a 159s clip with the primer and this flag False, the
+#: transcript starts punctuated and correctly cased and then relapses into the attractor
+#: — "far exactly what but", "evrit is writ is" — for the remainder: 49 terminals
+#: against 131 with it True, and mangled words on top. With it True the punctuated style
+#: the primer establishes propagates forward, which is exactly what conditioning is for.
+#:
+#: The cost of True is that errors propagate too; that is what made the FIRST draft of
+#: the primer fabricate a sentence. The answer was to fix the primer (see its docstring),
+#: not to disable the mechanism carrying it.
+ASR_CONDITION_ON_PREVIOUS_TEXT = True
+
+
 def transcribe_and_translate_streamed(
     video_path,
     target_language,
@@ -690,10 +784,14 @@ def transcribe_with_words(
     and translates afterwards in one whole-scene call (see ``translation_v2``) — the
     overlap optimisation is traded for cross-cue context, deliberately.
 
-    Model selection, Whisper options and the progress-callback contract mirror
-    ``transcribe_and_translate_streamed`` exactly, so a v2 job and a legacy job of the
-    same request transcribe identically and any quality difference is attributable to the
-    flags alone.
+    Model selection and the progress-callback contract mirror
+    ``transcribe_and_translate_streamed``. The Whisper options no longer do, in exactly
+    ONE respect: this path passes :data:`ASR_PUNCTUATION_PRIMER` as ``initial_prompt``.
+    That is a deliberate, measured divergence — see the constant's docstring for the
+    ablation — and it is confined to the v2 path so the legacy path stays byte-identical
+    to what shipped. Everything else (model, beam size, chunk length,
+    ``condition_on_previous_text``) is still shared, so a v2/legacy comparison of the
+    same request still isolates the flags plus this one prompt.
 
     Args:
         collect_words: gather per-word timestamps. Whisper is asked for them either way
@@ -702,9 +800,13 @@ def transcribe_with_words(
 
     Returns:
         dict: ``{"segments": [{"start","end","text"}, ...],
-        "words": [{"s","e","w"}, ...], "language": str}``.
+        "words": [{"s","e","w"}, ...], "language": str, "asr_primed": bool}``.
         ``words`` is EMPTY for the Gemini model, which returns no word timing — callers
         that need spotting must fall back to segment-based cues in that case.
+        ``asr_primed`` reports whether punctuation priming was actually applied (false
+        for Gemini and for FAKE mode); ``subtitle_engine.words_to_cues`` takes it so its
+        unpunctuated-ASR fallback can say whether it fired *despite* the primer, which
+        is a materially different (and much more interesting) event.
     """
     logger.info("🚀 === v2 transcription (word timestamps retained) ===")
 
@@ -726,6 +828,7 @@ def transcribe_with_words(
                 {"s": 3.6, "e": 4.0, "w": "test."},
             ] if collect_words else [],
             "language": (source_lang if source_lang != "auto" else "en"),
+            "asr_primed": False,
         }
 
     audio_np, audio_duration = _extract_audio_np(video_path, progress_callback)
@@ -751,6 +854,7 @@ def transcribe_with_words(
             "segments": result.get("segments", []),
             "words": [],
             "language": result.get("language"),
+            "asr_primed": False,  # not Whisper — there is no initial_prompt to give
         }
 
     # === Whisper ===
@@ -771,14 +875,20 @@ def transcribe_with_words(
         "word_timestamps": True,
         "beam_size": 2 if model_name in ["large", "medium"] else 5,
         "chunk_length": 30,
-        "condition_on_previous_text": True,
+        "condition_on_previous_text": ASR_CONDITION_ON_PREVIOUS_TEXT,
+        # The single most consequential line in the v2 pipeline. Without it large-v3
+        # returns some clips entirely unpunctuated and lowercase, and every stage below
+        # (sentence spotting, cue splitting, translation punctuation) is built on
+        # sentences that then do not exist. See ASR_PUNCTUATION_PRIMER.
+        "initial_prompt": ASR_PUNCTUATION_PRIMER,
     }
     if source_lang != "auto":
         options["language"] = source_lang
 
     logger.info(
         f"💾 v2 transcription settings: model={model_name}, beam_size={options['beam_size']}, "
-        f"collect_words={collect_words}"
+        f"collect_words={collect_words}, punctuation_priming=on, "
+        f"condition_on_previous_text={ASR_CONDITION_ON_PREVIOUS_TEXT}"
     )
 
     transcription_start = time.time()
@@ -826,6 +936,29 @@ def transcribe_with_words(
             len(segments),
         )
 
+    # Punctuation health of the transcript we actually got. This is the read-out that
+    # tells a reviewer, from the job log alone, whether the attractor was avoided on
+    # this clip — the numbers the ablation is scored on, measured live on every run.
+    transcript = " ".join(s["text"] for s in segments)
+    terminals = sum(transcript.count(mark) for mark in ".!?")
+    commas = transcript.count(",")
+    capitals = sum(1 for ch in transcript if ch.isupper())
+    logger.info(
+        "📝 v2 ASR punctuation health: %d terminals, %d commas, %d capitals over "
+        "%d chars (priming=on)",
+        terminals,
+        commas,
+        capitals,
+        len(transcript),
+    )
+    if segments and terminals == 0:
+        logger.warning(
+            "⚠️ v2 ASR returned ZERO terminal punctuation across %d segments DESPITE "
+            "punctuation priming — the large-v3 unpunctuated attractor was not escaped "
+            "on this clip; downstream spotting will fall back to speech pauses",
+            len(segments),
+        )
+
     logger.info(
         f"✅ v2 transcription complete: {len(segments)} segments, {len(words)} words "
         f"in {transcription_duration:.1f}s"
@@ -834,7 +967,12 @@ def transcribe_with_words(
     if progress_callback:
         progress_callback(90, "Transcription completed", 90, "Step 1: Processing results", 5)
 
-    return {"segments": segments, "words": words, "language": detected_language}
+    return {
+        "segments": segments,
+        "words": words,
+        "language": detected_language,
+        "asr_primed": True,
+    }
 
 
 def translate_segments(

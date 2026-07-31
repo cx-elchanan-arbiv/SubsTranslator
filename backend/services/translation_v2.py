@@ -61,6 +61,23 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "gpt-4o"
 
 #: One request per scene while it fits — whole-scene context is the main quality lever.
+#:
+#: DO NOT LOWER THIS. It looks like an obvious knob to turn when translation quality
+#: disappoints ("smaller chunks, more attention per cue"), and that intuition was tested
+#: head-to-head on the same clip and is WRONG:
+#:
+#:     chunk 40 (this value)   87% of cues internally punctuated, 100% terminally
+#:     chunk 12                79% internally punctuated,          57% terminally
+#:                             and +18% translation cost
+#:
+#: Smaller chunks lose more than they gain: each request sees less of the conversation,
+#: so pronouns, gender, tense and terminology drift across the seams, and the model
+#: punctuates a fragment less confidently than a scene. The overlap cues
+#: (:data:`OVERLAP_CUES`) soften a seam but do not remove it — the only way not to pay
+#: for a seam is not to create one.
+#:
+#: When punctuation is bad, the cause is almost never here: it is upstream, in the ASR.
+#: See ``transcription_service.ASR_PUNCTUATION_PRIMER``.
 MAX_CUES_PER_REQUEST = 40
 
 #: Cues per condensation request. The CPS pass has no cross-cue context to protect
@@ -90,6 +107,17 @@ DEFAULT_TIMEOUT_S = 120
 
 #: U+05F4 HEBREW PUNCTUATION GERSHAYIM — the correct mark inside Hebrew acronyms.
 GERSHAYIM = "״"
+
+#: U+05F3 HEBREW PUNCTUATION GERESH — the mark that carries foreign phonemes into
+#: Hebrew: ג׳ (j), ז׳ (zh), צ׳/ץ׳ (ch). An ASCII apostrophe in its place is a typography
+#: error, and the v2 path was making it (ג'ורג') where the legacy path did not (ג׳ורג׳).
+GERESH = "׳"
+
+#: Longest glossary the prompt will carry. A glossary is a hard constraint repeated to
+#: the model on every chunk, so it costs input tokens on every request; past a few dozen
+#: entries the cost is real and the model's adherence drops anyway. Overflow is dropped
+#: with a warning rather than silently truncating the user's intent.
+MAX_GLOSSARY_ENTRIES = 40
 
 CONTEXT_MARKER = "[CONTEXT-ONLY]"
 
@@ -221,12 +249,57 @@ def language_name(code: str) -> str:
     return name
 
 
+def normalize_glossary(glossary) -> dict:
+    """
+    Clean a caller-supplied glossary into ``{source term: required translation}``.
+
+    Everything about the input is untrusted — it will eventually come from a UI text
+    box — so non-string keys/values, blanks and pure whitespace are dropped rather than
+    allowed to reach the prompt as ``None`` or ``123``. Entries past
+    :data:`MAX_GLOSSARY_ENTRIES` are dropped with a warning.
+
+    Returns ``{}`` for ``None`` or anything that is not a mapping, so callers can pass
+    the value straight through without checking it first.
+    """
+    if not glossary:
+        return {}
+    if not hasattr(glossary, "items"):
+        logger.warning(
+            "translation_v2: glossary must be a mapping, got %s — ignored",
+            type(glossary).__name__,
+        )
+        return {}
+
+    clean = {}
+    for source, target in glossary.items():
+        if not isinstance(source, str) or not isinstance(target, str):
+            logger.warning(
+                "translation_v2: dropping non-string glossary entry %r -> %r",
+                source,
+                target,
+            )
+            continue
+        source, target = source.strip(), target.strip()
+        if not source or not target:
+            continue
+        if len(clean) >= MAX_GLOSSARY_ENTRIES:
+            logger.warning(
+                "translation_v2: glossary longer than %d entries — dropping %r and the rest",
+                MAX_GLOSSARY_ENTRIES,
+                source,
+            )
+            break
+        clean[source] = target
+    return clean
+
+
 def build_system_prompt(
     target_lang: str,
     style: str = "clean",
     *,
     max_chars_per_cue: int = DEFAULT_MAX_CHARS_PER_CUE,
     context_note: str = None,
+    glossary: dict = None,
 ) -> str:
     """
     Build the subtitler system prompt.
@@ -239,11 +312,17 @@ def build_system_prompt(
                        (evidence, testimony, comedy timing, verbatim reporting).
 
     Neither option ever paraphrases away meaning; only the treatment of filler differs.
+
+    ``glossary`` maps a source term to the exact target rendering it must always get
+    (``{"Ivrit": "עִברית"}``). It is rendered as a numbered, quoted list at the END of the
+    prompt — last position because it is the most specific instruction present and the
+    one a model most easily drops when it is buried among general rules.
     """
     if style not in STYLES:
         raise ValueError(f"style must be one of {STYLES}, got {style!r}")
 
     lang = language_name(target_lang)
+    glossary = normalize_glossary(glossary)
 
     header = [
         f"You are a professional broadcast subtitler producing {lang} subtitles for "
@@ -281,10 +360,33 @@ def build_system_prompt(
         "Keep proper nouns and well-known Latin acronyms as-is (ICC).",
     ]
 
+    # The contrast rule. A clip whose entire POINT was "the language is not called
+    # Hebrew, it is called Ivrit" had BOTH names rendered עברית, which turned 36% of its
+    # cues into statements that contradict themselves ("it is not called X, it is called
+    # X"). A translator collapsing two names onto one target word is normally right —
+    # it is the same referent — which is exactly why it needs an explicit exception.
+    rules.append(
+        "When the source DISTINGUISHES two names or terms for the same thing "
+        '("it is not called X, it is called Y", "X, not Y", "we say X rather than Y"), '
+        f"the {lang} MUST keep them distinguishable. Transliterate or quote the foreign "
+        "term instead of translating both to the same word — a cue that reads "
+        '"it is not called A, it is called A" is a mistranslation, not a subtitle.'
+    )
+
     if lang == "Hebrew":
         rules.append(
             f"Use correct Hebrew typography: gershayim {GERSHAYIM} (U+05F4) inside "
             f"acronyms — צה{GERSHAYIM}ל, חו{GERSHAYIM}ל — never the ASCII quote \"."
+        )
+        rules.append(
+            f"Foreign names and loanwords take a geresh {GERESH} (U+05F3), never an "
+            f"ASCII apostrophe ': ג{GERESH}ורג{GERESH}, צ{GERESH}ארלס, ג{GERESH}ז, "
+            f"ז{GERESH}אנר."
+        )
+        rules.append(
+            "Grammatical gender must agree WITHIN each noun phrase, not only across "
+            "speakers: the noun, its adjectives and its demonstratives all carry the "
+            f"noun's own gender (אותה מחווה מדהימה, not את אותו מחווה מדהימה)."
         )
     elif lang == "Arabic":
         rules.append(
@@ -313,10 +415,23 @@ def build_system_prompt(
 
     numbered = "\n".join(f"{i}. {rule}" for i, rule in enumerate(rules, 1))
 
+    glossary_block = ""
+    if glossary:
+        entries = "\n".join(
+            f'- "{source}" -> "{target}"' for source, target in glossary.items()
+        )
+        glossary_block = (
+            "\n\nGLOSSARY (binding — overrides every rule above)\n"
+            "Render these source terms EXACTLY as given, every time they appear, "
+            "including inside a sentence that contrasts one of them with another term:\n"
+            + entries
+        )
+
     return (
         "\n".join(header)
         + "\n\nHARD RULES\n"
         + numbered
+        + glossary_block
         + '\n\nReturn ONLY JSON: {"cues":[{"id":<int>,"t":"<'
         + lang
         + ' text>"}]} — exactly one entry for every cue you were asked to translate, '
@@ -583,6 +698,7 @@ def translate_cues(
     model=DEFAULT_MODEL,
     client=None,
     context_note=None,
+    glossary=None,
     progress_callback=None,
     recorder=None,
 ):
@@ -608,6 +724,13 @@ def translate_cues(
         context_note: optional one-line scene description injected into the system
             prompt, e.g. "An interview between host X and guest Y." Measurably improves
             register and speaker consistency.
+        glossary: optional ``{source term: required translation}`` map, rendered into the
+            system prompt as a binding term list. Empty/``None`` adds nothing to the
+            prompt at all, so a job without one is byte-identical to before. Its first
+            purpose is terminology CONTRAST — a clip arguing "it is not called Hebrew,
+            it is called Ivrit" needs ``{"Ivrit": "עִברית"}`` to stop both names collapsing
+            onto one Hebrew word. Invalid entries are dropped, never raised on; see
+            :func:`normalize_glossary`.
         progress_callback: called as ``(done, total, message)`` after each chunk.
             Translation is serial and can be minutes long on a feature-length video,
             so without this the UI sits on one frozen step for the whole pass.
@@ -663,6 +786,7 @@ def translate_cues(
         style,
         max_chars_per_cue=max_chars_per_cue,
         context_note=context_note,
+        glossary=glossary,
     )
     client = _resolve_client(client)
 

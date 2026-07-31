@@ -307,3 +307,93 @@ class TestLandscapeRender:
             hashlib.sha256(out.encode("utf-8")).hexdigest()
             == "866eebdea4b40011bb442f3147de320ff280ee4349ebb762f92de621a05939bc"
         )
+
+
+# ======================================================================================
+# P6 — lower-third avoidance, verified on real footage
+# ======================================================================================
+FOX_CLIP = "/app/uploads/IMG_2870.MP4"
+CLEAN_CLIP = "/app/uploads/corpus/clean_speech.mp4"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not os.path.exists(FOX_CLIP) or not os.path.exists(CLEAN_CLIP),
+    reason="needs the corpus clips inside the container",
+)
+class TestLowerThirdAvoidance:
+    """The detector's decision on the two clips it was calibrated against.
+
+    A unit test with synthetic arrays proves the SCORING; only real footage proves the
+    THRESHOLD, which is the part that was chosen from measurements and could rot when a
+    codec, a scaler or the crop geometry changes.
+    """
+
+    @staticmethod
+    def _decide(path):
+        from services.subtitle_service import subtitle_service
+
+        width, height = subtitle_service.probe_video_dimensions(path)
+        layout = layout_params(width, height)
+        return subtitle_service.detect_lower_third(path, layout), layout
+
+    def test_fox_chyron_is_detected(self):
+        decision, _ = self._decide(FOX_CLIP)
+        assert decision["busy"] is True, decision
+        assert decision["score"] > decision["threshold"]
+
+    def test_clean_speech_is_not_detected(self):
+        decision, _ = self._decide(CLEAN_CLIP)
+        assert decision["busy"] is False, decision
+        assert decision["score"] <= decision["threshold"]
+
+    def test_detection_is_well_inside_the_two_second_budget(self):
+        decision, _ = self._decide(FOX_CLIP)
+        assert decision["elapsed_s"] < 2.0, decision
+
+    def test_detection_is_deterministic_across_runs(self):
+        first, _ = self._decide(FOX_CLIP)
+        second, _ = self._decide(FOX_CLIP)
+        assert first["samples"] == second["samples"]
+        assert first["score"] == second["score"]
+
+    def test_threshold_keeps_a_real_margin_on_both_sides(self):
+        """Neither clip may sit on the fence — a threshold with no headroom is noise."""
+        busy, _ = self._decide(FOX_CLIP)
+        clear, _ = self._decide(CLEAN_CLIP)
+        assert busy["score"] > clear["score"] * 2
+
+    def test_render_moves_the_box_up_on_the_chyron_clip(self, tmp_path):
+        from services.subtitle_service import subtitle_service
+
+        _, layout = self._decide(FOX_CLIP)
+        cues = [{"start": 0.5, "end": 4.0, "text": "x", "translated_text": "שורת בדיקה"}]
+        margins = {}
+        for tag, detect in (("auto", True), ("off", False)):
+            out = str(tmp_path / f"fox_{tag}.mp4")
+            assert subtitle_service.create_video_with_ass(
+                FOX_CLIP, cues, out, target_language="he",
+                layout=layout, detect_lower_third=detect,
+            )
+            style = [
+                line for line in open(os.path.splitext(out)[0] + ".ass", encoding="utf-8")
+                if line.startswith("Style:")
+            ][0]
+            margins[tag] = int(style.strip().split(",")[21])
+        assert margins["auto"] > margins["off"], margins
+
+    def test_render_leaves_the_clean_clip_exactly_where_it_was(self, tmp_path):
+        from services.subtitle_service import subtitle_service
+
+        _, layout = self._decide(CLEAN_CLIP)
+        cues = [{"start": 0.5, "end": 4.0, "text": "x", "translated_text": "שורת בדיקה"}]
+        produced = {}
+        for tag, detect in (("auto", True), ("off", False)):
+            out = str(tmp_path / f"clean_{tag}.mp4")
+            assert subtitle_service.create_video_with_ass(
+                CLEAN_CLIP, cues, out, target_language="he",
+                layout=layout, detect_lower_third=detect,
+            )
+            with open(os.path.splitext(out)[0] + ".ass", encoding="utf-8") as fh:
+                produced[tag] = fh.read()
+        assert produced["auto"] == produced["off"], "a clear clip must render identically"

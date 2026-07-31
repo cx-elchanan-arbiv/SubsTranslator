@@ -12,6 +12,8 @@ import time  # Phase A: Added for performance monitoring
 from collections.abc import Callable
 from typing import Optional, Union
 
+import numpy as np
+
 from config import get_config
 from core.exceptions import FFmpegProcessError, FFmpegTimeoutError, FileNotFoundError
 from logging_config import get_logger, log_external_service_call
@@ -26,6 +28,86 @@ config = get_config()
 #: names). Handed to FFmpeg's `ass` filter as `fontsdir` so libass finds it without
 #: depending on a fontconfig cache being warm.
 ASS_FONTS_DIR = os.getenv("ASS_FONTS_DIR", "/usr/share/fonts/truetype/hebrew")
+
+# ----------------------------------------------------------------------------------
+# Lower-third ("chyron") collision detection — constants
+# ----------------------------------------------------------------------------------
+#: Frames sampled across the video to decide whether the subtitle band is occupied.
+#: Five is enough to see through a single atypical shot and cheap enough to stay well
+#: inside the 2s budget (each grab is an input-seek, ~60-150ms).
+CHYRON_SAMPLE_FRAMES = 5
+
+#: Where in the video those frames are taken, as fractions of its duration. FIXED, so
+#: the decision is reproducible for a given file — a random or "every N seconds" sample
+#: would make the rendered output depend on the clock. The first and last 10% are
+#: skipped: titles, fades and end cards are not representative of the body of the video.
+CHYRON_SAMPLE_POSITIONS = (0.1, 0.3, 0.5, 0.7, 0.9)
+
+#: 8-bit luma step between neighbouring pixels that counts as an edge. Well above sensor
+#: noise and compression dither, low enough to catch anti-aliased caption text on a
+#: translucent bar.
+CHYRON_EDGE_THRESHOLD = 24
+
+#: Fraction of neighbouring-pixel pairs that must be edges for the band to count as
+#: OCCUPIED, averaged over the sampled frames.
+#:
+#: MEASURED, not guessed: 35 clips from this project's own uploads and downloads were
+#: scored (news, podcasts, vertical phone video, music video, archive footage, a
+#: 320x180 stub). The scores fall into two groups with a wide empty gap between them:
+#:
+#:     music video / clean studio / phone video   0.0000 - 0.0104
+#:     ordinary footage, no lower third           0.0245 - 0.0606
+#:     ------------------ empty band -------------------------
+#:     Fox News clip with a chyron (IMG_2870)     0.0873
+#:     NATO briefing with a chyron                0.0944
+#:     Hebrew news bulletin                       0.1318
+#:
+#: 0.070 sits inside that gap: 15% above the busiest clip WITHOUT a lower third and 20%
+#: below the least busy clip WITH one. Choosing the gap rather than hugging either side
+#: is what makes the threshold survive a clip neither group anticipated.
+#:
+#: The asymmetry of the two errors is deliberate and points the other way from the usual
+#: instinct: a false POSITIVE moves the subtitle up ~9% of the frame on a video that did
+#: not need it, which a viewer barely registers; a false NEGATIVE reproduces today's
+#: behaviour exactly, which is a known-bad but familiar output. Neither is a failure, so
+#: the threshold is placed for accuracy rather than for a safety margin on one side.
+CHYRON_BUSY_THRESHOLD = 0.070
+
+#: Bottom margin, as a fraction of the height, used when the default band is occupied.
+#: The default is 0.12; 0.24 lifts the subtitle box clear of the lower-third strip on
+#: 16:9 news graphics while keeping it in the bottom third of the picture, where a
+#: viewer's eye expects subtitles to be.
+CHYRON_MARGIN_V_FRAC = 0.24
+
+#: Multiplier turning ``font_px * max_lines`` into the pixel height the subtitle BOX
+#: occupies — line spacing plus the opaque box's padding and 3px outline. Only used to
+#: aim the sampling crop at the right strip of picture; it is not a rendering value.
+CHYRON_BOX_HEIGHT_FACTOR = 1.35
+
+
+def _edge_density(band) -> float:
+    """Fraction of neighbouring pixel pairs in a greyscale array that form an edge.
+
+    Split out from :meth:`SubtitleService.detect_lower_third` so the scoring can be
+    unit-tested on synthetic arrays with no FFmpeg, no file and no video.
+
+    Horizontal and vertical neighbours are counted together against the total number of
+    pairs, which keeps the result a dimensionless ratio — a 4K band and a 480p band of
+    the same picture score the same, so one threshold serves every resolution.
+
+    Computed in ``int16``: ``uint8`` subtraction wraps around, so ``5 - 250`` would come
+    out as 11 instead of -245 and a strong edge would read as none at all.
+    """
+    values = band.astype(np.int16)
+    horizontal = np.abs(np.diff(values, axis=1))
+    vertical = np.abs(np.diff(values, axis=0))
+    pairs = horizontal.size + vertical.size
+    if pairs == 0:
+        return 0.0
+    edges = int((horizontal > CHYRON_EDGE_THRESHOLD).sum()) + int(
+        (vertical > CHYRON_EDGE_THRESHOLD).sum()
+    )
+    return edges / pairs
 
 
 def format_timestamp(seconds: float) -> str:
@@ -773,6 +855,158 @@ class SubtitleService:
     #: the same method.
     _probe_video_dimensions = probe_video_dimensions
 
+    def _probe_duration(self, video_path: str) -> float:
+        """Video duration in seconds, or 0.0 when it cannot be determined."""
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                    "-of", "default=nw=1:nk=1", video_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self.config.FFPROBE_TIMEOUT,
+            )
+            return max(0.0, float((result.stdout or "").strip()))
+        except Exception:  # unprobeable file, odd container, ffprobe missing
+            return 0.0
+
+    def _grab_band(
+        self, video_path: str, at: float, x: int, y: int, width: int, height: int
+    ):
+        """Decode ONE frame's subtitle band as an 8-bit greyscale array.
+
+        Cropping inside FFmpeg rather than in Python is the whole reason this is cheap:
+        only the band crosses the pipe, so a 4K frame costs the same as a 480p one.
+
+        Returns ``None`` for any failure — a frame that will not decode is a frame this
+        detector simply does not get a vote from, never an exception into the render path.
+        """
+        cmd = [
+            "ffmpeg", "-v", "error", "-ss", f"{at:.3f}", "-i", video_path,
+            "-frames:v", "1",
+            "-vf", f"crop={width}:{height}:{x}:{y},format=gray",
+            "-f", "rawvideo", "-",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=15)
+        except Exception:
+            return None
+        expected = width * height
+        if result.returncode != 0 or len(result.stdout) < expected:
+            return None
+        return np.frombuffer(result.stdout[:expected], dtype=np.uint8).reshape(
+            height, width
+        )
+
+    def detect_lower_third(self, video_path: str, layout: dict) -> dict:
+        """Decide whether the default subtitle band is already occupied by picture.
+
+        The defect this closes
+        ----------------------
+        On news footage the subtitle box lands ON the broadcaster's chyron. At the
+        default ``margin_v`` of 0.12 that is 86px up from the bottom of a 720p frame —
+        which is exactly where a Fox News lower third sits. Two layers of white text on
+        two coloured bars, and neither is readable. It is not a subtitle bug; it is a
+        subtitle put somewhere the picture was already using.
+
+        How
+        ---
+        Five frames spread across the body of the video (:data:`CHYRON_SAMPLE_POSITIONS`)
+        are cropped — inside FFmpeg — to the exact rectangle the subtitle box would
+        occupy, converted to greyscale, and scored for **edge density**: the fraction of
+        neighbouring pixel pairs differing by more than :data:`CHYRON_EDGE_THRESHOLD`.
+        Graphics and caption text are dense in hard edges; skin, sky, walls and bokeh
+        are not. The score is a *ratio*, so it does not care how large the frame is.
+
+        The MEDIAN of the samples decides, not the mean. That is the one line that makes
+        this robust to dark scenes, which is otherwise this method's obvious failure
+        mode: a fade to black scores ~0, and two such frames out of five would drag a
+        genuine chyron's mean under the threshold. A median survives two of them
+        outright. (Measured: the Fox clip's mean is 0.0873 and its median 0.0880 — on
+        real footage the two agree; the median only differs when something has gone
+        wrong, which is precisely when it should.)
+
+        Guarantees
+        ----------
+        * **Deterministic** — fixed sample positions, fixed threshold, no clock, no RNG.
+        * **Fast** — five input-seeks with an in-FFmpeg crop; well under 2s.
+        * **Cannot fail a render** — every failure path returns ``busy=False``, i.e. the
+          behaviour that shipped before this existed.
+        * **Conservative on missing data** — fewer than three usable frames means no
+          decision is made rather than a guess.
+
+        Returns:
+            ``{"busy": bool, "score": float|None, "threshold": float,
+            "samples": [float,...], "band": {...}, "reason": str}`` — always all keys,
+            suitable for dropping straight into the research archive.
+        """
+        decision = {
+            "busy": False,
+            "score": None,
+            "threshold": CHYRON_BUSY_THRESHOLD,
+            "samples": [],
+            "band": None,
+            "reason": "not evaluated",
+        }
+        try:
+            duration = self._probe_duration(video_path)
+            if duration <= 0:
+                decision["reason"] = "duration unknown — leaving the default margin"
+                return decision
+
+            height = int(layout["video_h"])
+            width = int(layout["video_w"])
+            box_h = int(
+                round(
+                    layout["font_px"] * layout["max_lines"] * CHYRON_BOX_HEIGHT_FACTOR
+                )
+            )
+            bottom = height - int(layout["margin_v"])
+            top = max(0, bottom - box_h)
+            x = int(layout["margin_h"])
+            band_w = max(1, width - 2 * x)
+            band_h = max(1, bottom - top)
+            # FFmpeg's crop refuses a rectangle that leaves the frame.
+            band_w = min(band_w, width - x)
+            band_h = min(band_h, height - top)
+            decision["band"] = {"x": x, "y": top, "w": band_w, "h": band_h}
+
+            started = time.time()
+            samples = []
+            for position in CHYRON_SAMPLE_POSITIONS[:CHYRON_SAMPLE_FRAMES]:
+                frame = self._grab_band(
+                    video_path, duration * position, x, top, band_w, band_h
+                )
+                if frame is None:
+                    continue
+                samples.append(round(_edge_density(frame), 4))
+
+            decision["samples"] = samples
+            decision["elapsed_s"] = round(time.time() - started, 3)
+            if len(samples) < 3:
+                decision["reason"] = (
+                    f"only {len(samples)} of {len(CHYRON_SAMPLE_POSITIONS)} frames "
+                    "decoded — not enough to judge, leaving the default margin"
+                )
+                return decision
+
+            score = float(np.median(samples))
+            decision["score"] = round(score, 4)
+            decision["busy"] = score > CHYRON_BUSY_THRESHOLD
+            decision["reason"] = (
+                f"median edge density {score:.4f} "
+                f"{'>' if decision['busy'] else '<='} {CHYRON_BUSY_THRESHOLD}"
+            )
+            return decision
+        except Exception as exc:  # noqa: BLE001 - detection may never fail a render
+            self.logger.warning(
+                "Lower-third detection failed — keeping the default subtitle margin",
+                error=str(exc),
+            )
+            decision["reason"] = f"detection error: {type(exc).__name__}: {exc}"
+            return decision
+
     def create_video_with_ass(
         self,
         video_path: str,
@@ -786,6 +1020,8 @@ class SubtitleService:
         watermark_size_height: int = 80,
         progress_callback: Optional[Callable[[int], None]] = None,
         layout: "dict | None" = None,
+        recorder=None,
+        detect_lower_third: bool = True,
     ) -> bool:
         """Burn in subtitles from a generated ``.ass`` file (the ``render_v2`` path).
 
@@ -808,10 +1044,24 @@ class SubtitleService:
                 budgeted their character counts against. Omitted, it is derived here
                 from the probed dimensions — the same inputs, so the same answer; the
                 parameter exists so the caller can prove they agree rather than assume it.
+            recorder: optional research recorder (duck-typed — anything with
+                ``update_meta(**fields)``). The lower-third decision and its score are
+                archived through it. ``None`` disables archiving; a recorder that raises
+                is ignored, because recording a render may never fail one.
+            detect_lower_third: run the chyron collision check (:meth:`detect_lower_third`)
+                and raise the subtitle box when the band is occupied. On by default —
+                this is an automatic product behaviour, not an experiment. The parameter
+                exists so tests can pin the geometry without decoding frames.
 
         Returns:
             True on success. The generated ``.ass`` file is kept next to the output so the
             exact rendered cues can be inspected after the fact.
+
+        Note:
+            Raising the box changes ``margin_v`` ONLY. Every character budget upstream
+            stages committed to — ``font_px``, ``max_line_chars``, ``max_chars_per_cue`` —
+            is derived from the width and is untouched, so moving the box cannot make
+            text that was going to fit stop fitting.
         """
         ass_path = os.path.splitext(output_path)[0] + ".ass"
         try:
@@ -855,6 +1105,48 @@ class SubtitleService:
             else:
                 video_w, video_h = self.probe_video_dimensions(video_path)
                 layout = layout_params(video_w, video_h)
+
+            # Automatic lower-third avoidance. The owner's call: the subtitle moves
+            # itself rather than asking the user to notice the collision and tick a box.
+            chyron = None
+            if detect_lower_third:
+                chyron = self.detect_lower_third(video_path, layout)
+                if chyron["busy"]:
+                    raised = layout_params(
+                        video_w, video_h, margin_v_frac=CHYRON_MARGIN_V_FRAC
+                    )
+                    # Copy: the caller's layout is the one upstream budgeted against and
+                    # must not change under it. Only margin_v moves.
+                    layout = dict(layout)
+                    chyron["margin_v_before"] = layout["margin_v"]
+                    chyron["margin_v_after"] = raised["margin_v"]
+                    layout["margin_v"] = raised["margin_v"]
+                    self.logger.info(
+                        "Lower third detected under the subtitle band — raising the "
+                        "subtitle box",
+                        operation="chyron_avoid",
+                        score=chyron["score"],
+                        threshold=chyron["threshold"],
+                        margin_v_before=chyron["margin_v_before"],
+                        margin_v_after=chyron["margin_v_after"],
+                    )
+                else:
+                    self.logger.info(
+                        "Subtitle band is clear — keeping the default margin",
+                        operation="chyron_clear",
+                        score=chyron["score"],
+                        threshold=chyron["threshold"],
+                    )
+                if recorder is not None:
+                    try:
+                        recorder.update_meta(lower_third=chyron)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        self.logger.warning(
+                            "Research recorder raised while archiving the lower-third "
+                            "decision — ignored",
+                            error=str(exc),
+                        )
+
             # Prefix match, exactly as the legacy render functions do, so "he-IL" is
             # still recognised as RTL (utils.rtl_utils.is_rtl_language demands an exact
             # code and would answer False for it).

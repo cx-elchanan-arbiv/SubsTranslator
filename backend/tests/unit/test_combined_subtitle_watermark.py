@@ -304,3 +304,231 @@ class TestFaststartAndMissingWatermarkParity:
         assert result is True
         assert self.watermark_path in cmd, "the logo was never passed to ffmpeg"
         assert "overlay" in " ".join(cmd), "no overlay filter was built"
+
+
+# ======================================================================================
+# P6 — automatic lower-third ("chyron") avoidance
+# ======================================================================================
+import numpy as np  # noqa: E402
+
+from services.subtitle_engine import layout_params  # noqa: E402
+from services.subtitle_service import (  # noqa: E402
+    CHYRON_BUSY_THRESHOLD,
+    CHYRON_MARGIN_V_FRAC,
+    CHYRON_SAMPLE_POSITIONS,
+    _edge_density,
+)
+
+
+@pytest.mark.unit
+class TestEdgeDensity:
+    """The busyness score, tested on synthetic arrays — no FFmpeg, no video."""
+
+    def test_flat_band_scores_zero(self):
+        assert _edge_density(np.full((40, 100), 128, dtype=np.uint8)) == 0.0
+
+    def test_flat_black_band_scores_zero(self):
+        """A fade to black must not read as busy — it is the opposite of busy."""
+        assert _edge_density(np.zeros((40, 100), dtype=np.uint8)) == 0.0
+
+    def test_dense_stripes_score_high(self):
+        band = np.zeros((40, 100), dtype=np.uint8)
+        band[:, ::2] = 255
+        assert _edge_density(band) > 0.4
+
+    def test_uint8_wraparound_does_not_hide_a_strong_edge(self):
+        """5 - 250 wraps to 11 in uint8; the score must be computed in int16."""
+        band = np.zeros((4, 4), dtype=np.uint8)
+        band[:, :2] = 5
+        band[:, 2:] = 250
+        assert _edge_density(band) > 0.0
+
+    def test_smooth_gradient_is_not_an_edge(self):
+        """Skin, sky and bokeh vary smoothly and must not trip the detector."""
+        band = np.tile(np.linspace(0, 255, 256, dtype=np.uint8), (40, 1))
+        assert _edge_density(band) < 0.01
+
+    def test_score_is_resolution_independent(self):
+        """A ratio, so one threshold can serve 480p and 4K."""
+        small = np.zeros((20, 50), dtype=np.uint8)
+        small[:, ::2] = 255
+        large = np.zeros((200, 500), dtype=np.uint8)
+        large[:, ::2] = 255
+        assert abs(_edge_density(small) - _edge_density(large)) < 0.02
+
+    def test_empty_band_is_safe(self):
+        assert _edge_density(np.zeros((1, 1), dtype=np.uint8)) == 0.0
+
+
+@pytest.mark.unit
+class TestDetectLowerThird:
+    """The decision, with frame decoding stubbed so the logic is tested in isolation."""
+
+    def setup_method(self):
+        self.service = SubtitleService()
+        self.layout = layout_params(1280, 720)
+
+    def _stub(self, scores, duration=60.0):
+        """Return a service whose frame grabs yield bands of the given edge densities."""
+        service = self.service
+        service._probe_duration = lambda _p: duration
+        it = iter(scores)
+
+        def grab(_path, _at, _x, _y, w, h):
+            try:
+                target = next(it)
+            except StopIteration:
+                return None
+            if target is None:
+                return None
+            band = np.zeros((h, w), dtype=np.uint8)
+            if target > 0:
+                # Every Nth column white -> a predictable, tunable edge density.
+                step = max(2, int(round(1.0 / target)))
+                band[:, ::step] = 255
+            return band
+
+        service._grab_band = grab
+        return service
+
+    def test_busy_band_fires(self):
+        service = self._stub([0.5] * 5)
+        out = service.detect_lower_third("v.mp4", self.layout)
+        assert out["busy"] is True
+        assert out["score"] > CHYRON_BUSY_THRESHOLD
+
+    def test_clean_band_does_not_fire(self):
+        service = self._stub([0.0] * 5)
+        out = service.detect_lower_third("v.mp4", self.layout)
+        assert out["busy"] is False
+        assert out["score"] == 0.0
+
+    def test_median_survives_two_black_frames(self):
+        """The dark-scene defence: two fades among five must not veto a real chyron."""
+        service = self._stub([0.0, 0.5, 0.5, 0.0, 0.5])
+        assert service.detect_lower_third("v.mp4", self.layout)["busy"] is True
+
+    def test_median_ignores_two_bright_flashes_on_a_clean_clip(self):
+        service = self._stub([0.5, 0.0, 0.0, 0.5, 0.0])
+        assert service.detect_lower_third("v.mp4", self.layout)["busy"] is False
+
+    def test_too_few_decodable_frames_makes_no_decision(self):
+        service = self._stub([0.5, None, None, None, None])
+        out = service.detect_lower_third("v.mp4", self.layout)
+        assert out["busy"] is False
+        assert "not enough to judge" in out["reason"]
+
+    def test_unknown_duration_makes_no_decision(self):
+        service = self._stub([0.5] * 5, duration=0.0)
+        out = service.detect_lower_third("v.mp4", self.layout)
+        assert out["busy"] is False
+        assert "duration unknown" in out["reason"]
+
+    def test_exception_never_escapes(self):
+        service = self.service
+        service._probe_duration = lambda _p: 60.0
+
+        def boom(*_a, **_k):
+            raise RuntimeError("ffmpeg exploded")
+
+        service._grab_band = boom
+        out = service.detect_lower_third("v.mp4", self.layout)
+        assert out["busy"] is False
+        assert "detection error" in out["reason"]
+
+    def test_decision_is_deterministic(self):
+        first = self._stub([0.5] * 5).detect_lower_third("v.mp4", self.layout)
+        second = self._stub([0.5] * 5).detect_lower_third("v.mp4", self.layout)
+        assert first["score"] == second["score"] and first["busy"] == second["busy"]
+
+    def test_sample_positions_are_fixed_and_skip_the_edges(self):
+        assert CHYRON_SAMPLE_POSITIONS == (0.1, 0.3, 0.5, 0.7, 0.9)
+
+    def test_band_is_where_the_subtitle_box_would_be(self):
+        service = self._stub([0.0] * 5)
+        band = service.detect_lower_third("v.mp4", self.layout)["band"]
+        bottom = 720 - self.layout["margin_v"]
+        assert band["y"] + band["h"] == bottom
+        assert band["x"] == self.layout["margin_h"]
+        assert band["w"] == 1280 - 2 * self.layout["margin_h"]
+
+    def test_result_always_has_every_key(self):
+        for scores in ([0.5] * 5, [None] * 5, [0.0] * 5):
+            out = self._stub(scores).detect_lower_third("v.mp4", self.layout)
+            for key in ("busy", "score", "threshold", "samples", "band", "reason"):
+                assert key in out
+
+
+@pytest.mark.unit
+class TestChyronRaisesTheBoxInTheRenderPath:
+    """create_video_with_ass must move the box, and move ONLY the box."""
+
+    def setup_method(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.video = os.path.join(self.temp_dir, "v.mp4")
+        with open(self.video, "wb") as f:
+            f.write(b"x")
+        self.out = os.path.join(self.temp_dir, "out.mp4")
+        self.cues = [{"start": 0.0, "end": 3.0, "text": "שלום", "translated_text": "שלום"}]
+
+    def teardown_method(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _render(self, busy, **kwargs):
+        service = SubtitleService()
+        service.config.USE_FAKE_YTDLP = False
+        layout = layout_params(1280, 720)
+        decision = {
+            "busy": busy, "score": 0.09 if busy else 0.01,
+            "threshold": CHYRON_BUSY_THRESHOLD, "samples": [], "band": None,
+            "reason": "stub",
+        }
+        service.detect_lower_third = lambda *_a, **_k: decision
+        with patch("subprocess.Popen") as popen, patch("os.path.exists", return_value=True), \
+             patch("os.path.getsize", return_value=1024):
+            proc = MagicMock()
+            proc.stdout.readline.side_effect = [""]
+            proc.poll.return_value = 0
+            proc.returncode = 0
+            proc.communicate.return_value = ("", "")
+            popen.return_value = proc
+            service.create_video_with_ass(
+                self.video, self.cues, self.out, target_language="he",
+                layout=layout, **kwargs,
+            )
+        ass_path = os.path.splitext(self.out)[0] + ".ass"
+        with open(ass_path, encoding="utf-8") as f:
+            content = f.read()
+        style = [l for l in content.splitlines() if l.startswith("Style:")][0]
+        return content, style.split(",")
+
+    def test_busy_band_raises_margin_v(self):
+        _, clean = self._render(False)
+        _, raised = self._render(True)
+        assert int(raised[21]) > int(clean[21])
+        assert int(raised[21]) == round(720 * CHYRON_MARGIN_V_FRAC)
+
+    def test_raising_the_box_does_not_change_the_text_budget(self):
+        """margin_v is the only thing that moves; font and line budget are width-derived."""
+        _, clean = self._render(False)
+        _, raised = self._render(True)
+        assert raised[2] == clean[2]            # Fontsize
+        assert raised[19] == clean[19]          # MarginL
+        assert raised[20] == clean[20]          # MarginR
+
+    def test_detection_can_be_switched_off_for_deterministic_tests(self):
+        _, default = self._render(False)
+        _, disabled = self._render(False, detect_lower_third=False)
+        assert default[21] == disabled[21]
+
+    def test_decision_is_handed_to_the_recorder(self):
+        recorder = Mock()
+        self._render(True, recorder=recorder)
+        recorder.update_meta.assert_called_once()
+        assert recorder.update_meta.call_args.kwargs["lower_third"]["busy"] is True
+
+    def test_a_recorder_that_raises_cannot_fail_the_render(self):
+        recorder = Mock()
+        recorder.update_meta.side_effect = RuntimeError("archive is on fire")
+        content, _ = self._render(True, recorder=recorder)
+        assert "Dialogue:" in content

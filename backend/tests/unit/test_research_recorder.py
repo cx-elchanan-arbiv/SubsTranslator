@@ -475,3 +475,68 @@ class TestSourceVideoProbe:
         recorder.finish(success=True)
         warnings = read_json(os.path.join(recorder.run_dir, "meta.json"))["recorder_warnings"]
         assert any("ffprobe" in w for w in warnings)
+
+
+# ======================================================================================
+# P4 — dropped-cue archiving
+# ======================================================================================
+@pytest.mark.unit
+class TestSaveDroppedCues:
+    """A dropped cue leaves no trace in the SRTs, the .ass or the video. If the archive
+    does not record it, the hallucination gate's false-positive rate is unauditable."""
+
+    def test_dropped_cues_are_written_with_their_reason(self, tmp_path):
+        recorder = rr.start_run("task-dropped", root=str(tmp_path), enabled=True)
+        recorder.save_dropped_cues(
+            [{"start": 1.0, "end": 1.2, "text": "invented", "cps": 219.0}],
+            reason="source_cps_hallucination",
+        )
+        recorder.finish(success=True)
+
+        payload = json.loads(
+            open(os.path.join(recorder.run_dir, "dropped_cues.json"), encoding="utf-8").read()
+        )
+        assert payload["reason"] == "source_cps_hallucination"
+        assert payload["cues"][0]["text"] == "invented"
+        assert payload["cues"][0]["cps"] == 219.0
+
+    def test_count_and_reason_land_in_meta(self, tmp_path):
+        recorder = rr.start_run("task-meta", root=str(tmp_path), enabled=True)
+        recorder.save_dropped_cues([{"start": 0, "end": 1, "text": "x"}])
+        recorder.finish(success=True)
+
+        meta = json.loads(
+            open(os.path.join(recorder.run_dir, "meta.json"), encoding="utf-8").read()
+        )
+        assert meta["dropped_cues_count"] == 1
+        assert meta["dropped_cues_reason"] == "hallucination"
+
+    def test_nothing_dropped_writes_no_file(self, tmp_path):
+        """An absent file must mean "nothing was dropped", never "possibly unrecorded"."""
+        recorder = rr.start_run("task-none", root=str(tmp_path), enabled=True)
+        recorder.save_dropped_cues([])
+        recorder.save_dropped_cues(None)
+        recorder.finish(success=True)
+
+        assert not os.path.exists(os.path.join(recorder.run_dir, "dropped_cues.json"))
+        meta = json.loads(
+            open(os.path.join(recorder.run_dir, "meta.json"), encoding="utf-8").read()
+        )
+        assert "dropped_cues_count" not in meta
+
+    def test_input_is_not_mutated(self, tmp_path):
+        recorder = rr.start_run("task-nomutate", root=str(tmp_path), enabled=True)
+        cues = [{"start": 0, "end": 1, "text": "x"}]
+        recorder.save_dropped_cues(cues)
+        assert cues == [{"start": 0, "end": 1, "text": "x"}]
+
+    def test_a_broken_payload_cannot_fail_the_job(self, tmp_path):
+        """The recorder's whole contract: observability never takes production down."""
+        recorder = rr.start_run("task-broken", root=str(tmp_path), enabled=True)
+        assert recorder.save_dropped_cues(["not a dict"]) is None
+        recorder.finish(success=True)
+        assert os.path.exists(os.path.join(recorder.run_dir, "meta.json"))
+
+    def test_disabled_recorder_is_a_noop(self, tmp_path):
+        recorder = rr.start_run("task-off", root=str(tmp_path), enabled=False)
+        assert recorder.save_dropped_cues([{"start": 0, "end": 1, "text": "x"}]) is None

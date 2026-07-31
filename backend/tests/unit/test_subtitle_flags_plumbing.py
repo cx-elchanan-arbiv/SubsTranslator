@@ -747,3 +747,59 @@ class TestTaskSignaturesAcceptTheFlags:
         # ...and in what this task returns to the API.
         assert result["user_choices"]["spotting_v2"] is True
         assert set(ALL_FLAG_KEYS).issubset(result["user_choices"])
+
+
+# ======================================================================================
+# P2 — glossary plumbing
+# ======================================================================================
+@pytest.mark.unit
+class TestParseGlossary:
+    """The glossary reaches the pipeline through an HTML form, a JSON body or a Celery
+    kwarg, so all three shapes have to arrive as the same dict — and a malformed one
+    may never fail a job."""
+
+    def test_none_and_blank(self):
+        from services.subtitle_pipeline import parse_glossary
+
+        assert parse_glossary(None) == {}
+        assert parse_glossary("") == {}
+        assert parse_glossary("   ") == {}
+
+    def test_real_mapping(self):
+        from services.subtitle_pipeline import parse_glossary
+
+        assert parse_glossary({"Ivrit": "עִברית"}) == {"Ivrit": "עִברית"}
+
+    def test_json_string_from_a_form_field(self):
+        from services.subtitle_pipeline import parse_glossary
+
+        assert parse_glossary('{"Ivrit": "עִברית"}') == {"Ivrit": "עִברית"}
+
+    def test_invalid_json_is_ignored_not_raised(self):
+        from services.subtitle_pipeline import parse_glossary
+
+        assert parse_glossary("{not json") == {}
+
+    def test_json_of_the_wrong_type_is_ignored(self):
+        from services.subtitle_pipeline import parse_glossary
+
+        assert parse_glossary("[1, 2, 3]") == {}
+        assert parse_glossary("42") == {}
+
+    def test_values_are_stringified_and_stripped(self):
+        from services.subtitle_pipeline import parse_glossary
+
+        assert parse_glossary({" Ivrit ": " עִברית "}) == {"Ivrit": "עִברית"}
+
+    def test_blank_and_null_entries_are_dropped(self):
+        from services.subtitle_pipeline import parse_glossary
+
+        assert parse_glossary({"Ivrit": "עִברית", "": "x", "y": "", "z": None}) == {
+            "Ivrit": "עִברית"
+        }
+
+    def test_never_raises_on_anything(self):
+        from services.subtitle_pipeline import parse_glossary
+
+        for value in (object(), 3.14, True, [], set()):
+            assert isinstance(parse_glossary(value), dict)

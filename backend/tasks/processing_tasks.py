@@ -16,6 +16,8 @@ from logging_config import (
 )
 from services.research_recorder import start_run
 from services.subtitle_engine import (
+    MAX_SOURCE_CPS,
+    drop_hallucinated_cues,
     layout_params,
     reflow_dangling_connectors,
     words_to_cues,
@@ -24,6 +26,7 @@ from services.subtitle_pipeline import (
     any_enabled,
     flags_summary,
     normalize_cues,
+    parse_glossary,
     resolve_flags,
 )
 from services.subtitle_service import subtitle_service
@@ -215,6 +218,16 @@ def process_video_task(
 
         wants_translation = bool(target_lang and target_lang != "auto")
 
+        # Optional terminology glossary. No UI surfaces it yet, so it is empty on every
+        # job today and the prompt is byte-identical to before — the plumbing exists so
+        # the UI can be wired without touching the pipeline again, and so a researcher
+        # can drive it from an enqueued task right now.
+        glossary = parse_glossary(
+            (processing_info or {}).get("user_choices", {}).get("glossary")
+        )
+        if glossary:
+            recorder.update_meta(glossary=glossary)
+
         # Gemini transcription returns no word timestamps, so spotting cannot run on it.
         if flags["spotting_v2"] and whisper_model == "gemini":
             logger.warning(
@@ -276,7 +289,12 @@ def process_video_task(
 
             whisper_segments = transcription_result.get("segments") or []
             words = transcription_result.get("words") or []
-            recorder.update_meta(detected_language=detected_language, pipeline="v2")
+            asr_primed = bool(transcription_result.get("asr_primed"))
+            recorder.update_meta(
+                detected_language=detected_language,
+                pipeline="v2",
+                asr_primed=asr_primed,
+            )
             recorder.add_timing("transcribe", transcribe_duration)
             recorder.save_segments(whisper_segments)
             recorder.save_words(words)
@@ -285,6 +303,7 @@ def process_video_task(
                     words,
                     max_line=layout["max_line_chars"],
                     max_lines=layout["max_lines"],
+                    asr_primed=asr_primed,
                 )
                 logger.info(
                     f"spotting_v2: {len(words)} words -> {len(cues)} cues "
@@ -297,6 +316,24 @@ def process_video_task(
                     )
                 cues = whisper_segments
             segments = normalize_cues(cues)
+
+            # Hallucination gate. Whisper occasionally invents a whole sentence and
+            # stamps it onto a fraction of a second of near-silence; until now those
+            # were translated at full price and burned into the picture, where a
+            # fluent Hebrew fabrication is far harder to spot than an English one.
+            # Runs on the SOURCE, before translation: the CPS signature only means
+            # something in the language that was spoken, dropping early costs no
+            # tokens, and neighbouring cues never receive a fabricated sentence as
+            # scene context.
+            segments, dropped_cues = drop_hallucinated_cues(segments)
+            if dropped_cues:
+                logger.warning(
+                    f"hallucination gate [task={task_id}]: dropped "
+                    f"{len(dropped_cues)} source cue(s) above "
+                    f"{MAX_SOURCE_CPS:.0f} CPS before translation"
+                )
+                recorder.save_dropped_cues(dropped_cues, reason="source_cps_hallucination")
+
             recorder.save_cues("pre_translation", segments)
 
             # Salvage anchor: the SOURCE subtitles are on disk before a single
@@ -335,6 +372,7 @@ def process_video_task(
                             target_lang,
                             style=flags["translation_style"],
                             max_chars_per_cue=layout["max_chars_per_cue"],
+                            glossary=glossary,
                             progress_callback=translation_progress,
                             recorder=recorder,
                         )
@@ -576,6 +614,7 @@ def process_video_task(
                         watermark_opacity=opacity_float,
                         progress_callback=video_progress_callback,
                         layout=layout,
+                        recorder=recorder,
                     )
                 else:
                     progress_manager.log("Creating video with subtitles and watermark (combined)...", step_index=5)
@@ -616,6 +655,7 @@ def process_video_task(
                         use_translation=wants_translation,
                         progress_callback=video_progress_callback,
                         layout=layout,
+                        recorder=recorder,
                     )
                 else:
                     # use original function

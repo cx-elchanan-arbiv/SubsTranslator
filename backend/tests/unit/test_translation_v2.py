@@ -912,3 +912,154 @@ class TestCpsReport:
 
         assert cps_report([]) == []
         assert cps_report(None) == []
+
+
+# --------------------------------------------------------------------------------------
+# P2 — terminology contrast + glossary
+# --------------------------------------------------------------------------------------
+@pytest.mark.unit
+class TestTerminologyContrastRule:
+    """A clip arguing "it is not called Hebrew, it is called Ivrit" rendered BOTH names
+    as עברית, so 36% of its cues asserted "it is not called X, it is called X".
+
+    Collapsing two names for one referent is normally correct, which is exactly why the
+    exception has to be stated rather than assumed.
+    """
+
+    def test_contrast_rule_is_present_for_every_language(self):
+        for code in APP_LANGUAGE_CODES:
+            prompt = build_system_prompt(code)
+            assert "DISTINGUISHES" in prompt, code
+            assert "Transliterate or quote" in prompt, code
+
+    def test_rule_names_the_failure_it_prevents(self):
+        prompt = build_system_prompt("he")
+        assert "it is not called A, it is called A" in prompt
+
+    def test_rule_is_numbered_among_the_hard_rules(self):
+        prompt = build_system_prompt("he")
+        rules = prompt.split("HARD RULES\n", 1)[1]
+        contrast = [l for l in rules.splitlines() if "DISTINGUISHES" in l]
+        assert len(contrast) == 1
+        assert re.match(r"^\d+\.\s", contrast[0])
+
+
+@pytest.mark.unit
+class TestGlossary:
+    """An optional binding term list. Empty by default, so today's prompts are unchanged."""
+
+    def test_absent_glossary_changes_nothing(self):
+        base = build_system_prompt("he")
+        assert build_system_prompt("he", glossary=None) == base
+        assert build_system_prompt("he", glossary={}) == base
+        assert "GLOSSARY" not in base
+
+    def test_entries_are_rendered_verbatim_and_quoted(self):
+        prompt = build_system_prompt("he", glossary={"Ivrit": "עִברית"})
+        assert "GLOSSARY" in prompt
+        assert '- "Ivrit" -> "עִברית"' in prompt
+
+    def test_glossary_declares_itself_binding_over_the_rules(self):
+        prompt = build_system_prompt("he", glossary={"Ivrit": "עִברית"})
+        assert "overrides every rule above" in prompt
+
+    def test_glossary_is_last_so_it_is_not_buried(self):
+        prompt = build_system_prompt("he", glossary={"Ivrit": "עִברית"})
+        assert prompt.index("GLOSSARY") > prompt.index("HARD RULES")
+
+    def test_multiple_entries_keep_insertion_order(self):
+        prompt = build_system_prompt(
+            "he", glossary={"Ivrit": "עִברית", "Parsi": "פארסי"}
+        )
+        assert prompt.index('"Ivrit"') < prompt.index('"Parsi"')
+
+    def test_translate_cues_threads_the_glossary_into_the_system_prompt(self):
+        client = FakeClient(echo_responder())
+        translate_cues(make_cues(3), "he", client=client, glossary={"Ivrit": "עִברית"})
+        assert '- "Ivrit" -> "עִברית"' in client.calls[0]["messages"][0]["content"]
+
+    def test_translate_cues_without_glossary_sends_no_glossary_block(self):
+        client = FakeClient(echo_responder())
+        translate_cues(make_cues(3), "he", client=client)
+        assert "GLOSSARY" not in client.calls[0]["messages"][0]["content"]
+
+
+@pytest.mark.unit
+class TestNormalizeGlossary:
+    """Untrusted input: it will come from a UI text box. It may never raise."""
+
+    def test_none_and_empty(self):
+        from services.translation_v2 import normalize_glossary
+
+        assert normalize_glossary(None) == {}
+        assert normalize_glossary({}) == {}
+
+    def test_non_mapping_is_ignored(self):
+        from services.translation_v2 import normalize_glossary
+
+        assert normalize_glossary("Ivrit") == {}
+        assert normalize_glossary(["Ivrit"]) == {}
+        assert normalize_glossary(42) == {}
+
+    def test_entries_are_stripped(self):
+        from services.translation_v2 import normalize_glossary
+
+        assert normalize_glossary({"  Ivrit  ": "  עִברית "}) == {"Ivrit": "עִברית"}
+
+    def test_blank_and_non_string_entries_are_dropped(self):
+        from services.translation_v2 import normalize_glossary
+
+        out = normalize_glossary(
+            {"Ivrit": "עִברית", "": "x", "y": "   ", 3: "z", "w": None}
+        )
+        assert out == {"Ivrit": "עִברית"}
+
+    def test_overlong_glossary_is_truncated_not_rejected(self):
+        from services.translation_v2 import MAX_GLOSSARY_ENTRIES, normalize_glossary
+
+        big = {f"term{i}": f"t{i}" for i in range(MAX_GLOSSARY_ENTRIES + 10)}
+        out = normalize_glossary(big)
+        assert len(out) == MAX_GLOSSARY_ENTRIES
+
+
+# --------------------------------------------------------------------------------------
+# P5 — geresh and in-phrase gender agreement (prompt side)
+# --------------------------------------------------------------------------------------
+@pytest.mark.unit
+class TestHebrewTypographyAndAgreementRules:
+    def test_geresh_rule_present_for_hebrew(self):
+        from services.translation_v2 import GERESH
+
+        prompt = build_system_prompt("he")
+        assert GERESH in prompt
+        assert "U+05F3" in prompt
+        assert f"ג{GERESH}ורג{GERESH}" in prompt
+
+    def test_geresh_rule_forbids_the_ascii_apostrophe(self):
+        prompt = build_system_prompt("he")
+        assert "never an" in prompt and "ASCII apostrophe" in prompt
+
+    def test_gershayim_rule_still_present(self):
+        """The new geresh rule must not have displaced the acronym rule."""
+        prompt = build_system_prompt("he")
+        assert GERSHAYIM in prompt
+        assert "U+05F4" in prompt
+
+    def test_noun_phrase_agreement_rule_present(self):
+        prompt = build_system_prompt("he")
+        assert "WITHIN each noun phrase" in prompt
+        assert "אותה מחווה מדהימה" in prompt
+
+    def test_agreement_rule_cites_the_observed_defect(self):
+        """The engine produced `את אותו מחווה מדהימה` — masculine + feminine in one NP."""
+        prompt = build_system_prompt("he")
+        assert "את אותו מחווה מדהימה" in prompt
+
+    def test_speaker_gender_rule_is_still_there_too(self):
+        prompt = build_system_prompt("he")
+        assert "MASCULINE grammatical forms" in prompt
+
+    def test_hebrew_only_rules_absent_for_other_languages(self):
+        prompt = build_system_prompt("es")
+        assert "noun phrase" not in prompt
+        assert "U+05F3" not in prompt

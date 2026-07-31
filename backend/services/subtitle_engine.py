@@ -74,6 +74,28 @@ PAUSE_SPLIT_GAP = 0.35
 #: merge step exists to repair sub-second splinters, not to span dead air.
 MERGE_MAX_GAP = 1.0
 
+#: Characters per second above which a SOURCE cue is treated as an ASR hallucination
+#: rather than as speech, and dropped before translation and rendering.
+#:
+#: Why 35 and not the editorial 17
+#: -------------------------------
+#: :data:`translation_v2.DEFAULT_MAX_CPS` (17) is a READING limit — how fast a viewer can
+#: take text in. This is a different quantity entirely: a PHYSICAL limit on how fast a
+#: human being can speak. Conversational English runs ~12-16 CPS and fast auctioneer-grade
+#: delivery tops out near 25. 35 is therefore roughly double normal speech and comfortably
+#: above any real delivery, so a cue that breaks it is not a person talking fast — it is
+#: the ASR having invented text and given it no time to occupy.
+#:
+#: Whisper's characteristic hallucination is exactly this shape: a fully-formed sentence
+#: stamped onto a fraction of a second of near-silence. Two real examples from this
+#: project's own runs measured 48 and 50 CPS, and a fabricated Trump line measured 219
+#: (57 characters in 0.26s). Nothing at 35+ CPS has ever been genuine speech here.
+#:
+#: The threshold is deliberately generous. A false positive silently deletes something a
+#: speaker really said, which is worse than letting one hallucination through, so this
+#: sits far above the ambiguous band rather than at the edge of it.
+MAX_SOURCE_CPS = 35.0
+
 #: Shortest cue that can actually be seen (~1 frame at 25 fps). A cue that cannot
 #: be given this much time without overlapping its neighbour is not shortened to
 #: zero \u2014 it is folded into that neighbour. See :func:`words_to_cues`.
@@ -86,11 +108,25 @@ RLI = "\u2067"  # RIGHT-TO-LEFT ISOLATE
 LRI = "\u2066"  # LEFT-TO-RIGHT ISOLATE
 PDI = "\u2069"  # POP DIRECTIONAL ISOLATE
 
-GERSHAYIM = "״"  # ״ HEBREW PUNCTUATION GERSHAYIM
+GERSHAYIM = "״"  # ״ HEBREW PUNCTUATION GERSHAYIM (acronyms: צה״ל)
+GERESH = "׳"  # ׳ HEBREW PUNCTUATION GERESH (foreign phonemes: ג׳ורג׳)
 
 # Hebrew letters only: alef-tav plus the yod/vav ligatures. Deliberately not
 # the whole U+0590-U+05FF block, which also holds niqqud and punctuation.
 _HEBREW_LETTERS = "\u05d0-\u05ea\u05ef-\u05f2"
+
+#: The four Hebrew letters that actually take a geresh to carry a foreign phoneme in
+#: modern Hebrew: \u05d2\u05f3 = j, \u05d6\u05f3 = zh, \u05e6\u05f3/\u05e5\u05f3 = ch/tch. Restricting the rule to these is what
+#: makes it safe to fire at the END of a word as well as between two letters \u2014 and
+#: firing at the end is not optional, because the defect this exists to fix is names
+#: like \u05d2'\u05d5\u05e8\u05d2', whose SECOND apostrophe is word-final and a between-letters rule misses.
+#:
+#: Every other Hebrew letter is excluded on purpose. \u05e8, \u05d5, \u05d3 and \u05ea do take a geresh in
+#: academic Arabic transliteration, but they are also very common word-FINAL letters
+#: (\u05d3\u05d1\u05e8, \u05e9\u05d9\u05e8, \u05e1\u05e4\u05e8), so admitting them would rewrite the closing quote of any
+#: single-quoted Hebrew word. The residual false positive \u2014 a closing ' immediately
+#: after \u05d2/\u05d6/\u05e6/\u05e5 \u2014 is a far rarer shape than the names this repairs.
+_GERESH_LETTERS = "\u05d2\u05d6\u05e6\u05e5"  # \u05d2 \u05d6 \u05e6 \u05e5
 
 # A word ends a sentence when it ends with . ! ? possibly followed by a closer.
 _TERMINAL_RE = re.compile(r"[.!?][\"'”’)\]]*$")
@@ -98,6 +134,13 @@ _TERMINAL_RE = re.compile(r"[.!?][\"'”’)\]]*$")
 _SENTENCE_END_RE = re.compile(r"[.!?][\"'”’)\]]*(?:\s|$)")
 # ASCII '"' between two Hebrew letters is an acronym mark, not a quote.
 _GERSHAYIM_RE = re.compile(f'(?<=[{_HEBREW_LETTERS}])"(?=[{_HEBREW_LETTERS}])')
+
+# An apostrophe DIRECTLY after ג/ז/צ/ץ is a geresh. No lookahead is needed and none is
+# used: the lookbehind alone already protects every English apostrophe, because those
+# are preceded by a Latin letter (don't, it's, Charles') and never by a Hebrew one.
+# U+2019 (the curly ’) is matched too — GPT-4o emits it interchangeably with ASCII ',
+# and it is the same defect wearing a different codepoint.
+_GERESH_RE = re.compile(f"(?<=[{_GERESH_LETTERS}])['’]")
 
 # Unicode bidirectional categories, used by the bidi pass below instead of a
 # hand-maintained character class (which is exactly what got this wrong before:
@@ -373,6 +416,38 @@ def _split_long_group(
     )
 
 
+def _can_merge(
+    previous: list[dict[str, Any]],
+    group: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    max_dur: float,
+) -> bool:
+    """Is folding ``group`` onto the end of ``previous`` a legal cue merge?
+
+    The single definition of a legal merge, used by BOTH merge steps in
+    :func:`words_to_cues` — the short-fragment repair and the minimum-duration floor.
+    Two steps with two hand-inlined copies of these five conditions is how they drift.
+
+      * the combined text still fits the cue's character budget;
+      * the combined span is at most ``max_dur``;
+      * the silence between them is at most :data:`MERGE_MAX_GAP` — two utterances
+        further apart than that are not one breath, however short they are;
+      * ``previous`` does not end in ``?`` — the cheapest available proxy for a speaker
+        turn, and gluing a question to its answer is the defect this engine exists to
+        remove;
+      * ``previous`` does not already hold two sentences.
+    """
+    prev_text = _text_of(previous)
+    return (
+        len(prev_text) + 1 + len(_text_of(group)) <= max_chars
+        and (group[-1]["e"] - previous[0]["s"]) <= max_dur
+        and (group[0]["s"] - previous[-1]["e"]) <= MERGE_MAX_GAP
+        and not prev_text.rstrip().endswith("?")
+        and _sentence_count(prev_text) < 2
+    )
+
+
 def words_to_cues(
     words: list[dict[str, Any]],
     *,
@@ -381,6 +456,7 @@ def words_to_cues(
     min_dur: float = MIN_CUE_DUR,
     max_dur: float = MAX_CUE_DUR,
     min_gap: float = MIN_CUE_GAP,
+    asr_primed: bool = False,
 ) -> list[dict[str, Any]]:
     """Re-spot word timestamps into readable subtitle cues.
 
@@ -397,6 +473,11 @@ def words_to_cues(
          speaker turn, and merging across one is the defect this engine exists to
          remove. The gap rule stops "Hello." at 0.0-0.5s being glued to "Bye." at
          5.5-6.0s just because the second one is short.
+      3c. **Floor** — a cue whose successor starts less than ``min_dur`` after it
+         begins can never be granted ``min_dur`` by step 4, because there is no dead
+         air left to grant. It is merged into that successor (the same
+         :func:`_can_merge` constraints) rather than shipped under the floor. When
+         that merge is impossible the short cue survives and a WARNING says so.
       4. **Lead-out** — each cue's end grows into the dead air ahead of it, up to
          ``next_start - min_gap`` and never past ``start + max_dur``; when cues
          collide the end shrinks instead, but not below ``start + min_dur``.
@@ -410,11 +491,20 @@ def words_to_cues(
         min_dur: shortest readable cue, seconds.
         max_dur: longest cue, seconds.
         min_gap: gap left between consecutive cues, seconds.
+        asr_primed: whether the transcript came from an ASR run primed for punctuation
+            (``transcription_service.ASR_PUNCTUATION_PRIMER``). Affects LOGGING ONLY,
+            never behaviour. The pause fallback firing on an unprimed transcript is
+            routine; firing on a PRIMED one means the primer failed on this clip, which
+            is a materially more interesting event and is logged as such.
 
     Returns:
         ``[{"start": float, "end": float, "text": str}, ...]`` sorted by start,
         non-overlapping, and every cue with a strictly positive duration. Word
         order and wording are preserved exactly.
+
+        **Postcondition:** every cue lasts at least ``min_dur``, except ones this
+        function logged a WARNING about (step 3c could not merge them) and the
+        ~1ms that rounding to milliseconds can cost.
     """
     clean = _normalize_words(words)
     if not clean:
@@ -435,10 +525,22 @@ def words_to_cues(
     # path untouched.
     terminals = sum(1 for w in clean if _TERMINAL_RE.search(w["w"]))
     sparse_punctuation = len(clean) >= 8 and terminals == 0
-    if sparse_punctuation:
+    if sparse_punctuation and asr_primed:
+        # The fallback is now the SECOND line of defence: ASR punctuation priming
+        # (transcription_service.ASR_PUNCTUATION_PRIMER) removed the attractor on every
+        # clip it was measured against, so this branch means priming did not hold on
+        # this one. Kept — a safety net you only find out about when it catches you is
+        # working as designed — but it is a WARNING now, not routine information.
+        logger.warning(
+            "spotting: no terminal punctuation in %d words DESPITE ASR punctuation "
+            "priming — the large-v3 attractor survived the primer on this clip; "
+            "falling back to pause-based sentence boundaries",
+            len(clean),
+        )
+    elif sparse_punctuation:
         logger.info(
             "spotting: no terminal punctuation in %d words — "
-            "pause-based sentence fallback engaged",
+            "pause-based sentence fallback engaged (ASR was not punctuation-primed)",
             len(clean),
         )
 
@@ -462,17 +564,13 @@ def words_to_cues(
     # 3. merge short fragments into the previous cue when it is safe to do so
     merged: list[list[dict[str, Any]]] = []
     for group in groups:
-        if merged and _span_of(group) < min_dur:
-            previous = merged[-1]
-            prev_text = _text_of(previous)
-            fits = len(prev_text) + 1 + len(_text_of(group)) <= max_chars
-            span_ok = (group[-1]["e"] - previous[0]["s"]) <= max_dur
-            gap_ok = (group[0]["s"] - previous[-1]["e"]) <= MERGE_MAX_GAP
-            ends_question = prev_text.rstrip().endswith("?")
-            room_for_sentence = _sentence_count(prev_text) < 2
-            if fits and span_ok and gap_ok and not ends_question and room_for_sentence:
-                merged[-1] = previous + group
-                continue
+        if (
+            merged
+            and _span_of(group) < min_dur
+            and _can_merge(merged[-1], group, max_chars=max_chars, max_dur=max_dur)
+        ):
+            merged[-1] = merged[-1] + group
+            continue
         merged.append(group)
 
     # 3b. degenerate-input repair. Two groups that begin at (effectively) the same
@@ -493,9 +591,41 @@ def words_to_cues(
             continue
         collapsed.append(group)
 
+    # 3c. minimum-duration FLOOR (not an aspiration).
+    #
+    # Step 4 grows each cue into the dead air ahead of it, but when the next cue starts
+    # less than `min_dur` after this one begins there is no dead air to grow into, and
+    # the anti-overlap clamp wins: cues of 0.72s, 0.96s and 1.06s shipped from a real
+    # job against a declared 1.2s floor. `min_dur` was a wish, not a guarantee.
+    #
+    # A cue that cannot be given its floor is NOT shortened to fit — it is merged into
+    # the neighbour crowding it, under exactly the constraints step 3 uses
+    # (:func:`_can_merge`), so the two steps can never disagree about what a legal merge
+    # is. Only when the merge is genuinely impossible — almost always the character
+    # budget — does a short cue survive, and then it is logged rather than shipped
+    # silently. That residue is the honest trade: text that cannot fit one cue is worse
+    # than a cue held slightly too briefly.
+    floored: list[list[dict[str, Any]]] = []
+    for group in collapsed:
+        if floored:
+            previous = floored[-1]
+            room = group[0]["s"] - previous[0]["s"]
+            if room < min_dur:
+                if _can_merge(previous, group, max_chars=max_chars, max_dur=max_dur):
+                    floored[-1] = previous + group
+                    continue
+                logger.warning(
+                    "spotting: %r can only be shown for %.2fs (floor %.2fs) and cannot "
+                    "be merged into the next cue — shipping the compromise",
+                    _text_of(previous)[:40],
+                    room,
+                    min_dur,
+                )
+        floored.append(group)
+
     cues = [
         {"start": g[0]["s"], "end": max(g[-1]["e"], g[0]["s"]), "text": _text_of(g)}
-        for g in collapsed
+        for g in floored
     ]
 
     # 4. lead-out / anti-overlap
@@ -509,6 +639,16 @@ def words_to_cues(
             cue["end"] = max(limit, cue["start"] + min_dur)  # shrink, but stay readable
         else:
             cue["end"] = min(limit, cue["start"] + max_dur)  # extend into dead air
+        # The floor applies to BOTH branches. The extend branch stops at
+        # `next_start - min_gap`, which is itself under the floor whenever two cues sit
+        # between `min_dur` and `min_dur + min_gap` apart — a narrow window, but the
+        # source of every sub-floor cue that step 3c does not already catch. When the two
+        # constraints collide the gap yields, not the floor: a cue too short to read is
+        # a defect, a gap 80ms narrower than ideal is not.
+        if cue["end"] < cue["start"] + min_dur:
+            cue["end"] = cue["start"] + min_dur
+            if next_start is not None:
+                cue["end"] = min(cue["end"], next_start)
         if next_start is not None and cue["end"] > next_start:
             cue["end"] = next_start  # hard guarantee: never overlap
         # Step 3b guarantees next_start - start >= MIN_VISIBLE_DUR, so the clamp
@@ -525,6 +665,94 @@ def words_to_cues(
         len(cues),
     )
     return cues
+
+
+# =============================================================================
+# hallucination gate
+# =============================================================================
+def drop_hallucinated_cues(
+    cues: list[dict[str, Any]],
+    *,
+    max_cps: float = MAX_SOURCE_CPS,
+    key: str = "text",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split source cues into (kept, dropped-as-probable-ASR-hallucination).
+
+    The defect this closes
+    ----------------------
+    Whisper invents text. Not often, but it does, and its inventions have a signature:
+    a complete, grammatical sentence pinned to a fraction of a second of near-silence —
+    text that is *physically impossible to have been spoken* in the time it occupies.
+    Until now the pipeline translated those faithfully, paid OpenAI tokens to do it, and
+    burned the result into the picture. A hallucination rendered in fluent Hebrew is
+    strictly worse than one rendered in English: it is invisible to the person who could
+    have caught it.
+
+    This runs on the SOURCE, before translation, for three reasons: the CPS signature is
+    only meaningful in the language that was actually spoken; a dropped cue costs no
+    translation tokens; and the surrounding cues are then never given a fabricated
+    sentence as scene context.
+
+    Deliberately NOT a repair
+    -------------------------
+    A flagged cue is removed, not re-timed and not shortened. There is no honest way to
+    recover a real utterance from an invented one, and stretching its timing would only
+    make the invention easier to read.
+
+    Args:
+        cues: cue dicts with ``start``, ``end`` and ``key``.
+        max_cps: characters-per-second ceiling; see :data:`MAX_SOURCE_CPS`. A cue is
+            dropped only when it is **strictly above** this, so a cue measuring exactly
+            the threshold is kept.
+        key: which field carries the source text.
+
+    Returns:
+        ``(kept, dropped)``. Both hold the ORIGINAL dicts, unmodified, in input order —
+        except that each dropped cue is copied and annotated with ``"cps"`` and
+        ``"drop_reason"`` so the archive records why it went. Cues with a non-positive
+        duration are KEPT: a zero-length cue has infinite CPS by arithmetic alone, which
+        says nothing about whether its text is real, and the spotting stage already has
+        rules for those.
+    """
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for cue in cues or []:
+        text = str(cue.get(key) or "").strip()
+        try:
+            duration = float(cue.get("end", 0) or 0) - float(cue.get("start", 0) or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        if not text or duration <= 0:
+            kept.append(cue)
+            continue
+        cps = len(text) / duration
+        if cps > max_cps:
+            record = dict(cue)
+            record["cps"] = round(cps, 2)
+            record["drop_reason"] = f"source CPS {cps:.1f} > {max_cps:.0f}"
+            dropped.append(record)
+            logger.warning(
+                "hallucination gate: dropping cue at %.2f-%.2fs — %d chars in %.2fs is "
+                "%.1f CPS (limit %.0f), which is not humanly speakable: %r",
+                float(cue.get("start", 0) or 0),
+                float(cue.get("end", 0) or 0),
+                len(text),
+                duration,
+                cps,
+                max_cps,
+                text[:120],
+            )
+            continue
+        kept.append(cue)
+
+    if dropped:
+        logger.warning(
+            "hallucination gate: dropped %d of %d source cues as probable ASR "
+            "hallucination",
+            len(dropped),
+            len(cues or []),
+        )
+    return kept, dropped
 
 
 # =============================================================================
@@ -716,6 +944,35 @@ def gershayim(text: str) -> str:
     return _GERSHAYIM_RE.sub(GERSHAYIM, text)
 
 
+def geresh(text: str) -> str:
+    """Replace an apostrophe carrying a foreign phoneme in Hebrew with U+05F3 (׳).
+
+    The sibling of :func:`gershayim`, and the answer to a real regression: the legacy
+    path produced ג׳ורג׳ (via ``utils.rtl_utils.fix_hebrew_quotes``) while the v2 path
+    shipped ג'ורג' with an ASCII apostrophe, which is simply wrong Hebrew typography and
+    renders as a straight tick rather than a mark.
+
+    Fires only after ג, ז, צ or ץ — the letters that take a geresh in modern Hebrew — so
+    English apostrophes (``don't``, ``Charles'``) and quotes around Hebrew words ending
+    in any other letter are untouched. Both the ASCII ``'`` and the curly ``’`` convert.
+
+    Unlike ``fix_hebrew_quotes``, which rewrote any ``'...'`` pair into ``׳...׳`` and so
+    mangled English quotations inside a Hebrew line, this never looks at pairs at all.
+    """
+    if not text:
+        return text
+    return _GERESH_RE.sub(GERESH, text)
+
+
+def hebrew_typography(text: str) -> str:
+    """Apply every Hebrew punctuation repair the renderer owes the text.
+
+    One entry point so a caller cannot apply half of them, which is exactly how the
+    geresh came to be missing while the gershayim was applied.
+    """
+    return geresh(gershayim(text))
+
+
 def _ltr_runs(line: str) -> list[tuple[int, int]]:
     """Maximal ``[start, end]`` index pairs of stretches to keep left-to-right.
 
@@ -883,7 +1140,7 @@ def build_ass(
 
     events: list[str] = []
     for cue in cues or []:
-        lines = wrap_two_lines(gershayim(_ass_safe(cue.get("text", ""))), max_line)
+        lines = wrap_two_lines(hebrew_typography(_ass_safe(cue.get("text", ""))), max_line)
         if rtl:
             lines = [bidi_isolate(line) for line in lines]
         body = "\\N".join(lines)
