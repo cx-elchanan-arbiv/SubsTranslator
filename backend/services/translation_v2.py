@@ -44,6 +44,7 @@ import json
 import logging
 import math
 import os
+import time
 
 try:  # pinned: openai==1.35.13
     from openai import OpenAI
@@ -485,24 +486,86 @@ def _parse_cue_map(content: str) -> dict:
     return out
 
 
+def _record_llm(recorder, stage: str, system: str, user: str, response, meta: dict) -> None:
+    """Hand one request/response pair to an optional research recorder.
+
+    The recorder is **duck-typed and optional on purpose**: this module must stay
+    importable and unit-testable with no knowledge of where research archives live, so
+    it never imports ``services.research_recorder``. Anything exposing
+    ``record_llm(stage, system, user, response, meta)`` will do, including a test spy.
+
+    A recorder that raises is logged at WARNING and ignored. Archiving a run is
+    strictly less important than completing it.
+    """
+    if recorder is None:
+        return
+    try:
+        recorder.record_llm(stage=stage, system=system, user=user, response=response, meta=meta)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("translation_v2: research recorder raised %s — ignored", exc)
+
+
 def _request_cue_map(
-    client, model: str, system: str, user: str, usage: TokenUsage, max_tokens=None
+    client,
+    model: str,
+    system: str,
+    user: str,
+    usage: TokenUsage,
+    max_tokens=None,
+    *,
+    recorder=None,
+    stage: str = "translate",
 ) -> dict:
     kwargs = {}
     if max_tokens:
         kwargs["max_tokens"] = int(max_tokens)
-    response = client.chat.completions.create(
-        model=model,
-        temperature=TEMPERATURE,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        timeout=DEFAULT_TIMEOUT_S,
-        **kwargs,
-    )
+    started = time.time()
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            temperature=TEMPERATURE,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            timeout=DEFAULT_TIMEOUT_S,
+            **kwargs,
+        )
+    except Exception as exc:
+        # The corpus needs the failures too: a request that never came back is the
+        # most interesting row in it.
+        _record_llm(
+            recorder,
+            stage,
+            system,
+            user,
+            None,
+            {
+                "model": model,
+                "latency_s": round(time.time() - started, 3),
+                "max_tokens": int(max_tokens) if max_tokens else None,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+        raise
+    latency = time.time() - started
     _record_usage(usage, response, model)
+    raw_usage = getattr(response, "usage", None)
+    _record_llm(
+        recorder,
+        stage,
+        system,
+        user,
+        response,
+        {
+            "model": model,
+            "latency_s": round(latency, 3),
+            "max_tokens": int(max_tokens) if max_tokens else None,
+            "prompt_tokens": _safe_int(getattr(raw_usage, "prompt_tokens", 0)),
+            "completion_tokens": _safe_int(getattr(raw_usage, "completion_tokens", 0)),
+        },
+    )
     return _parse_cue_map(_extract_content(response))
 
 
@@ -516,10 +579,12 @@ def translate_cues(
     target_lang,
     *,
     style="clean",
+    max_chars_per_cue=DEFAULT_MAX_CHARS_PER_CUE,
     model=DEFAULT_MODEL,
     client=None,
     context_note=None,
     progress_callback=None,
+    recorder=None,
 ):
     """
     Translate subtitle cues with whole-scene context.
@@ -532,6 +597,12 @@ def translate_cues(
         style: ``"clean"`` removes spoken filler, ``"faithful"`` keeps it. This is a
             **user choice** surfaced in the UI, not hidden behaviour — the two values
             produce two explicitly different prompt rules.
+        max_chars_per_cue: the per-cue character budget written into the prompt. The
+            default 84 is 2 lines x 42 — correct only for a frame wide enough to draw
+            42 characters. Callers that know the frame pass
+            ``subtitle_engine.layout_params(...)["max_chars_per_cue"]`` instead: on a
+            720x1280 portrait clip that is 66, and asking the model for 84 there means
+            asking for text that cannot be rendered.
         model: chat model id (default ``gpt-4o``).
         client: an ``openai.OpenAI`` instance. Built from ``OPENAI_API_KEY`` if omitted.
         context_note: optional one-line scene description injected into the system
@@ -542,6 +613,11 @@ def translate_cues(
             so without this the UI sits on one frozen step for the whole pass.
             Exceptions raised by the callback are logged and swallowed — reporting
             progress must never be able to fail a translation.
+        recorder: optional research recorder (duck-typed: anything with a
+            ``record_llm(stage, system, user, response, meta)`` method). Every request
+            this function makes — scene chunks and the targeted retry — is handed over
+            verbatim. ``None`` disables it entirely, and a recorder that raises is
+            logged and ignored; see :func:`_record_llm`.
 
     Returns:
         :class:`TranslationResult` — a ``list[dict]`` of cue copies each with an added
@@ -585,7 +661,7 @@ def translate_cues(
     system = build_system_prompt(
         target_lang,
         style,
-        max_chars_per_cue=DEFAULT_MAX_CHARS_PER_CUE,
+        max_chars_per_cue=max_chars_per_cue,
         context_note=context_note,
     )
     client = _resolve_client(client)
@@ -618,7 +694,13 @@ def translate_cues(
         )
 
         translated = _request_cue_map(
-            client, model, system, build_user_prompt(target_lang, items), usage
+            client,
+            model,
+            system,
+            build_user_prompt(target_lang, items),
+            usage,
+            recorder=recorder,
+            stage=f"translate_chunk_{chunk_index + 1}",
         )
 
         extra = set(translated) - set(target_ids)
@@ -651,6 +733,8 @@ def translate_cues(
                     system,
                     build_user_prompt(target_lang, retry_items),
                     usage,
+                    recorder=recorder,
+                    stage=f"translate_retry_{chunk_index + 1}",
                 )
             except TranslationV2Error as exc:
                 logger.error("translation_v2: retry request failed: %s", exc)
@@ -740,6 +824,7 @@ def enforce_cps(
     model=DEFAULT_MODEL,
     client=None,
     progress_callback=None,
+    recorder=None,
 ):
     """
     Optional pass: condense cues that break the reading-speed budget.
@@ -747,6 +832,11 @@ def enforce_cps(
     Defaults are the Netflix Hebrew TTSG limits: 17 characters per second and 84
     characters per cue (2 lines x 42). Per cue the effective budget is
     ``min(max_chars_per_cue, floor(max_cps * duration))``.
+
+    ``max_chars_per_cue`` is a *frame* property as much as an editorial one — pass
+    ``subtitle_engine.layout_params(...)["max_chars_per_cue"]`` so a portrait video is
+    condensed to what its narrow frame can render (66 chars at 720x1280) rather than to
+    the landscape 84.
 
     Only the violating cues are sent, in batches of at most
     :data:`MAX_CUES_PER_CPS_REQUEST`, each with an explicit ``max_tokens`` ceiling.
@@ -759,6 +849,8 @@ def enforce_cps(
         cues: cue dicts with ``start``, ``end`` and ``translated`` (as produced by
             :func:`translate_cues`). Not mutated; copies are returned.
         progress_callback: ``(done, total, message)``, called per batch. Best effort.
+        recorder: optional research recorder, same contract as
+            :func:`translate_cues` — every condensation request is archived verbatim.
 
     Returns:
         :class:`TranslationResult` (``list[dict]``) with a ``.usage`` attribute.
@@ -829,6 +921,8 @@ def enforce_cps(
                 user,
                 usage,
                 max_tokens=len(batch) * CPS_TOKENS_PER_CUE,
+                recorder=recorder,
+                stage=f"cps_batch_{batch_index + 1}",
             )
         except TranslationV2Error as exc:
             # Cosmetic pass: a failure here must not fail the job, and must not
@@ -883,15 +977,38 @@ def _duration(cue) -> float:
         return 0.0
 
 
+def _measured_text(cue) -> str:
+    """The text a reading-speed measurement should actually be taken on.
+
+    The translation arrives under one of TWO spellings depending on where in the
+    pipeline the cue is: :func:`translate_cues` writes ``translated``, and
+    ``subtitle_pipeline.normalize_cues`` immediately rewrites that to
+    ``translated_text``. ``process_video_task`` normalises before measuring, so a
+    reader that only knows ``translated`` silently falls through to ``text`` and
+    measures the untranslated SOURCE — which is a different language, a different
+    length, and therefore a meaningless CPS number reported as a real one.
+
+    Blank is treated as absent (not merely missing), for the same reason
+    ``normalize_cues`` does: the previous stage leaves ``translated_text: ""`` behind.
+    """
+    for key in ("translated", "translated_text", "text"):
+        value = cue.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
 def cps_report(cues, *, max_cps=DEFAULT_MAX_CPS, max_chars_per_cue=DEFAULT_MAX_CHARS_PER_CUE):
     """
     Measure-only helper: per-cue characters, duration, CPS and whether it is in budget.
 
-    Useful for logging quality metrics without calling the API.
+    Useful for logging quality metrics without calling the API. Measures the
+    TRANSLATION when there is one, under either of the two key spellings the pipeline
+    uses — see :func:`_measured_text`.
     """
     report = []
     for idx, cue in enumerate(cues or [], 1):
-        text = (cue.get("translated") or cue.get("text") or "").strip()
+        text = _measured_text(cue)
         duration = _duration(cue)
         cps = (len(text) / duration) if duration > 0 else float("inf")
         report.append(

@@ -842,3 +842,73 @@ class TestRobustnessRules:
         prompt = build_system_prompt("he")
         assert "MASCULINE" in prompt
         assert "mid-conversation" in prompt
+
+
+@pytest.mark.unit
+class TestCpsReport:
+    """``cps_report`` must measure the TRANSLATION, in whichever key it arrives under.
+
+    The bug this class was written for: ``cps_report`` read ``translated`` only, but
+    ``process_video_task`` calls it AFTER ``subtitle_pipeline.normalize_cues``, which
+    has already renamed that key to ``translated_text``. So every reported
+    ``cps_over_budget`` figure was measured on the untranslated English source. Caught
+    by re-deriving the number from an archived research run (64-cue portrait job:
+    the pipeline logged 39 cues over budget; the Hebrew it actually rendered had 2).
+    """
+
+    CUES = [
+        # 20 Hebrew chars in 2s = 10 CPS, comfortably in budget...
+        {"start": 0.0, "end": 2.0, "text": "a" * 60, "translated_text": "כן, אני חושב על זה."},
+    ]
+
+    def test_translated_text_is_preferred_over_the_source(self):
+        from services.translation_v2 import cps_report
+
+        report = cps_report(self.CUES)
+        assert report[0]["chars"] == 19  # the Hebrew, not the 60-char source
+        assert report[0]["ok"] is True
+
+    def test_the_bug_would_have_reported_the_source_as_over_budget(self):
+        """Guards the guard: measuring ``text`` here must give a different verdict."""
+        from services.translation_v2 import cps_report
+
+        assert cps_report(self.CUES, max_chars_per_cue=40)[0]["ok"] is True
+        # ...whereas the 60-char source at 2s is 30 CPS and 60 chars: over on both counts.
+        source_only = [{"start": 0.0, "end": 2.0, "text": "a" * 60}]
+        assert cps_report(source_only, max_chars_per_cue=40)[0]["ok"] is False
+
+    def test_translated_key_still_wins(self):
+        """Pre-normalisation cues (straight out of ``translate_cues``) still work."""
+        from services.translation_v2 import cps_report
+
+        cues = [{"start": 0.0, "end": 2.0, "text": "x" * 60, "translated": "שלום."}]
+        assert cps_report(cues)[0]["chars"] == len("שלום.")
+
+    def test_a_blank_translation_falls_through_to_the_source(self):
+        """An untranslated cue must be measured, not silently reported as 0 chars."""
+        from services.translation_v2 import cps_report
+
+        cues = [{"start": 0.0, "end": 2.0, "text": "hello there", "translated_text": ""}]
+        assert cps_report(cues)[0]["chars"] == len("hello there")
+
+    def test_the_frame_budget_is_honoured(self):
+        """A portrait job measures against 66 chars, not the landscape 84."""
+        from services.translation_v2 import cps_report
+
+        cues = [{"start": 0.0, "end": 10.0, "text": "", "translated_text": "ש" * 70}]
+        assert cps_report(cues, max_chars_per_cue=84)[0]["ok"] is True
+        assert cps_report(cues, max_chars_per_cue=66)[0]["ok"] is False
+
+    def test_zero_duration_is_never_in_budget(self):
+        from services.translation_v2 import cps_report
+
+        cues = [{"start": 1.0, "end": 1.0, "text": "", "translated_text": "שלום."}]
+        report = cps_report(cues)
+        assert report[0]["cps"] is None
+        assert report[0]["ok"] is True  # length is fine; duration cannot be judged
+
+    def test_empty_input(self):
+        from services.translation_v2 import cps_report
+
+        assert cps_report([]) == []
+        assert cps_report(None) == []

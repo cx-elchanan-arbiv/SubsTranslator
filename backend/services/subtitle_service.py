@@ -16,7 +16,7 @@ from config import get_config
 from core.exceptions import FFmpegProcessError, FFmpegTimeoutError, FileNotFoundError
 from logging_config import get_logger, log_external_service_call
 from performance_monitor import performance_monitor  # Phase A: Import performance monitoring
-from services.subtitle_engine import build_ass
+from services.subtitle_engine import build_ass, layout_params
 from utils.rtl_utils import add_rtl_markers, clean_rtl_text, is_rtl_language
 
 logger = get_logger(__name__)
@@ -732,13 +732,17 @@ class SubtitleService:
     # render_v2: ASS subtitles via FFmpeg's `ass` filter (opt-in)
     # ------------------------------------------------------------------
 
-    def _probe_video_dimensions(self, video_path: str) -> tuple[int, int]:
+    def probe_video_dimensions(self, video_path: str) -> tuple[int, int]:
         """Return the video's real pixel dimensions, or the 1080p default on failure.
 
-        ``build_ass`` sizes the font and margins as fractions of the height and sets
-        ``PlayResX/Y`` to match, so passing the true dimensions is what makes the result
-        look identical at 720p and 4K. The legacy render path only ever probes
-        ``-show_format`` (duration) — resolution was never needed before.
+        ``subtitle_engine.layout_params`` derives the font size, the margins AND the
+        per-line character budget from these two numbers, so they are needed *before*
+        translation, not only at render time — which is why this is public. The legacy
+        render path only ever probes ``-show_format`` (duration); resolution was never
+        needed before.
+
+        Never raises: an unprobeable file falls back to 1920x1080, i.e. to exactly the
+        landscape behaviour that predates the width-aware layout.
         """
         try:
             probe_cmd = [
@@ -765,6 +769,10 @@ class SubtitleService:
         )
         return 1920, 1080
 
+    #: Kept so nothing that reached for the private name breaks; the public one is
+    #: the same method.
+    _probe_video_dimensions = probe_video_dimensions
+
     def create_video_with_ass(
         self,
         video_path: str,
@@ -777,6 +785,7 @@ class SubtitleService:
         watermark_opacity: float = 0.4,
         watermark_size_height: int = 80,
         progress_callback: Optional[Callable[[int], None]] = None,
+        layout: "dict | None" = None,
     ) -> bool:
         """Burn in subtitles from a generated ``.ass`` file (the ``render_v2`` path).
 
@@ -795,6 +804,10 @@ class SubtitleService:
             use_translation: render ``translated_text`` (falling back to ``text`` per cue)
                 rather than the source text.
             watermark_path: when given and present on disk, overlay it in the same pass.
+            layout: the ``subtitle_engine.layout_params`` dict the upstream stages
+                budgeted their character counts against. Omitted, it is derived here
+                from the probed dimensions — the same inputs, so the same answer; the
+                parameter exists so the caller can prove they agree rather than assume it.
 
         Returns:
             True on success. The generated ``.ass`` file is kept next to the output so the
@@ -837,14 +850,18 @@ class SubtitleService:
                 self.logger.error("No renderable cues for ASS subtitles")
                 return False
 
-            video_w, video_h = self._probe_video_dimensions(video_path)
+            if layout:
+                video_w, video_h = layout["video_w"], layout["video_h"]
+            else:
+                video_w, video_h = self.probe_video_dimensions(video_path)
+                layout = layout_params(video_w, video_h)
             # Prefix match, exactly as the legacy render functions do, so "he-IL" is
             # still recognised as RTL (utils.rtl_utils.is_rtl_language demands an exact
             # code and would answer False for it).
             rtl_languages = ("he", "ar", "fa", "ur", "yi")
             is_rtl = any((target_language or "").startswith(lang) for lang in rtl_languages)
             ass_content = build_ass(
-                render_cues, video_w=video_w, video_h=video_h, rtl=is_rtl
+                render_cues, video_w=video_w, video_h=video_h, rtl=is_rtl, layout=layout
             )
             with open(ass_path, "w", encoding="utf-8") as f:
                 f.write(ass_content)
@@ -854,6 +871,8 @@ class SubtitleService:
                 ass_path=os.path.basename(ass_path),
                 cues_count=len(render_cues),
                 video_resolution=f"{video_w}x{video_h}",
+                font_px=layout["font_px"],
+                max_line_chars=layout["max_line_chars"],
             )
 
             # `shaping=complex` is valid ONLY on the `ass` filter (the `subtitles` filter

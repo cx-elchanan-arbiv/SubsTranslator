@@ -248,6 +248,22 @@ class Config:
     # YouTube Download Feature Toggle
     ENABLE_YOUTUBE_DOWNLOAD = os.getenv("ENABLE_YOUTUBE_DOWNLOAD", "True").lower() == "true"
 
+    # Research Recorder — full per-run archive for corpus analysis.
+    # Every run writes an immutable, timestamped directory under RESEARCH_DIR: the
+    # inputs, every intermediate cue list, every LLM request/response and copies of the
+    # outputs. This exists because /app/downloads is keyed by FILENAME, so a second run
+    # of the same video overwrites the first and the comparison is lost forever.
+    # RESEARCH_DIR lives on the `storage` volume, which survives container rebuilds.
+    RESEARCH_DIR = os.getenv("RESEARCH_DIR", "/app/storage/research")
+    RESEARCH_RECORDER_ENABLED = (
+        os.getenv("RESEARCH_RECORDER_ENABLED", "True").lower() == "true"
+    )
+    #: Largest single output file the recorder will copy, in MB. The final MP4 is
+    #: archived on purpose (owner-approved: the rendered frames ARE the evidence), but a
+    #: pathological multi-GB input must not fill the volume silently — over this it is
+    #: skipped with a WARNING and recorded as skipped in meta.json.
+    RESEARCH_MAX_COPY_MB = int(os.getenv("RESEARCH_MAX_COPY_MB", 4096))
+
     # Testing/CI Fake Mode Configuration
     USE_FAKE_YTDLP = os.getenv("USE_FAKE_YTDLP", "False").lower() == "true"
     FAKE_ASSETS_DIR = os.getenv("FAKE_ASSETS_DIR", "/app/test_assets")

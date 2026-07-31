@@ -18,6 +18,12 @@ in front of the next one (the single biggest CPS win, and standard editorial
 practice). Constraints follow the Netflix Hebrew Timed Text Style Guide:
 42 characters per line, at most 2 lines, ~17 characters per second for adults.
 
+Those editorial limits are ceilings, not constants: the frame gets a vote. See
+:func:`layout_params` — a 42-character line at 6.1% of a PORTRAIT frame's height is
+wider than the frame, and ``WrapStyle: 2`` means libass renders the surplus off the
+edge rather than wrapping it. Every character budget in the pipeline comes from that
+one function so the text that reaches the renderer is text the renderer can fit.
+
 Rendering notes (both re-verified by rendering in this project's own container,
 FFmpeg 7.1.5 / libass 0.17.3 — see ``tests/integration/test_bidi_render.py``)
 --------------------------------------------------------------------------
@@ -50,6 +56,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # --- Netflix Hebrew Timed Text limits (defaults, all overridable) -------------
+#: Characters per line the layout AIMS for. It is a ceiling, not a promise: the real
+#: per-video limit comes out of :func:`layout_params`, which will not let a line be
+#: wider than the frame. See that function for why a fixed 42 is a portrait bug.
 MAX_LINE_CHARS = 42
 MAX_LINES = 2
 MIN_CUE_DUR = 1.2
@@ -102,14 +111,196 @@ _BONUS_SENTENCE_BREAK = 30
 _BONUS_CLAUSE_BREAK = 12
 _PENALTY_TOP_HEAVY = 3
 
-# Horizontal margins in ASS units. WrapStyle 2 disables auto-wrap (we wrap
-# ourselves), so these only guard against edge-hugging on odd aspect ratios.
+# Horizontal margin in ASS units (== pixels, since PlayResX/Y match the video).
+# WrapStyle 2 disables libass's own wrapping, so this is NOT a wrap boundary — it is
+# purely the title-safe inset the layout maths must keep the text inside of.
 _MARGIN_H = 60
+
+#: Hard cap on the horizontal margin as a fraction of the width, so a very narrow
+#: frame cannot end up with a negative usable width. 15% x 2 leaves 70% of the frame.
+#: Any video at least 400px wide keeps the full 60px (0.15 * 400 == 60), so every
+#: real-world resolution — 720p, 1080p, 4K, 720x1280 portrait — is unaffected.
+_MARGIN_H_MAX_FRAC = 0.15
+
+#: Font size as a fraction of the video HEIGHT (the historical, landscape-tuned value).
+DEFAULT_FONT_FRAC = 0.061
+
+#: Bottom margin as a fraction of the video height.
+DEFAULT_MARGIN_V_FRAC = 0.12
+
+#: Floor on the font size, as a fraction of the video height. A portrait frame cannot
+#: fit 42 characters at 6.1% of its (large) height, and the honest trade is a NARROWER
+#: LINE, not microscopic text: below ~3.2% of height the subtitle stops being legible
+#: on a phone, which is the only device that plays 9:16 video.
+MIN_FONT_FRAC = 0.032
+
+#: Rendered line width divided by (characters x font size), for the exact style
+#: :func:`build_ass` emits — Noto Sans Hebrew **Bold**, BorderStyle 4 opaque box,
+#: Outline 3, shaping=complex.
+#:
+#: MEASURED, not guessed: 30 renders (10 real Hebrew subtitle lines of 33-41 characters
+#: x font sizes 60/100/160) inside this project's own container, each rasterised by the
+#: same FFmpeg/libass that renders production output and measured by scanning pixel
+#: columns for the box. The ratio is flat across font sizes (0.3612 / 0.3607 / 0.3623
+#: for the same string at 60/100/160), which is what makes a single constant valid.
+#:
+#:     Hebrew        mean 0.3861   p95 0.4300   max 0.4318
+#:     Hebrew+Latin  mean 0.3903   p95 0.3947   max 0.3956
+#:     Latin lower   mean 0.3741   p95 0.3926   max 0.3932
+#:
+#: 0.44 sits ~2% above the widest real line measured, so the estimate is conservative
+#: for every script this pipeline actually emits. KNOWN LIMIT: Latin ALL-CAPS measures
+#: 0.51 mean / 0.62 max and would overflow this estimate — broadcast subtitles are not
+#: set in caps, and the landscape path has always had that same exposure (there the
+#: geometric limit is never the binding one anyway, see :func:`layout_params`).
+#:
+#: The measurement harness is `tests/integration/test_subtitle_layout_render.py`
+#: (``test_measured_glyph_width_ratio_still_holds``), which re-derives this number from
+#: live renders and fails if the font ever changes underneath it.
+GLYPH_WIDTH_RATIO = 0.44
+
+#: Never let the derived per-line budget collapse to something unwrappable. Only a
+#: frame narrower than ~200px can reach this, and at that size no layout is readable.
+MIN_LINE_CHARS = 8
 
 # Style name. Deliberately NOT "Default": libass appends a built-in "Default"
 # style to every track and resolves style names by scanning the list backwards,
 # so a style of ours called "Default" could lose to libass's Arial fallback.
 STYLE_NAME = "He"
+
+
+# =============================================================================
+# layout: the one place the frame's WIDTH gets a vote
+# =============================================================================
+def layout_params(
+    video_w: int,
+    video_h: int,
+    *,
+    font_frac: float = DEFAULT_FONT_FRAC,
+    margin_v_frac: float = DEFAULT_MARGIN_V_FRAC,
+    max_line_chars: int = MAX_LINE_CHARS,
+    max_lines: int = MAX_LINES,
+    glyph_ratio: float = GLYPH_WIDTH_RATIO,
+    min_font_frac: float = MIN_FONT_FRAC,
+) -> dict[str, Any]:
+    """Derive every layout number for one video from BOTH of its dimensions.
+
+    The bug this exists to kill
+    ---------------------------
+    Sizing the font from the height alone and capping lines at a fixed 42 characters
+    is only safe while the frame is wider than it is tall. On a 720x1280 portrait
+    clip the two rules produce a 78px font and a 42-character line — about 1450px of
+    text on a 720px frame — and because ``WrapStyle: 2`` switches libass's own
+    wrapping OFF, the surplus is not wrapped, it is drawn straight off BOTH edges of
+    the picture. Verified on a real job (``IMG_8975.MP4``, 720x1280).
+
+    The rule
+    --------
+    ``usable_w = video_w - 2 * margin_h`` is the only width text may occupy. A line of
+    ``n`` characters at font size ``f`` renders about ``n * f * glyph_ratio`` pixels
+    wide (:data:`GLYPH_WIDTH_RATIO`, measured — see its docstring). So:
+
+    1. **font size** = ``min(height-derived, width-derived)``, then floored at
+       ``min_font_frac * video_h``. The width-derived term is what a 42-character line
+       would need in order to fit; on 16:9 it is never the smaller of the two, which is
+       precisely why landscape output is bit-for-bit what it was before this function
+       existed. On 9:16 it bites hard, and the floor stops it from answering "26px".
+    2. **characters per line** = how many characters actually fit at that font size,
+       capped at ``max_line_chars`` (a wider frame does not earn longer lines — 42 is
+       an editorial reading-comfort limit, not a geometric one).
+
+    Step 2 is what absorbs the floor applied in step 1: portrait keeps a legible font
+    and pays for it in line length instead of in legibility.
+
+    Worked examples (glyph_ratio 0.44, defaults):
+
+        1280x720   font 44, 42 chars/line  <- unchanged from the height-only rule
+        1920x1080  font 66, 42 chars/line  <- unchanged
+        3840x2160  font 132, 42 chars/line <- unchanged
+        1080x1080  font 51, 42 chars/line  <- square: font shrinks, budget intact
+        720x1280   font 41, 33 chars/line  <- portrait: was 78px / 42 chars, off-frame
+
+    Why not three lines on portrait: with the measured ratio a 720-wide frame still
+    holds 33 characters per line, so two lines carry 66 of the 84-character landscape
+    budget (79%). That is a mild condensation, not a mangling, and it keeps the
+    standard two-line broadcast shape. A third line would buy 33 more characters at
+    the cost of covering another 8% of the picture — not a trade worth making until
+    the budget actually hurts. (At ``glyph_ratio`` 0.55 it would have been 26 chars /
+    52 per cue, and the answer would have gone the other way. Measuring changed the
+    editorial decision — hence the insistence on measuring.)
+
+    Args:
+        video_w: frame width in pixels.
+        video_h: frame height in pixels.
+        font_frac: font size as a fraction of the height (the landscape rule).
+        margin_v_frac: bottom margin as a fraction of the height.
+        max_line_chars: editorial ceiling on characters per line.
+        max_lines: lines per cue.
+        glyph_ratio: rendered width per character per font pixel.
+        min_font_frac: floor on the font size, as a fraction of the height.
+
+    Returns:
+        ``{"video_w", "video_h", "font_px", "margin_h", "margin_v", "usable_w",
+        "max_line_chars", "max_lines", "max_chars_per_cue"}``. ``max_chars_per_cue``
+        is ``max_line_chars * max_lines`` — the ONE number every upstream stage
+        (spotting, translation, the CPS pass, reflow) must budget against, so the text
+        that arrives at the renderer is text the renderer can actually fit.
+    """
+    width = max(1, int(video_w or 0))
+    height = max(1, int(video_h or 0))
+    glyph_ratio = float(glyph_ratio) if glyph_ratio and glyph_ratio > 0 else GLYPH_WIDTH_RATIO
+    max_line_chars = max(1, int(max_line_chars))
+    max_lines = max(1, int(max_lines))
+
+    margin_h = min(_MARGIN_H, int(width * _MARGIN_H_MAX_FRAC))
+    usable_w = max(1, width - 2 * margin_h)
+
+    font_by_height = max(1, round(height * float(font_frac)))
+    # Largest font at which a full-length line still fits between the margins.
+    font_by_width = int(usable_w // (max_line_chars * glyph_ratio))
+    font_floor = max(1, round(height * float(min_font_frac)))
+    font_px = max(font_floor, max(1, min(font_by_height, font_by_width)))
+
+    # How many characters that font actually affords. Never more than the editorial
+    # ceiling: a 4K frame could fit 100 characters per line and must not be given them.
+    fitting_chars = int(usable_w // (font_px * glyph_ratio))
+    effective_line_chars = min(max_line_chars, fitting_chars)
+    if effective_line_chars < MIN_LINE_CHARS:
+        logger.warning(
+            "layout: %dx%d only affords %d chars/line at font %dpx — clamping to %d; "
+            "lines may overflow this frame",
+            width,
+            height,
+            fitting_chars,
+            font_px,
+            MIN_LINE_CHARS,
+        )
+        effective_line_chars = MIN_LINE_CHARS
+
+    params = {
+        "video_w": width,
+        "video_h": height,
+        "font_px": font_px,
+        "margin_h": margin_h,
+        "margin_v": max(0, round(height * float(margin_v_frac))),
+        "usable_w": usable_w,
+        "max_line_chars": effective_line_chars,
+        "max_lines": max_lines,
+        "max_chars_per_cue": effective_line_chars * max_lines,
+    }
+    if effective_line_chars < max_line_chars or font_px < font_by_height:
+        logger.info(
+            "layout: %dx%d -> font %dpx (height rule wanted %dpx), %d chars/line "
+            "(ceiling %d), %d chars/cue — width-constrained frame",
+            width,
+            height,
+            font_px,
+            font_by_height,
+            effective_line_chars,
+            max_line_chars,
+            params["max_chars_per_cue"],
+        )
+    return params
 
 
 # =============================================================================
@@ -346,8 +537,9 @@ def _hard_wrap(text: str, max_line: int) -> list[str]:
     there is not (a 100-character URL has no other option). May return more than two
     lines: an over-long line is drawn straight off the edge of the frame by libass —
     ``WrapStyle: 2`` disables its own wrapping — so a third line is strictly less bad
-    than losing text off-screen. ``translation_v2`` caps cues at 84 chars = 2 x 42, so
-    in practice only pathological input reaches this.
+    than losing text off-screen. Upstream (``translation_v2`` and the spotting pass)
+    budgets cues at :func:`layout_params`' ``max_chars_per_cue`` for this exact frame,
+    so in practice only pathological input reaches this.
     """
     lines: list[str] = []
     rest = text
@@ -622,32 +814,48 @@ def build_ass(
     *,
     video_w: int,
     video_h: int,
-    font_frac: float = 0.061,
-    margin_v_frac: float = 0.12,
+    font_frac: float = DEFAULT_FONT_FRAC,
+    margin_v_frac: float = DEFAULT_MARGIN_V_FRAC,
     rtl: bool = True,
+    layout: dict[str, Any] = None,
 ) -> str:
     """Render cues as an ASS v4+ subtitle script.
 
     The style is the render-tested one: Noto Sans Hebrew, bold, white on a
     semi-transparent opaque box (``BorderStyle=4``, no drop shadow), bottom
-    centre. Sizes are fractions of the video height so the result looks identical
-    at 720p and 4K. ``PlayResX/Y`` match the video, so ASS units are pixels.
+    centre. ``PlayResX/Y`` match the video, so ASS units are pixels.
+
+    Every size comes from :func:`layout_params`, which reads BOTH dimensions — the
+    font is a fraction of the height only for as long as the width can carry a full
+    line at that size. On 16:9 that is always, so landscape output is unchanged; on
+    9:16 the font shrinks to its legibility floor and the line budget shrinks with it.
 
     Args:
         cues: ``[{"start","end","text"}, ...]`` as produced by :func:`words_to_cues`.
         video_w: video width in pixels.
         video_h: video height in pixels.
-        font_frac: font size as a fraction of ``video_h``.
+        font_frac: font size as a fraction of ``video_h`` (before the width check).
         margin_v_frac: bottom margin as a fraction of ``video_h``.
         rtl: apply :func:`bidi_isolate` to every line (Hebrew/Arabic targets).
+        layout: a :func:`layout_params` dict to use instead of deriving one. Pass the
+            SAME dict the upstream stages budgeted against — the caller that wrote the
+            42-character-wide text and the renderer that has to fit it must not be
+            allowed to disagree. Omitted, it is derived here from ``video_w/video_h``,
+            which gives the identical answer for the identical inputs.
 
     Returns:
         The complete ``.ass`` file content. Render it with FFmpeg's ``ass``
         filter (``ass=file.ass:shaping=complex``) — the ``subtitles`` filter has
         no ``shaping`` option and will hard-fail.
     """
-    font_size = max(1, round(video_h * font_frac))
-    margin_v = max(0, round(video_h * margin_v_frac))
+    if layout is None:
+        layout = layout_params(
+            video_w, video_h, font_frac=font_frac, margin_v_frac=margin_v_frac
+        )
+    font_size = layout["font_px"]
+    margin_v = layout["margin_v"]
+    margin_h = layout["margin_h"]
+    max_line = layout["max_line_chars"]
 
     header = (
         "[Script Info]\n"
@@ -666,7 +874,7 @@ def build_ass(
         f"Style: {STYLE_NAME},Noto Sans Hebrew,{font_size},"
         "&H00FFFFFF,&H00FFFFFF,&H00000000,&H14000000,"
         "1,0,0,0,100,100,0,0,4,3,0,2,"
-        f"{_MARGIN_H},{_MARGIN_H},{margin_v},1\n"
+        f"{margin_h},{margin_h},{margin_v},1\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV,"
@@ -675,7 +883,7 @@ def build_ass(
 
     events: list[str] = []
     for cue in cues or []:
-        lines = wrap_two_lines(gershayim(_ass_safe(cue.get("text", ""))))
+        lines = wrap_two_lines(gershayim(_ass_safe(cue.get("text", ""))), max_line)
         if rtl:
             lines = [bidi_isolate(line) for line in lines]
         body = "\\N".join(lines)
@@ -685,11 +893,14 @@ def build_ass(
         )
 
     logger.debug(
-        "subtitle_engine: built ASS with %d events at %dx%d (font %d, margin_v %d)",
+        "subtitle_engine: built ASS with %d events at %dx%d "
+        "(font %d, margin_h %d, margin_v %d, %d chars/line)",
         len(events),
         video_w,
         video_h,
         font_size,
+        margin_h,
         margin_v,
+        max_line,
     )
     return header + "\n".join(events) + "\n"

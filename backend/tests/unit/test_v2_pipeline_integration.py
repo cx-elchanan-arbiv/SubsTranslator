@@ -121,6 +121,10 @@ class StageSpy:
 
     def __init__(self):
         self.calls = {}
+        #: The :class:`RecorderSpy` handed to the task by the patched ``start_run``,
+        #: replaced on every run. Hung off this object rather than returned as a fifth
+        #: tuple element so the ~25 existing four-tuple call sites keep working.
+        self.recorder = None
 
     def record(self, name, **details):
         self.calls.setdefault(name, []).append(details)
@@ -131,6 +135,63 @@ class StageSpy:
     @property
     def names(self):
         return set(self.calls)
+
+
+class RecorderSpy:
+    """Stands in for ``services.research_recorder.start_run``'s return value.
+
+    Two jobs. It lets the plumbing tests assert that BOTH pipeline branches archive
+    their run — and it keeps the test suite from writing hundreds of junk runs into the
+    real research corpus, which is the whole reason the corpus exists.
+
+    Deliberately permissive (``__getattr__`` catch-all) in the same way the real inert
+    recorder is: a test double that raises on a method the production recorder happens
+    to grow would turn a wiring change into a mystery failure.
+    """
+
+    active = True
+    run_dir = "/fake/research/run"
+
+    def __init__(self, task_id):
+        self.task_id = task_id
+        self.meta = {}
+        self.timings = {}
+        self.cues = {}
+        self.segments = None
+        self.words = None
+        self.outputs = []
+        self.llm = []
+        self.finished = None
+
+    def update_meta(self, **fields):
+        self.meta.update(fields)
+
+    def add_timing(self, stage, seconds):
+        self.timings[stage] = seconds
+
+    def record_source_video(self, path):
+        self.meta["source_path"] = path
+
+    def save_segments(self, segments):
+        self.segments = list(segments or [])
+
+    def save_words(self, words):
+        self.words = list(words or [])
+
+    def save_cues(self, stage, cues):
+        self.cues[stage] = [dict(cue) for cue in (cues or [])]
+
+    def record_llm(self, **kwargs):
+        self.llm.append(kwargs)
+
+    def copy_output(self, path, alias=None):
+        self.outputs.append(os.path.basename(path))
+
+    def finish(self, success, error=None):
+        self.finished = {"success": success, "error": error}
+
+    def __getattr__(self, name):
+        return lambda *_a, **_k: None
 
 
 @pytest.fixture()
@@ -261,6 +322,11 @@ def pipeline(tmp_path):
         downloads.mkdir()
 
         service = subtitle_service_module.subtitle_service
+
+        def fake_start_run(task_id, **_kwargs):
+            spy.recorder = RecorderSpy(task_id)
+            return spy.recorder
+
         watermark_config = (
             {"enabled": True, "custom_logo_path": str(logo_path), "position": "bottom-right"}
             if watermark
@@ -277,6 +343,7 @@ def pipeline(tmp_path):
             enforce_cps=fake_enforce_cps,
             translate_segments=fake_translate_segments,
             save_video_stats=lambda payload: saved_stats.append(payload),
+            start_run=fake_start_run,
         ), patch.object(
             processing_tasks.time, "sleep", lambda *_a, **_k: None
         ), patch.object(
@@ -724,4 +791,137 @@ class TestTheContentAssertionsActuallyCatchTheRegression:
             assert_no_blank_cues(blank, "synthetic")
         assert_no_blank_cues(
             "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n", "synthetic"
+        )
+
+
+# ==========================================================================================
+# Research recorder plumbing
+# ==========================================================================================
+@pytest.mark.unit
+class TestResearchRecorderPlumbing:
+    """Every run must be archived — v2 AND legacy. The corpus is for comparing them.
+
+    These assert the WIRING only (the recorder's own behaviour is covered by
+    ``tests/unit/test_research_recorder.py``): that the task starts a run, hands over
+    the flags, the transcript, the cue list at each stage and the produced files, and
+    closes the run on both the success and the failure path.
+    """
+
+    def test_the_v2_branch_archives_the_whole_run(self, pipeline):
+        _result, spy, _downloads, _stats = pipeline(
+            spotting_v2=True, translation_v2=True, render_v2=True
+        )
+        recorder = spy.recorder
+        assert recorder is not None, "process_video_task never started a research run"
+
+        # the experiment's independent variables
+        assert recorder.meta["pipeline"] == "v2"
+        assert recorder.meta["spotting_v2"] is True
+        assert recorder.meta["translation_v2"] is True
+        assert recorder.meta["render_v2"] is True
+        assert recorder.meta["translation_style"] == STYLE_CLEAN
+        assert recorder.meta["whisper_model"] == "tiny"
+        assert recorder.meta["translation_service"] == "openai"
+        assert recorder.meta["detected_language"] == "en"
+        assert recorder.meta["source_path"].endswith("clip.mp4")
+
+        # the transcript and every intermediate cue list
+        assert recorder.segments, "whisper segments were not archived"
+        assert recorder.words, "word timestamps were not archived"
+        assert set(recorder.cues) == {"pre_translation", "post_translation", "post_reflow"}
+        assert recorder.cues["post_translation"][0]["translated_text"]
+
+        # timings, cost and the outputs
+        assert "transcribe" in recorder.timings and "translate" in recorder.timings
+        assert recorder.meta["translation_tokens"] == 1800  # 1500 translate + 300 cps
+        assert recorder.meta["translation_cost_usd"] > 0
+        assert recorder.meta["layout"]["max_chars_per_cue"] == 84  # unprobeable stub => 1080p
+        assert any(name.endswith("_original.srt") for name in recorder.outputs)
+        assert any(name.endswith("_translated.srt") for name in recorder.outputs)
+        assert any(name.endswith("_final.mp4") for name in recorder.outputs)
+
+        assert recorder.finished == {"success": True, "error": None}
+
+    def test_the_legacy_streaming_branch_archives_its_run(self, pipeline):
+        """All flags off + a translation: the overlapped legacy path."""
+        _result, spy, _downloads, _stats = pipeline()
+        recorder = spy.recorder
+        assert recorder.meta["pipeline"] == "legacy_p1"
+        assert recorder.meta["spotting_v2"] is False
+        assert recorder.meta["translation_v2"] is False
+        assert recorder.segments, "legacy runs must archive their segments too"
+        assert "transcribe_and_translate" in recorder.timings
+        assert any(name.endswith("_translated.srt") for name in recorder.outputs)
+        assert recorder.finished == {"success": True, "error": None}
+
+    def test_the_transcribe_only_branch_archives_its_run(self, pipeline):
+        """All flags off and no translation requested."""
+        _result, spy, _downloads, _stats = pipeline(target_lang="auto")
+        recorder = spy.recorder
+        assert recorder.meta["pipeline"] == "legacy_transcribe_only"
+        assert recorder.segments
+        assert "transcribe" in recorder.timings
+        assert recorder.finished == {"success": True, "error": None}
+
+    def test_the_v2_translation_stages_get_the_recorder(self, pipeline):
+        """``translate_cues``/``enforce_cps`` must be able to capture their prompts."""
+        seen = {}
+
+        def capturing_translate_cues(cues, target_lang, **kwargs):
+            seen["translate_recorder"] = kwargs.get("recorder")
+            usage = TokenUsage()
+            usage.add(10, 5, "gpt-4o")
+            return TranslationResult(
+                [{**cue, "translated": _translate(cue["text"])} for cue in cues], usage
+            )
+
+        _result, spy, _downloads, _stats = pipeline(
+            translation_v2=True, translate_cues_impl=capturing_translate_cues
+        )
+        assert seen["translate_recorder"] is spy.recorder
+
+    def test_a_failed_run_is_still_closed_out(self, pipeline):
+        """A failure with its prompts attached is the most useful row in the corpus."""
+
+        def exploding_translate_cues(cues, target_lang, **kwargs):
+            raise RuntimeError("model refused")
+
+        result, spy, _downloads, _stats = pipeline(
+            translation_v2=True, translate_cues_impl=exploding_translate_cues
+        )
+        assert result["status"] == "FAILURE"
+        recorder = spy.recorder
+        assert recorder.finished["success"] is False
+        assert "model refused" in recorder.finished["error"]
+        # the work done before the failure is archived, not thrown away
+        assert recorder.cues["pre_translation"]
+
+    def test_a_recorder_that_explodes_cannot_fail_the_job(self, pipeline):
+        """The safety contract, asserted through the real task.
+
+        ``services.research_recorder`` swallows its own errors, but the task must not
+        depend on that being true forever — so this hands it a recorder that raises on
+        every call and requires the job to succeed anyway.
+        """
+
+        class Exploding:
+            active = True
+
+            def __getattr__(self, name):
+                def boom(*_a, **_k):
+                    raise RuntimeError(f"recorder.{name} exploded")
+
+                return boom
+
+        from tasks import processing_tasks
+
+        with patch.object(processing_tasks, "start_run", lambda *_a, **_k: Exploding()):
+            result, _spy, downloads, _stats = pipeline(
+                spotting_v2=True, translation_v2=True, render_v2=True
+            )
+        assert result["status"] == "SUCCESS", (
+            f"a broken research recorder took the job down: {result.get('error')}"
+        )
+        assert_no_blank_cues(
+            read_srt(downloads, payload(result)["files"]["translated_srt"]), "translated_srt"
         )
