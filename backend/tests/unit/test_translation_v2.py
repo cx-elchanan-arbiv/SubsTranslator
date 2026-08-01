@@ -47,6 +47,7 @@ from services.translation_v2 import (  # noqa: E402
     LANGUAGE_NAMES,
     MAX_CUES_PER_CPS_REQUEST,
     MAX_CUES_PER_REQUEST,
+    MIN_TAIL_CUES,
     OVERLAP_CUES,
     TranslationV2Error,
     build_system_prompt,
@@ -150,6 +151,35 @@ def make_cues(count, text="Hello there, this is a sentence.", dur=3.0):
         {"start": i * dur, "end": (i + 1) * dur, "text": f"{text} ({i + 1})"}
         for i in range(count)
     ]
+
+
+#: A word ``enforce_cps``'s validator treats as filler, so a condensation may delete it.
+_FILLER_WORD = "מאוד"
+#: The word every cue below ends on. Keeping it is what makes a shorter cue LEGAL:
+#: a condensation that drops the last content word is refused (``_cps_rejection``).
+_TAIL_WORD = "סוף."
+
+
+def cue_text(chars, tail=_TAIL_WORD):
+    """Exactly ``chars`` characters of well-formed Hebrew, ending in ``tail``.
+
+    The body is repeated filler, so any shorter version of it that keeps ``tail`` is a
+    legal condensation. Tests that are about LENGTHS and PLUMBING need text the content
+    validator will not veto for reasons those tests are not about; tests that are about
+    the validator use real sentences instead.
+    """
+    words = []
+    length = len(tail)
+    while length + 1 + len(_FILLER_WORD) <= chars:
+        words.append(_FILLER_WORD)
+        length += len(_FILLER_WORD) + 1
+    assert words, f"cue_text needs at least {len(tail) + len(_FILLER_WORD) + 1} chars"
+    text = " ".join(words + [tail])
+    if len(text) < chars:  # pad one filler word out to land on the exact length
+        words[0] += "א" * (chars - len(text))
+        text = " ".join(words + [tail])
+    assert len(text) == chars
+    return text
 
 
 # --------------------------------------------------------------------------------------
@@ -334,7 +364,7 @@ class TestTranslateCues:
 
     def test_chunking_beyond_limit_uses_read_only_overlap(self):
         client = FakeClient(echo_responder())
-        total = MAX_CUES_PER_REQUEST + 5  # 45 -> chunks of 40 + 5
+        total = MAX_CUES_PER_REQUEST + MIN_TAIL_CUES  # 50 -> chunks of 40 + 10
         result = translate_cues(make_cues(total), "he", client=client)
 
         assert len(client.calls) == 2
@@ -347,8 +377,16 @@ class TestTranslateCues:
         assert requested_ids(second_user) == list(range(MAX_CUES_PER_REQUEST + 1, total + 1))
 
         # ...and each chunk carries OVERLAP_CUES read-only cues on the available sides.
-        assert context_ids(first_user) == [41, 42, 43]
-        assert context_ids(second_user) == [38, 39, 40]
+        assert context_ids(first_user) == [
+            MAX_CUES_PER_REQUEST + 1,
+            MAX_CUES_PER_REQUEST + 2,
+            MAX_CUES_PER_REQUEST + 3,
+        ]
+        assert context_ids(second_user) == [
+            MAX_CUES_PER_REQUEST - 2,
+            MAX_CUES_PER_REQUEST - 1,
+            MAX_CUES_PER_REQUEST,
+        ]
         assert len(context_ids(first_user)) == OVERLAP_CUES
 
         # Overlap is context, never re-translated.
@@ -451,8 +489,8 @@ class TestEnforceCps:
         # cue 1: 2s * 17 CPS = 34 char budget, 60 chars -> violator
         # cue 2: 6s -> 84 char cap, 20 chars -> fine
         return [
-            {"start": 0.0, "end": 2.0, "translated": "א" * 60},
-            {"start": 2.0, "end": 8.0, "translated": "ב" * 20},
+            {"start": 0.0, "end": 2.0, "translated": cue_text(60)},
+            {"start": 2.0, "end": 8.0, "translated": cue_text(20)},
         ]
 
     def test_no_request_when_everything_is_within_budget(self):
@@ -465,8 +503,8 @@ class TestEnforceCps:
         assert result.usage.requests == 0
 
     def test_only_violators_are_re_asked(self):
-        """A reply INSIDE the window [85% of the limit, the limit] is accepted at once."""
-        fitting = "א" * 32  # budget 34, floor ceil(34*0.85) = 29
+        """A legal reply at or under the limit is accepted at once."""
+        fitting = cue_text(32)  # budget 34, floor ceil(34*0.85) = 29
 
         def responder(kwargs, call_no):
             ids = requested_ids(kwargs["messages"][1]["content"])
@@ -482,41 +520,40 @@ class TestEnforceCps:
         assert "max 34 chars" in user, "per-cue budget = floor(max_cps * duration)"
         assert "never below 29" in user, "the floor is stated to the model"
         assert result[0]["translated"] == fitting
-        assert result[1]["translated"] == "ב" * 20, "compliant cue untouched"
-        assert cues[0]["translated"] == "א" * 60, "input not mutated"
+        assert result[1]["translated"] == cue_text(20), "compliant cue untouched"
+        assert cues[0]["translated"] == cue_text(60), "input not mutated"
 
-    def test_an_over_condensed_reply_is_re_asked(self):
-        """R1's core defect: "under the limit" was satisfied by deleting half the cue.
+    def test_an_over_condensed_but_legal_reply_is_shipped_not_re_asked(self):
+        """R9: the 85% floor is GUIDANCE, and no longer a reason to send a second request.
 
-        Measured: 53 characters cut to 31 when 51 were allowed, and a cue that lost the
-        noun "העולמי" out of "מרכז הסחר העולמי" with 13 characters of headroom to spare.
+        Measured over the eight-clip corpus: four cues entered the TOO SHORT re-ask,
+        none came back better, and one came back destroyed. What the floor was a proxy
+        FOR — a deleted content word — is now measured directly, so a short reply that
+        kept everything is simply a good short reply.
         """
-        crushed = "קצר."          # 4 chars against a 34-char budget
-        restored = "א" * 33
+        crushed = "סוף."  # 4 chars against a 34-char budget, but nothing was lost
 
         def responder(kwargs, call_no):
             ids = requested_ids(kwargs["messages"][1]["content"])
-            text = crushed if call_no == 1 else restored
-            return {"cues": [{"id": i, "t": text} for i in ids]}
+            return {"cues": [{"id": i, "t": crushed} for i in ids]}
 
         client = FakeClient(responder)
         result = enforce_cps(self._cues(), client=client)
 
-        assert len(client.calls) == 2, "an over-condensed cue was shipped without a re-ask"
-        assert "TOO SHORT" in client.user_prompt(1)
-        assert "ORIGINAL:" in client.user_prompt(1), "the re-ask works from the original"
-        assert result[0]["translated"] == restored
+        assert len(client.calls) == 1, "a legal reply must not cost a second request"
+        assert result[0]["translated"] == crushed
 
     def test_the_longest_fitting_candidate_wins(self):
         """Both attempts are legal; the one that threw away less content is the answer."""
         def responder(kwargs, call_no):
             ids = requested_ids(kwargs["messages"][1]["content"])
-            text = "ד" * 50 if call_no == 1 else "ה" * 30  # 50 is over the 34 budget
+            # 50 is over the 34 budget AND over the 10% acceptance margin.
+            text = cue_text(50) if call_no == 1 else cue_text(30)
             return {"cues": [{"id": i, "t": text} for i in ids]}
 
         client = FakeClient(responder)
         result = enforce_cps(self._cues(), client=client)
-        assert result[0]["translated"] == "ה" * 30
+        assert result[0]["translated"] == cue_text(30)
 
     def test_a_cue_barely_over_budget_is_left_alone(self):
         """The 10% trigger margin: a 0.1s reading-time overrun is not worth a rewrite."""
@@ -525,53 +562,53 @@ class TestEnforceCps:
         client = FakeClient(echo_responder())
         # 6s cue -> 84-char cap; 88 chars is over the cap but inside the margin.
         assert 88 <= DEFAULT_MAX_CHARS_PER_CUE * CPS_TRIGGER_MARGIN
-        cues = [{"start": 0.0, "end": 6.0, "translated": "א" * 88}]
+        cues = [{"start": 0.0, "end": 6.0, "translated": cue_text(88)}]
         result = enforce_cps(cues, client=client)
         assert client.calls == []
-        assert result[0]["translated"] == "א" * 88
+        assert result[0]["translated"] == cue_text(88)
 
     def test_char_cap_applies_to_long_duration_cues(self):
         def responder(kwargs, call_no):
             ids = requested_ids(kwargs["messages"][1]["content"])
-            return {"cues": [{"id": i, "t": "קצר."} for i in ids]}
+            return {"cues": [{"id": i, "t": "סוף."} for i in ids]}
 
         client = FakeClient(responder)
         # 30s duration -> CPS is fine, but 100 chars breaks the 84-char cue cap.
-        cues = [{"start": 0.0, "end": 30.0, "translated": "ג" * 100}]
+        cues = [{"start": 0.0, "end": 30.0, "translated": cue_text(100)}]
         result = enforce_cps(cues, client=client)
 
         assert requested_ids(client.user_prompt()) == [1]
         assert f"max {DEFAULT_MAX_CHARS_PER_CUE} chars" in client.user_prompt()
-        assert result[0]["translated"] == "קצר."
+        assert result[0]["translated"] == "סוף."
 
     def test_still_violating_is_re_asked_once_then_the_shortest_is_kept(self):
         def responder(kwargs, call_no):
-            return {"cues": [{"id": 1, "t": "ד" * (40 if call_no == 1 else 38)}]}
+            return {"cues": [{"id": 1, "t": cue_text(40 if call_no == 1 else 38)}]}
 
         client = FakeClient(responder)
         result = enforce_cps(self._cues(), client=client)
 
         assert len(client.calls) == 2, "exactly one re-ask, never a loop"
         assert "TOO LONG" in client.user_prompt(1)
-        assert result[0]["translated"] == "ד" * 38
+        assert result[0]["translated"] == cue_text(38)
 
     def test_longer_reply_is_discarded_in_favour_of_original(self):
         def responder(kwargs, call_no):
-            return {"cues": [{"id": 1, "t": "ה" * 120}]}
+            return {"cues": [{"id": 1, "t": cue_text(120)}]}
 
         client = FakeClient(responder)
         result = enforce_cps(self._cues(), client=client)
-        assert result[0]["translated"] == "א" * 60
+        assert result[0]["translated"] == cue_text(60)
 
     def test_missing_replacement_keeps_original(self):
         client = FakeClient(lambda kwargs, call_no: {"cues": []})
         result = enforce_cps(self._cues(), client=client)
-        assert result[0]["translated"] == "א" * 60
+        assert result[0]["translated"] == cue_text(60)
 
     def test_request_failure_does_not_break_the_job(self):
         client = FakeClient(lambda kwargs, call_no: "}}} not json")
         result = enforce_cps(self._cues(), client=client)
-        assert result[0]["translated"] == "א" * 60
+        assert result[0]["translated"] == cue_text(60)
 
     def test_condensation_prompt_keeps_language_and_punctuation(self):
         def responder(kwargs, call_no):
@@ -592,6 +629,20 @@ class TestEnforceCps:
 # --------------------------------------------------------------------------------------
 
 
+_MARKER_LETTERS = "אבגדהוזחטיכלמנסעפצקרשת"
+
+
+def marker(index):
+    """A unique, digit-free Hebrew word, so no two fixture cues carry the same text.
+
+    Digit-free on purpose: a token carrying a number may never be deleted by a
+    condensation (``_cps_rejection``), and these fixtures need text the model is allowed
+    to trim.
+    """
+    letters = _MARKER_LETTERS
+    return letters[index // len(letters) % len(letters)] + letters[index % len(letters)]
+
+
 def cps_violators(count, chars=90, dur=2.0):
     """``count`` cues that all break their reading-speed budget.
 
@@ -604,7 +655,11 @@ def cps_violators(count, chars=90, dur=2.0):
     wrong thing.
     """
     return [
-        {"start": i * dur, "end": (i + 1) * dur, "translated": f"{'א' * chars}{i}"}
+        {
+            "start": i * dur,
+            "end": (i + 1) * dur,
+            "translated": f"{marker(i)} {cue_text(chars)}",
+        }
         for i in range(count)
     ]
 
@@ -619,7 +674,7 @@ class TestEnforceCpsBatching:
     """
 
     def test_a_long_video_is_split_into_several_requests(self):
-        fitting = "א" * 32
+        fitting = cue_text(32)
         client = FakeClient(
             lambda kwargs, call_no: {
                 "cues": [{"id": i, "t": fitting} for i in requested_ids(kwargs["messages"][1]["content"])]
@@ -648,7 +703,7 @@ class TestEnforceCpsBatching:
         assert all(cue["translated"] == fitting for cue in result)
 
     def test_exactly_one_batch_when_the_violators_fit(self):
-        fitting = "א" * 32
+        fitting = cue_text(32)
         client = FakeClient(
             lambda kwargs, call_no: {
                 "cues": [{"id": i, "t": fitting} for i in requested_ids(kwargs["messages"][1]["content"])]
@@ -665,7 +720,7 @@ class TestEnforceCpsBatching:
         """
         client = FakeClient(
             lambda kwargs, call_no: {
-                "cues": [{"id": i, "t": "קצר."} for i in requested_ids(kwargs["messages"][1]["content"])]
+                "cues": [{"id": i, "t": "סוף."} for i in requested_ids(kwargs["messages"][1]["content"])]
             }
         )
         enforce_cps(cps_violators(50), client=client)
@@ -688,7 +743,7 @@ class TestEnforceCpsBatching:
         bad reply must leave *its* cues untouched and let the rest through.
         """
 
-        fitting = "א" * 32
+        fitting = cue_text(32)
 
         def responder(kwargs, call_no):
             if call_no == 2:
@@ -736,7 +791,7 @@ class TestEnforceCpsBatching:
             out = []
             for cue_id in requested_ids(kwargs["messages"][1]["content"]):
                 # odd ids: shorter but still over budget; even ids: longer than the input
-                out.append({"id": cue_id, "t": "ד" * (40 if cue_id % 2 else 200)})
+                out.append({"id": cue_id, "t": cue_text(40 if cue_id % 2 else 200)})
             return {"cues": out}
 
         client = FakeClient(responder)
@@ -745,7 +800,7 @@ class TestEnforceCpsBatching:
 
         for index, cue in enumerate(result, 1):
             if index % 2:
-                assert cue["translated"] == "ד" * 40, "the shorter reply should be kept"
+                assert cue["translated"] == cue_text(40), "the shorter reply should be kept"
             else:
                 assert cue["translated"] == originals[index - 1]["translated"], (
                     "a longer reply must be discarded in favour of the original"
@@ -816,7 +871,7 @@ class TestProgressReporting:
         def exploding(*_args):
             raise RuntimeError("the UI channel died")
 
-        fitting = "א" * 32
+        fitting = cue_text(32)
         client = FakeClient(
             lambda kwargs, call_no: {
                 "cues": [{"id": i, "t": fitting} for i in requested_ids(kwargs["messages"][1]["content"])]
@@ -903,10 +958,10 @@ class TestRobustnessRules:
         assert "punctuate the translation correctly" in prompt.lower() or "punctuate the translation" in prompt
 
     def test_prompt_defaults_unknown_gender_to_masculine(self):
-        """Masculine is now the LAST resort, not the first — see TestGenderInference."""
+        """Masculine is the default with no textual evidence — see TestGenderInference."""
         from services.translation_v2 import build_system_prompt
         prompt = build_system_prompt("he")
-        assert "default to masculine" in prompt
+        assert "WITH NO SUCH EVIDENCE, USE MASCULINE FORMS" in prompt
         assert "mid-conversation" in prompt
 
 
@@ -1123,8 +1178,8 @@ class TestHebrewTypographyAndAgreementRules:
 
     def test_speaker_gender_rule_is_still_there_too(self):
         prompt = build_system_prompt("he")
-        assert "FEMININE forms" in prompt
-        assert "default to masculine" in prompt
+        assert "EXPLICIT TEXTUAL EVIDENCE" in prompt
+        assert "WITH NO SUCH EVIDENCE, USE MASCULINE FORMS" in prompt
 
     def test_hebrew_only_rules_absent_for_other_languages(self):
         prompt = build_system_prompt("es")
@@ -1201,11 +1256,11 @@ class TestTimeRelief:
     def test_time_relief_can_be_switched_off(self):
         def responder(kwargs, call_no):
             ids = requested_ids(kwargs["messages"][1]["content"])
-            return {"cues": [{"id": i, "t": "א" * 32} for i in ids]}
+            return {"cues": [{"id": i, "t": cue_text(32)} for i in ids]}
 
         client = FakeClient(responder)
-        cues = [{"start": 0.0, "end": 2.0, "translated": "א" * 51},
-                {"start": 10.0, "end": 12.0, "translated": "ב" * 10}]
+        cues = [{"start": 0.0, "end": 2.0, "translated": cue_text(51)},
+                {"start": 10.0, "end": 12.0, "translated": cue_text(10)}]
         result = enforce_cps(cues, client=client, time_relief=False)
         assert len(client.calls) == 1
         assert result[0]["end"] == 2.0
@@ -1216,17 +1271,35 @@ class TestTimeRelief:
 # --------------------------------------------------------------------------------------
 @pytest.mark.unit
 class TestGenderInference:
-    """A visibly female respondent was addressed in masculine forms while the LEGACY
-    path got it right — the rule's "default masculine" was overriding the evidence."""
+    """Gender comes from TEXT or it does not come at all.
 
-    def test_the_rule_asks_for_inference_from_all_the_evidence(self):
+    R5 asked the model to infer gender "from ALL the evidence in the scene", and the
+    model duly inferred it from the atmosphere: an interview between two men (Hannity
+    and Netanyahu, no gendered word anywhere in the transcript) came back with five of
+    ten cues in the feminine, and a street respondent whose gender is stated nowhere
+    became "מה את אוכלת?". There is no picture in the prompt — a model has nothing to
+    infer FROM except the words, so "infer" without a source list is an invitation to
+    guess, and a guess is right half the time and visibly wrong the other half.
+    """
+
+    def test_the_rule_names_the_only_admissible_evidence(self):
         prompt = build_system_prompt("he")
         assert "INFER each speaker's and each addressee's gender" in prompt
-        assert "names, forms of address" in prompt
+        assert "EXPLICIT TEXTUAL EVIDENCE" in prompt
+        for admissible in ("a personal name", "my husband", "gendered pronoun"):
+            assert admissible in prompt, admissible
 
-    def test_masculine_is_explicitly_the_last_resort(self):
+    def test_atmosphere_is_explicitly_not_evidence(self):
         prompt = build_system_prompt("he")
-        assert "Only when nothing in the scene indicates gender at all" in prompt
+        assert "are NOT evidence" in prompt
+        for inadmissible in ("Tone, topic, politeness", "who is asking and who is answering"):
+            assert inadmissible in prompt, inadmissible
+
+    def test_masculine_is_the_default_and_it_is_mandatory(self):
+        prompt = build_system_prompt("he")
+        assert "WITH NO SUCH EVIDENCE, USE MASCULINE FORMS" in prompt
+        assert "mandatory, not a preference" in prompt
+        assert "Never invent a gender" in prompt
 
     def test_the_no_switching_guarantee_survives(self):
         prompt = build_system_prompt("he")
@@ -1431,3 +1504,323 @@ class TestContextOnlyPassthrough:
         result = translate_cues(cues, "he", client=client)
         assert client.calls == []
         assert result[0]["translated"] == ""
+
+
+# --------------------------------------------------------------------------------------
+# R9 — a condensation is a SHORTER version of the cue, or it is not used
+# --------------------------------------------------------------------------------------
+@pytest.mark.unit
+class TestCondensationValidator:
+    """Every case here is a verbatim model reply from the eight-clip corpus archive.
+
+    The pass used to choose between candidates by LENGTH alone, which cannot tell a
+    trimmed cue from an amputated one. These are the amputations it shipped.
+    """
+
+    def reject(self, original, candidate):
+        from services.translation_v2 import _cps_rejection
+        return _cps_rejection(original, candidate)
+
+    # --- what must be refused -------------------------------------------------------
+    def test_the_adjective_the_cue_turns_on(self):
+        """eng_chyron 13. The NEXT cue is the one that says "private"."""
+        assert self.reject(
+            "אנחנו לא יודעים אם זה היה מטוס מסחרי.",
+            "אנחנו לא יודעים אם זה היה מטוס.",
+        )
+
+    def test_a_modifier_left_with_nothing_to_modify(self):
+        """babe 8: "they are considered very." is not a sentence."""
+        assert self.reject(
+            "לצה״ל יש מוניטין די קשוח. הם נחשבים מאוד קשוחים.",
+            "לצה״ל יש מוניטין קשוח. הם נחשבים מאוד.",
+        )
+
+    def test_a_cue_truncated_mid_word_with_its_question_mark_gone(self):
+        """trump 21: "איפה אתם?" -> "איפה את"."""
+        assert self.reject("איפה אתם?", "איפה את")
+
+    def test_a_question_turned_into_a_statement(self):
+        """vertical 46: the cue ASKS "why?" and came back asserting."""
+        assert self.reject(
+            "אומרים ישו כי זה מה שמכירים. למה?",
+            "אומרים ישו כי זה מה שמכירים.",
+        )
+
+    def test_the_punchline_of_the_clip(self):
+        """vertical 29: the whole exchange exists to arrive at "so it became Parsi"."""
+        assert self.reject(
+            "כי הערבים לא יכלו להגות את ה-P, אז זה הפך לפארסי.",
+            "הערבים לא יכלו להגות את ה-P.",
+        )
+
+    def test_the_verbs_reflexive_object(self):
+        """street 3: "get yourselves ready" -> "get ready"."""
+        assert self.reject(
+            "הכינו את עצמכם לקליפים מצחיקים. אם אתם מוכנים, בואו נתחיל.",
+            "הכינו לקליפים מצחיקים. אם מוכנים, נתחיל.",
+        )
+
+    def test_a_deleted_negation_says_the_opposite(self):
+        assert self.reject("זה לא נכון בכלל.", "זה נכון.")
+
+    def test_a_deleted_number_is_a_broadcast_correction(self):
+        assert self.reject("שירתתי 15 שנים בצבא.", "שירתתי שנים בצבא.")
+
+    def test_a_cue_ending_on_a_preposition(self):
+        assert self.reject("הוא הלך אל הבית שלו.", "הוא הלך אל.")
+
+    def test_a_lost_dialogue_dash(self):
+        from services.translation_v2 import DIALOGUE_DASH
+        assert self.reject(f"{DIALOGUE_DASH}כן, בוודאי.", "כן, בוודאי.")
+
+    def test_an_empty_reply(self):
+        assert self.reject("משהו כאן.", "   ")
+
+    # --- what must be allowed -------------------------------------------------------
+    def test_a_redundant_doublet_may_go(self):
+        """podcast 5: "screamed and yelled" -> "screamed". Textbook condensation."""
+        assert not self.reject(
+            "והם צעקו וצרחו אחד על השני.", "והם צעקו אחד על השני."
+        )
+
+    def test_leading_filler_may_go(self):
+        assert not self.reject("אה, אני שונא את הבחור הזה.", "אני שונא את הבחור הזה.")
+
+    def test_an_intensifier_may_go(self):
+        assert not self.reject("זה היה ממש מגעיל.", "זה היה מגעיל.")
+
+    def test_a_trailing_tag_question_may_go(self):
+        assert not self.reject(
+            "אז אני מנסה לשמור על קור רוח. נכון.", "אני מנסה לשמור על קור רוח."
+        )
+
+    def test_a_repeated_interjection_may_go(self):
+        assert not self.reject(
+            "ניסיתי לגרום לו להכות אותי. היי, היי, היי.",
+            "ניסיתי לגרום לו להכות אותי.",
+        )
+
+    def test_a_conjunctive_vav_is_not_a_deletion(self):
+        """"והם" and "הם" are one word — Hebrew glues the "and" onto the next word."""
+        assert not self.reject("וזה עובד, והם צועקים.", "זה עובד, הם צועקים.")
+
+    def test_niqqud_is_not_part_of_the_word(self):
+        """A subtitle font does not draw it, so it cannot decide whether a word survived."""
+        assert not self.reject("כן, ויכולתי לומר עִברית.", "ויכולתי לומר עברית.")
+
+    def test_an_ellipsis_may_become_a_full_stop(self):
+        assert not self.reject("אז הוא אמר לי משהו…", "אז הוא אמר משהו.")
+
+
+@pytest.mark.unit
+class TestCondensationValidatorInThePass:
+    """The validator has to reach the cues, not just exist."""
+
+    def _cue(self, text, dur=2.0):
+        return [{"start": 0.0, "end": dur, "translated": text}]
+
+    def test_a_refused_batch_reply_is_re_asked_with_the_reason(self):
+        replies = ["אנחנו לא יודעים אם זה היה מטוס.", "לא יודעים אם זה מטוס מסחרי."]
+
+        def responder(kwargs, call_no):
+            return {"cues": [{"id": 1, "t": replies[call_no - 1]}]}
+
+        client = FakeClient(responder)
+        # 1.85s -> floor(17 * 1.85) == 31, the budget this cue really had on the clip.
+        original = "אנחנו לא יודעים אם זה היה מטוס מסחרי."
+        result = enforce_cps(
+            self._cue(original, dur=1.85), client=client, time_relief=False
+        )
+
+        assert len(client.calls) == 2
+        assert "NOT A CONDENSATION" in client.user_prompt(1)
+        assert "מסחרי" in client.user_prompt(1), "the reason names the deleted word"
+        assert result[0]["translated"] == "לא יודעים אם זה מטוס מסחרי."
+
+    def test_an_unfixable_cue_keeps_its_original_text(self):
+        def responder(kwargs, call_no):
+            return {"cues": [{"id": 1, "t": "אנחנו לא יודעים אם זה היה מטוס."}]}
+
+        client = FakeClient(responder)
+        original = "אנחנו לא יודעים אם זה היה מטוס מסחרי."
+        result = enforce_cps(
+            self._cue(original, dur=1.85), client=client, time_relief=False
+        )
+
+        assert len(client.calls) == 2, "one re-ask, never a loop"
+        assert result[0]["translated"] == original, (
+            "an over-budget correct cue beats an in-budget amputated one"
+        )
+
+    def test_a_reply_inside_the_acceptance_margin_is_not_re_asked(self):
+        """The margin that decides whether to TOUCH a cue also decides when to stop.
+
+        babe 8: 40 characters against a 38-character limit. Under R8 that 2-character
+        overshoot bought a second request, which came back with "הם נחשבים מאוד."
+        """
+        from services.translation_v2 import CPS_TRIGGER_MARGIN
+
+        original = "לצה״ל יש מוניטין די קשוח. הם נחשבים מאוד קשוחים."
+        reply = "לצה״ל יש מוניטין קשוח. הם נחשבים קשוחים."
+        # 2.28s -> floor(17 * 2.28) == 38
+        client = FakeClient(lambda kwargs, call_no: {"cues": [{"id": 1, "t": reply}]})
+        result = enforce_cps(self._cue(original, dur=2.28), client=client, time_relief=False)
+
+        assert 38 < len(reply) <= 38 * CPS_TRIGGER_MARGIN
+        assert len(client.calls) == 1, "a 2-character overshoot must not cost a re-ask"
+        assert result[0]["translated"] == reply
+
+    def test_a_tiny_budget_is_never_sent_to_the_model(self):
+        """CPS_MIN_BUDGET: 5/5 corpus attempts under 20 characters destroyed content."""
+        from services.translation_v2 import CPS_MIN_BUDGET
+
+        client = FakeClient(lambda kwargs, call_no: {"cues": [{"id": 1, "t": "איפה?"}]})
+        # 0.45s -> a 7-character budget.
+        result = enforce_cps(self._cue("איפה אתם?", dur=0.45), client=client, time_relief=False)
+
+        assert CPS_MIN_BUDGET == 20
+        assert client.calls == [], "a sub-second cue has no filler to give"
+        assert result[0]["translated"] == "איפה אתם?"
+
+    def test_the_reask_prompt_no_longer_asks_anyone_to_pad_a_cue(self):
+        """The TOO SHORT direction: 4 corpus cues in, 0 improvements, 1 destroyed."""
+        from services.translation_v2 import _CPS_REASK_PROMPT
+
+        assert "TOO SHORT" not in _CPS_REASK_PROMPT
+        assert "TOO LONG" in _CPS_REASK_PROMPT
+        assert "NOT A CONDENSATION" in _CPS_REASK_PROMPT
+
+    def test_the_condensation_prompt_protects_the_last_word(self):
+        from services.translation_v2 import _CPS_SYSTEM_PROMPT
+
+        assert "NEVER delete the LAST meaningful word" in _CPS_SYSTEM_PROMPT
+
+
+# --------------------------------------------------------------------------------------
+# R9 — a one-cue tail chunk has no context and is not a chunk
+# --------------------------------------------------------------------------------------
+@pytest.mark.unit
+class TestTailChunkMerge:
+    """A 41-cue podcast went out as 40 + 1, and cue 41 — alone, with three English
+    context lines and no Hebrew at all — came back in the feminine for a male speaker."""
+
+    def bounds(self, total):
+        from services.translation_v2 import _chunk_bounds
+        return _chunk_bounds(total)
+
+    def test_a_single_cue_tail_is_folded_into_the_previous_chunk(self):
+        assert self.bounds(MAX_CUES_PER_REQUEST + 1) == [(0, MAX_CUES_PER_REQUEST + 1)]
+
+    def test_a_tail_just_under_the_floor_is_folded(self):
+        total = MAX_CUES_PER_REQUEST + MIN_TAIL_CUES - 1
+        assert self.bounds(total) == [(0, total)]
+
+    def test_a_tail_at_the_floor_stays_its_own_request(self):
+        total = MAX_CUES_PER_REQUEST + MIN_TAIL_CUES
+        assert self.bounds(total) == [
+            (0, MAX_CUES_PER_REQUEST),
+            (MAX_CUES_PER_REQUEST, total),
+        ]
+
+    def test_the_merged_chunk_is_bounded(self):
+        """Merging up is safe; the cap it may reach is stated, not accidental."""
+        for total in range(MAX_CUES_PER_REQUEST + 1, MAX_CUES_PER_REQUEST * 4):
+            for start, end in self.bounds(total):
+                assert end - start <= MAX_CUES_PER_REQUEST + MIN_TAIL_CUES - 1
+
+    def test_every_cue_is_still_covered_exactly_once(self):
+        for total in list(range(1, 130)):
+            covered = [i for start, end in self.bounds(total) for i in range(start, end)]
+            assert covered == list(range(total)), total
+
+    def test_a_short_video_is_still_one_request(self):
+        assert self.bounds(MAX_CUES_PER_REQUEST) == [(0, MAX_CUES_PER_REQUEST)]
+        assert self.bounds(1) == [(0, 1)]
+
+    def test_the_lone_tail_cue_never_reaches_the_model_alone(self):
+        client = FakeClient(echo_responder())
+        translate_cues(make_cues(MAX_CUES_PER_REQUEST + 1), "he", client=client)
+        assert len(client.calls) == 1
+        assert requested_ids(client.user_prompt()) == list(
+            range(1, MAX_CUES_PER_REQUEST + 2)
+        )
+
+
+# --------------------------------------------------------------------------------------
+# R9 — terminology when transliteration cannot carry the contrast
+# --------------------------------------------------------------------------------------
+@pytest.mark.unit
+class TestTerminologyCollapse:
+    """R5's own worked example was self-defeating on the clip it was written for.
+
+    It told the model to transliterate "Ivrit" as עִברית against "Hebrew" as עברית — two
+    spellings that a subtitle font renders identically, so the cue still read "they
+    didn't call it X, they called it X" on screen. v1 kept "Hebrew" in Latin and was
+    right.
+    """
+
+    def test_the_collapse_case_has_its_own_instruction(self):
+        prompt = build_system_prompt("he")
+        assert "WHEN TRANSLITERATION CANNOT CARRY THE CONTRAST" in prompt
+        assert "KEEP THE FOREIGN TERM IN LATIN SCRIPT" in prompt
+
+    def test_niqqud_is_named_as_not_a_contrast(self):
+        prompt = build_system_prompt("he")
+        assert "subtitle fonts do not draw Hebrew niqqud" in prompt
+        assert "לא קראו לזה Hebrew. קראו לזה עברית." in prompt
+
+    def test_the_tautology_is_quoted_as_the_failure(self):
+        prompt = build_system_prompt("he")
+        assert "מה המילה העברית לעברית?" in prompt
+        assert "מה המילה העברית ל-Hebrew?" in prompt
+
+    def test_the_phonetic_contrast_that_works_is_untouched(self):
+        """פרסי vs פארסי differ without diacritics, so transliteration still carries it."""
+        prompt = build_system_prompt("he")
+        assert "פארסי vs פרסי" in prompt
+        assert "TRANSLITERATE the foreign term" in prompt
+
+    def test_it_applies_to_every_language(self):
+        for code in ("he", "ar", "es"):
+            assert "KEEP THE FOREIGN TERM IN LATIN SCRIPT" in build_system_prompt(code)
+
+
+@pytest.mark.unit
+class TestProgrammeTitles:
+    """"Fear Factor" came back as "פחד גורם" — a programme that does not exist."""
+
+    def test_titles_are_translated_only_when_a_real_one_exists(self):
+        prompt = build_system_prompt("he")
+        assert "LEAVE THE ORIGINAL TITLE IN LATIN SCRIPT" in prompt
+        assert "פחד גורם" in prompt
+
+    def test_the_established_titles_are_given_as_the_positive_example(self):
+        prompt = build_system_prompt("he")
+        assert "הישרדות" in prompt and "המרוץ למיליון" in prompt
+
+
+@pytest.mark.unit
+class TestFillerYouKnow:
+    """"You know, he really got hurt." came back as "אתה יודע, הוא באמת נפגע." in
+    CLEAN style, where the whole point is that filler is deleted."""
+
+    def test_the_rule_is_mechanical_not_a_judgement_call(self):
+        """The judgement-shaped version of this rule was measured and did not bind."""
+        prompt = build_system_prompt("he", "clean")
+        assert "MECHANICAL RULE, no judgement required" in prompt
+        assert "your translation starts AFTER it" in prompt
+
+    def test_the_opening_phrases_are_listed_with_their_comma(self):
+        prompt = build_system_prompt("he", "clean")
+        for phrase in ('"you know,"', '"I mean,"', '"like,"', '"well,"', '"listen,"'):
+            assert phrase in prompt, phrase
+
+    def test_the_measured_cue_is_the_worked_example(self):
+        prompt = build_system_prompt("he", "clean")
+        assert '"You know, like, he really got hurt."' in prompt
+        assert "אתה יודע, הוא באמת נפגע." in prompt
+
+    def test_the_real_question_keeps_its_verb(self):
+        prompt = build_system_prompt("he", "clean")
+        assert '"Do you know what that means?" keeps it' in prompt

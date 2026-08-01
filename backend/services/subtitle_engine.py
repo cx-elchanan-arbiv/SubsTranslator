@@ -204,6 +204,39 @@ _SENTENCE_END_RE = re.compile(r"[.!?][\"'”’)\]]*(?:\s|$)")
 # ASCII '"' between two Hebrew letters is an acronym mark, not a quote.
 _GERSHAYIM_RE = re.compile(f'(?<=[{_HEBREW_LETTERS}])"(?=[{_HEBREW_LETTERS}])')
 
+#: The single Hebrew letters that attach to the FRONT of a word (ב, ה, ו, כ, ל, מ, ש).
+#: A quotation mark may sit between one of them and the word it introduces —
+#: ב"פחד גורם" — which is exactly the shape the acronym rule above cannot tell apart
+#: from צה"ל without looking at the OTHER end of the quotation.
+_HEB_PREFIX_LETTERS = "בהוכלמש"
+
+#: A QUOTED PHRASE inside Hebrew text, matched as a PAIR.
+#:
+#: The defect this closes: "ב\"פחד גורם\"?" came out of the renderer as ב״פחד גורם"? —
+#: the opening quote converted to a gershayim (it sits between two Hebrew letters) and
+#: the closing one did not (it is followed by a "?"). A cue that opens with one mark and
+#: closes with another is visibly broken, and it happened to two of eight corpus clips.
+#:
+#: Matched as a pair, and only when the quotation opens at a word boundary (optionally
+#: after one prefix letter) and closes somewhere that is NOT the middle of a word:
+#:
+#:   ב"פחד גורם"?   -> a quotation      (opens after the prefix ב, closes before ?)
+#:   מ"הישרדות".    -> a quotation
+#:   דו"חות         -> NOT a quotation  (opens after two letters; no closing mark)
+#:   מפכ"ל          -> NOT a quotation  (the acronym rule keeps it)
+#:
+#: The content must contain a Hebrew letter, so an English quotation inside a Hebrew
+#: line (``he said "hi"``) keeps its ASCII quotes exactly as the docstring promises.
+#: Either mark may already be a gershayim — GPT-4o mixes them — and both come out as one.
+_QUOTED_PHRASE_RE = re.compile(
+    rf"(?<![{_HEBREW_LETTERS}\w])"
+    rf"([{_HEB_PREFIX_LETTERS}]?)"
+    rf'["{GERSHAYIM}]'
+    rf'(?P<body>[^"{GERSHAYIM}\n]*[{_HEBREW_LETTERS}][^"{GERSHAYIM}\n]*)'
+    rf'["{GERSHAYIM}]'
+    rf"(?![{_HEBREW_LETTERS}])"
+)
+
 # An apostrophe DIRECTLY after ג/ז/צ/ץ is a geresh. No lookahead is needed and none is
 # used: the lookbehind alone already protects every English apostrophe, because those
 # are preceded by a Latin letter (don't, it's, Charles') and never by a Hebrew one.
@@ -1356,11 +1389,32 @@ def reflow_dangling_connectors(
 # =============================================================================
 # Hebrew typography + bidi
 # =============================================================================
+def quoted_phrases(text: str) -> str:
+    """Give a quoted Hebrew phrase the SAME mark at both ends (U+05F4 ״ … ״).
+
+    Runs before :func:`gershayim`, because the acronym rule cannot see pairs: it
+    converts an opening quote that happens to sit between two Hebrew letters
+    (``ב"פחד``) and leaves the closing one alone when a ``?`` or ``.`` follows it
+    (``גורם"?``), which ships a cue that opens ״ and closes ". See
+    :data:`_QUOTED_PHRASE_RE` for exactly which shapes count as a quotation.
+
+    English quotations inside a Hebrew line are untouched — the quoted text has to
+    contain a Hebrew letter to match at all.
+    """
+    if not text:
+        return text
+    return _QUOTED_PHRASE_RE.sub(
+        lambda m: f"{m.group(1)}{GERSHAYIM}{m.group('body')}{GERSHAYIM}", text
+    )
+
+
 def gershayim(text: str) -> str:
     """Replace an ASCII ``"`` used as a Hebrew acronym mark with U+05F4 (״).
 
     Only a quote sitting *between two Hebrew letters* is converted, so English
-    quotations (``he said "hi"``) are left untouched.
+    quotations (``he said "hi"``) are left untouched. Quoted Hebrew PHRASES are handled
+    one step earlier, by :func:`quoted_phrases`, so what reaches here is an acronym mark
+    or an unpaired quote.
     """
     if not text:
         return text
@@ -1392,8 +1446,11 @@ def hebrew_typography(text: str) -> str:
 
     One entry point so a caller cannot apply half of them, which is exactly how the
     geresh came to be missing while the gershayim was applied.
+
+    Order matters: pairs before singles. :func:`quoted_phrases` has to claim a quotation
+    before :func:`gershayim` converts half of it into an acronym mark.
     """
-    return geresh(gershayim(text))
+    return geresh(gershayim(quoted_phrases(text)))
 
 
 def _ltr_runs(line: str) -> list[tuple[int, int]]:

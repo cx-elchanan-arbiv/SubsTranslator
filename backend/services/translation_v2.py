@@ -94,22 +94,52 @@ CPS_TOKENS_PER_CUE = 64
 #: Read-only cues added on each side of a chunk so context is never cut mid-thought.
 OVERLAP_CUES = 3
 
+#: Smallest LAST chunk worth sending on its own. A shorter tail is folded back into the
+#: chunk before it, which is allowed to run up to ``MAX_CUES_PER_REQUEST + this - 1``.
+#:
+#: The defect: a 41-cue podcast (40 exactly, until the hallucination gate stopped
+#: deleting a real cue) chunked into 40 + 1. Cue 41 went out alone, with three
+#: [CONTEXT-ONLY] English lines and not one word of the Hebrew that had just been
+#: written for the forty cues before it — 1125 prompt tokens to produce 34 tokens of
+#: output with no idea what gender, register or tense the rest of the scene had settled
+#: on. It duly came back in the feminine for a male speaker. A seam is a cost you accept
+#: to fit inside a context window; a seam that isolates a single cue buys nothing at all.
+MIN_TAIL_CUES = 10
+
 #: Netflix Hebrew TTSG: 42 chars/line x 2 lines.
 DEFAULT_MAX_CHARS_PER_CUE = 84
 
 #: Netflix Hebrew TTSG: 17 characters per second (adult programming).
 DEFAULT_MAX_CPS = 17.0
 
-#: How far over its budget a cue must be before :func:`enforce_cps` will rewrite it.
+#: How far over its budget a cue may be, both BEFORE and AFTER condensation.
 #:
 #: A cue 2 characters over an 84-character budget is about a tenth of a second of
 #: reading time over — invisible. Rewriting it costs tokens AND risks the failure mode
 #: this whole pass had to be rebuilt for: a model asked to shorten a nearly-compliant cue
 #: has nothing safe to cut, so it cuts something unsafe. 10% is roughly "one word", the
 #: smallest edit a condensation can honestly be.
+#:
+#: ONE margin, used at BOTH ends of the pass — that symmetry is the fix for a measured
+#: regression, not a tidiness preference. R8 shipped a 10% margin on the way IN and a
+#: zero-tolerance limit on the way OUT, so a cue could be judged "not worth rewriting"
+#: at 33 characters and, once the model had condensed it TO 33 characters, be judged
+#: "still wrong" and sent back for a second, deeper cut. On the corpus that asymmetry
+#: cost the adjective the whole cue turned on twice in eight clips:
+#:
+#:     "אנחנו לא יודעים אם זה מטוס מסחרי."   33 chars, limit 31 -> re-asked
+#:       -> "אנחנו לא יודעים אם זה היה מטוס."  ("commercial" gone, and the NEXT cue
+#:                                             is the one that says "private")
+#:     "לצה״ל יש מוניטין קשוח. הם נחשבים קשוחים."  40 chars, limit 38 -> re-asked
+#:       -> "לצה״ל יש מוניטין קשוח. הם נחשבים מאוד."  (a modifier with nothing to modify)
+#:
+#: Both attempts were inside the margin that would have stopped the pass from ever
+#: touching them. If 10% over is acceptable in a cue we never touched, it is acceptable
+#: in a cue we just improved.
 CPS_TRIGGER_MARGIN = 1.10
 
-#: The FLOOR on a condensed cue, as a fraction of its own character limit.
+#: The FLOOR on a condensed cue, as a fraction of its own character limit — now stated
+#: to the MODEL in the prompt, and no longer used to trigger a second request.
 #:
 #: The measured failure it stops: cues returned at 31 characters against a 51-character
 #: limit, at 9-16 characters under budget on portrait clips, and one that deleted the
@@ -117,7 +147,32 @@ CPS_TRIGGER_MARGIN = 1.10
 #: supposed to be the minimum edit that fits, and without a lower bound the model has no
 #: way to know that — "under the limit" is satisfied just as well by deleting half the
 #: sentence.
+#:
+#: Why it stopped being an enforcement threshold: a character count is a PROXY for
+#: "you deleted content", and :func:`_cps_rejection` now measures the thing itself. The
+#: proxy's false positives were expensive — see :data:`CPS_MIN_BUDGET` and the removal
+#: of the TOO SHORT re-ask.
 CPS_MIN_KEEP_FRACTION = 0.85
+
+#: Smallest character budget :func:`enforce_cps` will ask the model to hit.
+#:
+#: A budget under 20 characters is under about one second of screen time, and a cue that
+#: short has no filler left to give: the honest answers are all longer than the budget,
+#: so the only way to satisfy the request is to delete meaning. MEASURED over the
+#: eight-clip corpus — every single condensation attempted under a 20-character budget
+#: destroyed content, and none succeeded:
+#:
+#:     budget  7   "איפה אתם?"          -> "איפה את"      (truncated mid-word)
+#:     budget 13   "אתה טועה. עִברית."   -> "אתה טועה."    (the word the clip is ABOUT)
+#:     budget 14   "זו הייתה שפה כנענית." -> "זו הייתה שפה."
+#:     budget 17   "זה לא העברית המקורית," -> "זה לא העברית."
+#:     budget 19   "זו התרגום לאנגלית. אנחנו מדברים אנגלית." -> "זו התרגום לאנגלית."
+#:
+#: Above 20 the same pass produced clean, minimal trims ("והם צעקו וצרחו אחד על השני."
+#: -> "והם צעקו אחד על השני." at a 21-character budget). So: leave these cues alone and
+#: let them run a little fast. An over-fast correct subtitle is a readability cost; an
+#: amputated one is a translation error.
+CPS_MIN_BUDGET = 20
 
 #: Longest a cue may be stretched to by :func:`apply_time_relief`, and the gap it leaves
 #: before the next cue. Mirrors ``subtitle_engine.MAX_CUE_DUR`` / ``MIN_CUE_GAP``;
@@ -380,7 +435,13 @@ def build_system_prompt(
             "only when they carry no meaning: sentence-initial \"like\" ("
             '"Like, I was there") is filler and is deleted, while comparative "like" '
             '("it moves like a train") is meaning and is translated. The same test '
-            'applies to "look" and "listen": drop the interjection, keep the verb.'
+            'applies to "look" and "listen": drop the interjection, keep the verb.\n'
+            "   MECHANICAL RULE, no judgement required: when a cue OPENS with one of "
+            '"you know," / "I mean," / "like," / "well," / "look," / "listen," — the '
+            "phrase followed by a COMMA — your translation starts AFTER it, and the "
+            'comma goes with it. "You know, like, he really got hurt." is '
+            '"הוא באמת נפגע." — not "אתה יודע, הוא באמת נפגע." A question that uses the '
+            'same words as a VERB is untouched: "Do you know what that means?" keeps it.'
         )
     else:
         filler_rule = (
@@ -401,6 +462,17 @@ def build_system_prompt(
         "than exceed it.",
         "Numbers one to ten are spelled out in words; 11 and above stay as numerals.",
         "Keep proper nouns and well-known Latin acronyms as-is (ICC).",
+        # "Fear Factor" came back as "פחד גורם" — two words that mean "fear" and
+        # "causing", in that order, which is not a title, not a phrase and not Hebrew.
+        # The same clip got "Survivor" and "The Amazing Race" right, because those two
+        # have Israeli broadcast names and that one does not.
+        "TITLES of television programmes, films, books, songs and companies are "
+        f"translated ONLY when a real, established {lang} release title exists "
+        '("Survivor" is "הישרדות", "The Amazing Race" is "המרוץ למיליון"). If you are '
+        "not certain such a title exists, LEAVE THE ORIGINAL TITLE IN LATIN SCRIPT — "
+        'never translate it word by word ("Fear Factor" is "Fear Factor", never '
+        '"פחד גורם"). A made-up title is not a translation; it is a programme that does '
+        "not exist.",
     ]
 
     # The contrast rule. A clip whose entire POINT was "the language is not called
@@ -417,11 +489,19 @@ def build_system_prompt(
         "   \"it wasn't called X, it was called Y\" / \"they didn't call it X, they "
         'called it Y"\n'
         '   "X, not Y" / "we say X rather than Y" / "the real name is X, not Y"\n'
-        "Worked examples. \"They didn't call it Hebrew, they called it Ivrit\" must not "
-        'become "לא קראו לזה עברית. קראו לזה עברית." — the second name is '
-        'transliterated: "קראו לזה עִברית". "It is not Farsi, it is Parsi" turns on a '
-        "single consonant and must keep it: פארסי vs פרסי. A cue that reads \"it is not "
-        'called A, it is called A" is a mistranslation, not a subtitle.'
+        '"It is not Farsi, it is Parsi" turns on a single consonant and must keep it: '
+        "פארסי vs פרסי. A cue that reads \"it is not called A, it is called A\" is a "
+        "mistranslation, not a subtitle.\n"
+        f"WHEN TRANSLITERATION CANNOT CARRY THE CONTRAST — because the {lang} for the "
+        f"foreign term and the transliteration of it are the SAME {lang} word, or differ "
+        "only by diacritics — KEEP THE FOREIGN TERM IN LATIN SCRIPT instead. Diacritics "
+        "are not a contrast: subtitle fonts do not draw Hebrew niqqud, so עברית and "
+        "עִברית are one word on screen and a cue built on the difference between them "
+        "says nothing. \"They didn't call it Hebrew, they called it Ivrit\" must not "
+        'become "לא קראו לזה עברית. קראו לזה עברית." and must not be rescued with '
+        'niqqud either — it is "לא קראו לזה Hebrew. קראו לזה עברית." And "What is the '
+        'Hebrew word for Hebrew?" is "מה המילה העברית ל-Hebrew?", never the tautology '
+        '"מה המילה העברית לעברית?".'
     )
     rules.append(
         f"A cue that begins with the dialogue dash \"{DIALOGUE_DASH}\" MUST begin with "
@@ -462,12 +542,19 @@ def build_system_prompt(
         "capitalization (a known transcription artifact). Infer sentence boundaries "
         "yourself and punctuate the translation correctly regardless of how broken "
         "the source looks.",
-        "INFER each speaker's and each addressee's gender from ALL the evidence in the "
-        "scene before choosing grammatical forms: names, forms of address, the content "
-        "of what they say about themselves, and how other speakers answer them. A woman "
-        "answering a question is addressed and answers in FEMININE forms. Only when "
-        "nothing in the scene indicates gender at all, default to masculine. Once a "
-        "speaker's gender is established, never switch it mid-conversation.",
+        "INFER each speaker's and each addressee's gender ONLY from EXPLICIT TEXTUAL "
+        "EVIDENCE in the cues in front of you: a personal name, a gendered form of "
+        "address, a gendered pronoun used about that person, or a gendered noun they "
+        "use about themselves or their relationships (\"my husband\", \"my wife\", "
+        "\"ma'am\", \"sir\", \"she said\"). That is the whole list of admissible "
+        "evidence. Tone, topic, politeness, warmth, who is asking and who is answering, "
+        "and what the scene 'feels' like are NOT evidence and must never move you off "
+        "the default. WITH NO SUCH EVIDENCE, USE MASCULINE FORMS. This is mandatory, "
+        "not a preference: you cannot see the speakers, so a feminine form you inferred "
+        "from atmosphere is a coin flip printed on the screen, while masculine is the "
+        "broadcast convention for unknown gender and reads as neutral. Never invent a "
+        "gender to make a line sound natural. Once a speaker's gender is fixed by "
+        "evidence, never switch it mid-conversation.",
         f"Cues marked {CONTEXT_MARKER} are surrounding dialogue given only so you "
         "understand the scene. Read them, never translate them, and never include "
         "their ids in your output.",
@@ -1174,13 +1261,21 @@ def translate_cues(
 
 
 def _chunk_bounds(total: int):
-    """Half-open [start, end) index ranges of cues to translate per request."""
+    """Half-open [start, end) index ranges of cues to translate per request.
+
+    Even chunks of :data:`MAX_CUES_PER_REQUEST`, except that a final chunk smaller than
+    :data:`MIN_TAIL_CUES` is merged into the one before it rather than sent alone — see
+    that constant for the cue that came back in the wrong gender because it was.
+    """
     if total <= MAX_CUES_PER_REQUEST:
         return [(0, total)]
-    return [
+    bounds = [
         (start, min(start + MAX_CUES_PER_REQUEST, total))
         for start in range(0, total, MAX_CUES_PER_REQUEST)
     ]
+    if len(bounds) > 1 and bounds[-1][1] - bounds[-1][0] < MIN_TAIL_CUES:
+        bounds[-2:] = [(bounds[-2][0], total)]
+    return bounds
 
 
 def _report(callback, done: int, total: int, message: str) -> None:
@@ -1210,36 +1305,56 @@ _CPS_SYSTEM_PROMPT = (
     "4. Drop FILLER before content: redundant adverbs, repeated words, discourse "
     "markers, doubled adjectives. Never delete a noun, a name, a number, a negation or "
     "a whole clause while filler is still present.\n"
-    "5. Keep the meaning and the register. Drop redundancy, not information.\n"
-    "6. PRESERVE sentence punctuation: . , ? ! — every cue must end with proper "
-    "punctuation.\n"
-    "7. Keep proper nouns, numbers and acronyms, and keep existing typography "
+    "5. NEVER delete the LAST meaningful word of the cue — it is almost always the word "
+    "the cue exists to deliver, and the sentence collapses without it. "
+    '"מטוס מסחרי." must not become "מטוס.", "הם נחשבים קשוחים." must not become '
+    '"הם נחשבים מאוד." (a modifier with nothing to modify), "שפה כנענית." must not '
+    'become "שפה." Trim from the middle and the front; keep the end intact.\n'
+    "6. Keep the meaning and the register. Drop redundancy, not information.\n"
+    "7. PRESERVE sentence punctuation: . , ? ! — every cue must end with the SAME "
+    "final mark it already has. A question stays a question.\n"
+    "8. Keep proper nouns, numbers and acronyms, and keep existing typography "
     f"(Hebrew gershayim {GERSHAYIM}, geresh {GERESH}).\n"
-    f"8. A cue that begins with the dialogue dash \"{DIALOGUE_DASH}\" must still begin "
+    f"9. A cue that begins with the dialogue dash \"{DIALOGUE_DASH}\" must still begin "
     "with it.\n\n"
     'Return ONLY JSON: {"cues":[{"id":<int>,"t":"<shortened cue>"}]} — one entry per '
     "cue given, reusing the same ids."
 )
 
-#: Second-pass prompt, sent only for the cues the first pass got wrong — in either
-#: direction. Both failures are named explicitly because the model has just produced one
-#: of them and needs to know which.
+#: Second-pass prompt, sent only for cues that are STILL too long after the first pass.
+#:
+#: There used to be a second direction — TOO SHORT, "you threw away content you had room
+#: for, put it back". It was removed in R8 after being measured on the corpus: four cues
+#: entered it across eight clips, none came back better, and one came back destroyed
+#: ("איפה אתם?" -> "איפה?" -> "איפה את", truncated mid-word with the question mark gone).
+#: The failure is structural, not a wording problem: a model handed a cue that already
+#: fits and told it is nevertheless wrong will change something, and the only thing left
+#: to change is text that was already correct. The 85% floor survives as GUIDANCE in the
+#: first-pass prompt, where it stops over-cutting before it happens, and as
+#: :func:`_cps_rejection`, which measures the deletion itself instead of its shadow.
 _CPS_REASK_PROMPT = (
-    "You are a professional broadcast subtitler. A previous condensation pass produced "
-    "cues that are still wrong, and you are fixing exactly those.\n\n"
-    "Each line gives the ORIGINAL cue, its character limit, and the ATTEMPT that "
-    "failed. An attempt fails in one of two ways:\n"
-    "  TOO LONG   — it still exceeds the limit. Cut more.\n"
-    "  TOO SHORT  — it fits, but it threw away content it had room for. Restore what "
-    "was lost from the ORIGINAL, up to just under the limit.\n\n"
+    "You are a professional broadcast subtitler. A previous condensation pass returned "
+    "cues that were rejected, and you are fixing exactly those.\n\n"
+    "Each line gives the ORIGINAL cue, its character limit, the ATTEMPT, and why the "
+    "attempt was rejected. There are two reasons:\n"
+    "  TOO LONG             — it still exceeds the limit. Cut more.\n"
+    "  NOT A CONDENSATION   — it deleted something a condensation may not delete, and "
+    "the reason names it. Put that back, and find the characters somewhere else: "
+    "filler, a repeated word, a redundant modifier, a subject pronoun the verb already "
+    "implies.\n\n"
     "HARD RULES\n"
     "1. Keep the cue in the SAME language it is written in. Do NOT translate.\n"
     "2. Never exceed the character limit given for that cue.\n"
     "3. Land BETWEEN 85% and 100% of the limit. Both edges are real failures.\n"
     "4. Work from the ORIGINAL, not from the failed attempt — the attempt may have "
     "deleted the most important word in the cue.\n"
-    "5. Drop filler before content; keep proper nouns, numbers, negations and "
-    "punctuation.\n\n"
+    "5. NEVER delete the LAST meaningful word of the cue, and never leave a modifier "
+    'whose noun you deleted ("הם נחשבים מאוד." is not a sentence). Trim from the middle '
+    "and the front.\n"
+    "6. Drop filler before content; keep proper nouns, numbers, negations, and the "
+    "cue's final punctuation mark exactly as it is.\n"
+    "7. If the cue genuinely cannot be shortened without losing meaning, return it "
+    "unchanged. An over-long correct cue is better than a short broken one.\n\n"
     'Return ONLY JSON: {"cues":[{"id":<int>,"t":"<corrected cue>"}]} — one entry per '
     "cue given, reusing the same ids."
 )
@@ -1335,25 +1450,210 @@ def apply_time_relief(
     return out, relieved
 
 
-def _choose_candidate(original, candidates, limit):
-    """Pick the best replacement for one cue: the LONGEST that fits its budget.
+# --------------------------------------------------------------------------------------
+# What a condensation is allowed to throw away
+# --------------------------------------------------------------------------------------
+#
+# Everything below exists because a character count cannot tell the difference between
+# these two answers to "shorten this by six characters":
+#
+#     "לצה״ל יש מוניטין קשוח. הם נחשבים קשוחים."   -> good
+#     "לצה״ל יש מוניטין קשוח. הם נחשבים מאוד."     -> "they are considered very."
+#
+# Both fit. One is Hebrew. The pass used to pick by length and shipped the second one.
 
-    "Longest that fits" is the whole point. Every candidate here is a lossy compression
-    of the same sentence, so among the ones that are legal, the one that threw away the
-    least is the best one — which is the exact opposite of the instinct ("shortest is
-    safest") that deleted a proper noun with 13 characters to spare.
+#: Marks that never belong to a word token.
+_WORD_STRIP = " \t\r\n.,!?;:…\"'()[]{}«»„“”‘’-–—" + GERSHAYIM + GERESH
 
-    Falls back to the shortest of {every candidate, the original} when NONE fits: the
-    pass never blocks delivery, it just gets as close as it can and says so. The ORIGINAL
-    is in that fallback set deliberately — a "condensation" that came back LONGER than
-    what it was given has failed at the one thing it was asked to do, and shipping it
-    would make the cue worse in both dimensions at once.
+#: Hebrew points and cantillation (U+0591-U+05C7). Stripped before comparing tokens: a
+#: subtitle font does not draw them, so עברית and עִברית are the same word on screen and
+#: must be the same word to this code.
+_NIQQUD = "".join(chr(c) for c in range(0x0591, 0x05C8))
+
+#: Sentence-final marks. A cue that had one must still have one.
+_TERMINAL_PUNCT = ".?!…"
+
+#: Any trailing mark at all, terminal or continuing.
+_TRAILING_PUNCT = _TERMINAL_PUNCT + ",:;"
+
+#: Words a condensation MAY delete: discourse markers, intensifiers, copulas and bare
+#: pronouns. Deliberately a CLOSED list — an unknown word counts as content, because the
+#: cost of protecting a filler word (a cue a few characters over budget) is nothing next
+#: to the cost of deleting a content word (a cue that says something else).
+_DROPPABLE = frozenset(
     """
-    fitting = [c for c in candidates if c and len(c) <= limit]
+    אה אהה אמ המ הא נו ובכן טוב אוקיי אוקי הנה כאילו בעצם פשוט ממש מאוד די לגמרי
+    כמובן למעשה בכלל הרי בערך כמעט בעצם אז גם רק עוד כבר הכי יותר פחות כך ככה
+    היי הי אוי אויה וואו וואי אופס הופ יאללה אוף
+    זה זו זאת הזה הזאת הזו אלה האלה הללו
+    היה הייתה היתה היו יהיה תהיה
+    אני אתה את הוא היא אנחנו אתם אתן הם הן
+    אותי אותך אותו אותה אותנו אותם אותן
+    לי לך לו לה לנו להם להן
+    מזה בזה לזה כזה לכך בכך מכך
+    עליו עליה עליהם ממנו ממנה מהם אליו אליה אליהם בו בה בהם
+    ו ש כי אם אבל או אשר כדי של עם על אל מן כן נכון
+    uh um er ah oh hey well okay ok like you know i mean so right yeah
+    a an the is are was were that this it
+    """.split()
+)
+
+#: Words a condensation may NEVER delete, whatever else is going on. Negations invert
+#: the sentence; reflexives are the verb's object and leave a transitive verb dangling
+#: ("הכינו את עצמכם" -> "הכינו", "get yourselves ready" -> "get ready").
+#: ("אל" is deliberately absent: the negative imperative and the preposition "to" are
+#: spelled the same, and the preposition is the common one.)
+_NEVER_DROPPABLE = frozenset(
+    """
+    לא אין בלי ללא לעולם מעולם לאו אינו אינה אינם אינן
+    עצמי עצמך עצמו עצמה עצמנו עצמכם עצמכן עצמם עצמן
+    not no never none without
+    """.split()
+)
+
+#: Words that cannot be the last word of a cue. A cue ending on a preposition, a
+#: subordinator or the accusative את is a sentence someone cut in half.
+#: ("גם" and "רק" are deliberately absent — "ואני גם." is a whole Hebrew sentence.)
+_CANNOT_END = frozenset(
+    """
+    של את עם על אל מן אצל בין מול תחת לפי לגבי בגלל למרות כמו אחרי לפני
+    כי אם אבל או אשר כדי כאשר ו ש הכי
+    of to in on at by for with from and or but that which the a an
+    """.split()
+)
+
+
+def _normalize_token(token: str) -> str:
+    """One word, stripped of punctuation, typography marks and Hebrew points."""
+    token = token.strip(_WORD_STRIP)
+    if not token:
+        return ""
+    for point in _NIQQUD:
+        if point in token:
+            token = token.replace(point, "")
+    return token.casefold()
+
+
+def _tokens(text: str) -> list:
+    """The words of a cue, normalised for comparison. Order preserved, blanks dropped."""
+    return [t for t in (_normalize_token(w) for w in str(text or "").split()) if t]
+
+
+def _same_word(a: str, b: str) -> bool:
+    """Two tokens are the same word, allowing for a conjunctive vav on one of them.
+
+    "והם" and "הם" are one word wearing two hats — Hebrew glues the conjunction onto the
+    following word, so a condensation that drops an "and" changes the token without
+    dropping anything. Nothing else is normalised away: this is a spelling equivalence,
+    not a stemmer, and a stemmer here would quietly bless "קשוחים" -> "קשוח".
+    """
+    return a == b or a == "ו" + b or b == "ו" + a
+
+
+def _last_content_token(tokens) -> str:
+    """The final word that carries meaning — the one a cue is usually ABOUT.
+
+    Every harmful condensation measured on the corpus took this word: "מסחרי" out of
+    "מטוס מסחרי", "קשוחים" out of "נחשבים קשוחים", "כנענית" out of "שפה כנענית",
+    "לפארסי" out of "אז זה הפך לפארסי", and — the case that first put a floor in this
+    module — "העולמי" out of "מרכז הסחר העולמי". Legitimate trims took words from the
+    middle or the front instead ("וצרחו" out of "צעקו וצרחו", "אני אומר" off the front).
+    """
+    for token in reversed(list(tokens)):
+        if token not in _DROPPABLE:
+            return token
+    return ""
+
+
+def _cps_rejection(original: str, candidate: str):
+    """Why this condensation is unusable, or ``None`` if it may be shipped.
+
+    A gate, not a grader: it says "this one is not a shorter version of that one", and
+    the caller falls back to a candidate that is. Everything it checks is a shape that
+    was measured coming out of the model, and every check is closed-list or structural —
+    no stemming, no grammar, no guessing.
+    """
+    candidate = (candidate or "").strip()
+    if not candidate:
+        return "empty"
+
+    original = (original or "").strip()
+    original_tokens = _tokens(original)
+    candidate_tokens = _tokens(candidate)
+    if not candidate_tokens:
+        return "no words"
+
+    # 1. A cue that begins with the dialogue dash still marks a change of speaker.
+    if original.startswith(DIALOGUE_DASH) and not candidate.startswith(DIALOGUE_DASH):
+        return "lost the dialogue dash"
+
+    # 2. Punctuation. "איפה אתם?" came back as "איפה את" — no mark, and the question
+    #    stopped being one.
+    original_end = original[-1:] if original else ""
+    candidate_end = candidate[-1:]
+    if original_end in _TERMINAL_PUNCT and candidate_end != original_end:
+        if not (original_end == "…" and candidate_end in _TERMINAL_PUNCT):
+            return f"ends {candidate_end!r} where the original ended {original_end!r}"
+    if original_end in _TRAILING_PUNCT and candidate_end not in _TRAILING_PUNCT:
+        return "lost its closing punctuation"
+
+    # 3. The word the cue is about — see :func:`_last_content_token`.
+    tail = _last_content_token(original_tokens)
+    if tail and not any(_same_word(tail, t) for t in candidate_tokens):
+        return f"dropped the final content word {tail!r}"
+
+    # 4. Negations, reflexives and numbers: deleting one of these is never a
+    #    condensation. A dropped negation says the opposite of the source; a dropped
+    #    figure is a broadcast correction.
+    for token in original_tokens:
+        if token in _NEVER_DROPPABLE or any(c.isdigit() for c in token):
+            if not any(_same_word(token, t) for t in candidate_tokens):
+                return f"dropped {token!r}"
+
+    # 5. A cue may not end on a word that cannot end a sentence.
+    if candidate_tokens[-1] in _CANNOT_END:
+        return f"ends on {candidate_tokens[-1]!r}"
+
+    return None
+
+
+def _choose_candidate(original, candidates, limit):
+    """Pick the best replacement for one cue: the longest LEGAL one that fits its budget.
+
+    Two filters, in this order, and the order is the whole point:
+
+    1. **Legal** — :func:`_cps_rejection` throws out candidates that are not shortened
+       versions of the original at all. This runs FIRST because a length comparison
+       between a good cue and a broken one is meaningless.
+    2. **Longest that fits** — among the survivors, the one that threw away the least,
+       which is the exact opposite of the instinct ("shortest is safest") that deleted a
+       proper noun with 13 characters to spare.
+
+    Falls back to the shortest of {legal candidates, the original} when none fits, and
+    to the ORIGINAL when none is legal: the pass never blocks delivery, and an
+    over-budget cue that says the right thing beats an in-budget cue that does not.
+
+    Returns ``(text, fits, rejections)`` — ``rejections`` is ``[(candidate, why)]`` so
+    the caller can log what it threw away and why.
+    """
+    rejections = []
+    legal = []
+    for candidate in candidates:
+        candidate = (candidate or "").strip()
+        if not candidate:
+            continue
+        why = _cps_rejection(original, candidate)
+        if why:
+            rejections.append((candidate, why))
+        else:
+            legal.append(candidate)
+
+    fitting = [c for c in legal if len(c) <= limit]
     if fitting:
-        return max(fitting, key=len), True
-    usable = [c for c in candidates if c] + [original]
-    return min(usable, key=len), False
+        return max(fitting, key=len), True, rejections
+    usable = legal + [original]
+    best = min(usable, key=len)
+    return best, len(best) <= limit, rejections
 
 
 def enforce_cps(
@@ -1386,26 +1686,35 @@ def enforce_cps(
        is SHORT, not because it is WORDY, is given the silence in front of it instead of
        losing words. Nothing is sent to the model for a cue this fixes.
     2. **Trigger** — only cues more than :data:`CPS_TRIGGER_MARGIN` over what is left are
-       sent at all. A cue 2 characters over its budget is 0.1 seconds of reading time
-       over, which no viewer has ever noticed; paying tokens to rewrite it and risking a
-       deleted noun to save it is a bad trade in both directions.
+       sent at all, and only when their budget is at least :data:`CPS_MIN_BUDGET`. A cue
+       2 characters over its budget is 0.1 seconds of reading time over, which no viewer
+       has ever noticed; paying tokens to rewrite it and risking a deleted noun to save
+       it is a bad trade in both directions.
     3. **Condense** — one request per batch, under a prompt with an explicit FLOOR
        (never below 85% of the limit) as well as a ceiling.
-    4. **Re-ask, once** — for every cue the first pass got wrong in EITHER direction:
-       still over the limit, or crushed below the floor. The re-ask is given the
-       original text, the limit and the failed attempt, and the winner is chosen by
-       :func:`_choose_candidate` — the longest candidate that fits.
+    4. **Validate** — :func:`_cps_rejection` throws out a reply that is not a shortened
+       version of what it was given: one that dropped the cue's last content word, its
+       negation, its reflexive object, its final punctuation or its dialogue dash. A
+       refused reply is not re-asked, it is simply not used — the original text stands.
+    5. **Re-ask, once** — for every cue that is still over the limit *by more than the
+       same margin that let it into the pass*. The re-ask is given the original text,
+       the limit and the failed attempt, and the winner is chosen by
+       :func:`_choose_candidate` — the longest LEGAL candidate that fits.
 
-    Why the floor exists at all: the first version of this pass had only a ceiling, and
-    the model duly obeyed it by deleting whatever it liked. Measured on this project's
-    own corpus it cut a cue from 53 to 31 characters when 51 were allowed, deleted the
-    subject noun of "מרכז הסחר העולמי" with 13 characters of headroom, and returned four
-    portrait cues 9-16 characters under their limits with whole clauses missing. A budget
-    with no lower bound is not a budget, it is a licence.
+    Why the floor is guidance and not a threshold: the first version of this pass had
+    only a ceiling, and the model duly obeyed it by deleting whatever it liked — it cut
+    a cue from 53 to 31 characters when 51 were allowed, deleted the subject noun of
+    "מרכז הסחר העולמי" with 13 characters of headroom, and returned four portrait cues
+    9-16 characters under their limits with whole clauses missing. The floor stopped
+    that, and then a floor VIOLATION started triggering a "restore what you lost"
+    re-ask, which on the same corpus never once restored anything and did produce
+    "איפה את" out of "איפה אתם?". Step 4 replaces the proxy with the measurement.
 
     This pass improves readability but never blocks delivery: a failed batch leaves that
     batch's cues untouched, and a cue that cannot be fixed keeps the best available text
-    with a warning.
+    with a warning. When readability and meaning genuinely conflict, meaning wins and the
+    cue ships over budget — an over-fast correct subtitle is a readability cost, an
+    amputated one is a translation error.
 
     Args:
         cues: cue dicts with ``start``, ``end`` and ``translated`` (as produced by
@@ -1437,6 +1746,7 @@ def enforce_cps(
     budgets = {}
     originals = {}
     violators = []
+    too_tight = 0
     for idx, cue in enumerate(out):
         text = (cue.get("translated") or "").strip()
         if not text:
@@ -1444,8 +1754,21 @@ def enforce_cps(
         limit = _cps_budget(_duration(cue), max_cps, max_chars_per_cue)
         budgets[idx + 1] = limit
         originals[idx + 1] = text
-        if len(text) > limit * CPS_TRIGGER_MARGIN:
-            violators.append(idx + 1)
+        if len(text) <= limit * CPS_TRIGGER_MARGIN:
+            continue
+        if limit < CPS_MIN_BUDGET:
+            too_tight += 1
+            continue
+        violators.append(idx + 1)
+
+    if too_tight:
+        logger.info(
+            "translation_v2.enforce_cps: left %d over-budget cue(s) alone — their "
+            "budget is under %d characters, which is not a condensation job "
+            "(see CPS_MIN_BUDGET)",
+            too_tight,
+            CPS_MIN_BUDGET,
+        )
 
     if not violators:
         logger.info(
@@ -1474,6 +1797,7 @@ def enforce_cps(
     ]
     still_over = 0
     over_condensed = 0
+    refused = 0
     for batch_index, batch in enumerate(batches):
         _report(
             progress_callback,
@@ -1514,7 +1838,8 @@ def enforce_cps(
             )
             continue
 
-        # Who still needs work, and why — both directions.
+        # Who still needs work, and why. Two reasons, and neither of them is "you came
+        # back shorter than a percentage of the limit" — see :data:`_CPS_REASK_PROMPT`.
         reask = {}
         for cue_id in batch:
             candidate = (shortened.get(cue_id) or "").strip()
@@ -1526,28 +1851,39 @@ def enforce_cps(
                     cue_id,
                 )
                 continue
-            if len(candidate) > limit:
-                reask[cue_id] = (candidate, "TOO LONG")
-            elif len(candidate) < _floor_chars(limit):
-                reask[cue_id] = (candidate, "TOO SHORT")
-            else:
-                out[cue_id - 1]["translated"] = candidate
+            why = _cps_rejection(originals[cue_id], candidate)
+            if why:
+                refused += 1
+                logger.warning(
+                    "translation_v2.enforce_cps: refused the condensation of cue %d "
+                    "(%s) — %r",
+                    cue_id,
+                    why,
+                    candidate,
+                )
+                reask[cue_id] = (candidate, f"NOT A CONDENSATION — it {why}")
+                continue
+            if len(candidate) > limit * CPS_TRIGGER_MARGIN:
+                reask[cue_id] = (candidate, f"TOO LONG — {len(candidate)} chars")
+                continue
+            out[cue_id - 1]["translated"] = candidate
+            if len(candidate) < _floor_chars(limit):
+                over_condensed += 1
+            elif len(candidate) > limit:
+                still_over += 1
 
         if not reask:
             continue
 
         logger.info(
-            "translation_v2.enforce_cps: re-asking %d cue(s) from batch %d "
-            "(%d too long, %d over-condensed)",
+            "translation_v2.enforce_cps: re-asking %d cue(s) from batch %d",
             len(reask),
             batch_index + 1,
-            sum(1 for _c, why in reask.values() if why == "TOO LONG"),
-            sum(1 for _c, why in reask.values() if why == "TOO SHORT"),
         )
         reask_lines = [
             f"{cue_id}. (max {budgets[cue_id]} chars, never below "
-            f"{_floor_chars(budgets[cue_id])}) [{why}: "
-            f"{len(attempt)} chars] ORIGINAL: {originals[cue_id]} || ATTEMPT: {attempt}"
+            f"{_floor_chars(budgets[cue_id])}) [{why}] "
+            f"ORIGINAL: {originals[cue_id]} || ATTEMPT: {attempt}"
             for cue_id, (attempt, why) in sorted(reask.items())
         ]
         try:
@@ -1571,17 +1907,28 @@ def enforce_cps(
 
         for cue_id, (attempt, _why) in reask.items():
             limit = budgets[cue_id]
-            best, fits = _choose_candidate(
+            best, fits, rejections = _choose_candidate(
                 originals[cue_id],
                 [attempt, (second.get(cue_id) or "").strip()],
                 limit,
             )
+            for candidate, why in rejections:
+                if candidate == attempt:
+                    continue  # already counted and logged when the batch produced it
+                refused += 1
+                logger.warning(
+                    "translation_v2.enforce_cps: refused a candidate for cue %d (%s) "
+                    "— %r",
+                    cue_id,
+                    why,
+                    candidate,
+                )
             out[cue_id - 1]["translated"] = best
             if not fits:
                 still_over += 1
                 logger.warning(
                     "translation_v2.enforce_cps: cue %d still over budget after a "
-                    "re-ask (%d chars > %d) — keeping the shortest available",
+                    "re-ask (%d chars > %d) — keeping the shortest legal text",
                     cue_id,
                     len(best),
                     limit,
@@ -1601,10 +1948,12 @@ def enforce_cps(
 
     logger.info(
         "translation_v2.enforce_cps: done | %d condensed, %d still over budget, "
-        "%d over-condensed | tokens in=%d out=%d cost=$%.4f",
+        "%d over-condensed, %d refused as not-a-condensation | "
+        "tokens in=%d out=%d cost=$%.4f",
         len(violators),
         still_over,
         over_condensed,
+        refused,
         usage.prompt_tokens,
         usage.completion_tokens,
         usage.cost_usd,

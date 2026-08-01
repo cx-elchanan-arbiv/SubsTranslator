@@ -1460,3 +1460,62 @@ class TestWordStats:
         stats = words_to_cues(words)[-1]["word_stats"]
         assert stats["degenerate_run"] >= 4
         assert stats["min_word_dur"] == 0.0
+
+
+@pytest.mark.unit
+class TestQuotedPhrasePairing:
+    """A cue that opens ״ and closes " is visibly broken, and two of eight corpus clips
+    shipped one.
+
+    The cause: the acronym rule converts an ASCII quote sitting between two Hebrew
+    letters, which is true of the OPENING quote in ב"פחד גורם" (between ב and פ) and
+    false of the closing one (between ם and ?). Acronyms are single marks; quotations
+    are pairs, so the pair has to be claimed first.
+    """
+
+    def typo(self, text):
+        from services.subtitle_engine import hebrew_typography
+        return hebrew_typography(text)
+
+    def test_the_shipped_defect(self):
+        from services.subtitle_engine import GERSHAYIM as G
+        assert self.typo('נלחמת באחד המתמודדים ב"פחד גורם"?') == (
+            f"נלחמת באחד המתמודדים ב{G}פחד גורם{G}?"
+        )
+
+    def test_a_quotation_before_a_full_stop(self):
+        from services.subtitle_engine import GERSHAYIM as G
+        assert self.typo('הבחור מ"הישרדות".') == f"הבחור מ{G}הישרדות{G}."
+
+    def test_a_half_converted_pair_is_repaired(self):
+        """GPT-4o emits the two marks interchangeably; both ends still have to match."""
+        from services.subtitle_engine import GERSHAYIM as G
+        assert self.typo(f'ב{G}פחד גורם"?') == f"ב{G}פחד גורם{G}?"
+
+    def test_a_quotation_with_no_prefix_letter(self):
+        from services.subtitle_engine import GERSHAYIM as G
+        assert self.typo('הם אמרו "שלום" והלכו.') == f"הם אמרו {G}שלום{G} והלכו."
+
+    # --- what must NOT be treated as a quotation -------------------------------------
+    def test_a_plain_acronym_is_untouched(self):
+        from services.subtitle_engine import GERSHAYIM as G
+        assert self.typo('עם מפכ"ל המשטרה,') == f"עם מפכ{G}ל המשטרה,"
+
+    def test_an_inflected_acronym_keeps_its_mark(self):
+        """דו"חות and מל"טים carry MORE than one letter after the mark and are still
+        acronyms — which is why the pair rule, not a letter count, is what decides."""
+        from services.subtitle_engine import GERSHAYIM as G
+        assert self.typo('הוא הגיש דו"חות רבים.') == f"הוא הגיש דו{G}חות רבים."
+
+    def test_two_acronyms_in_one_line_are_not_a_pair(self):
+        from services.subtitle_engine import GERSHAYIM as G
+        assert self.typo('בצה"ל ובמפכ"ל.') == f"בצה{G}ל ובמפכ{G}ל."
+
+    def test_an_english_quotation_inside_a_hebrew_line_is_untouched(self):
+        assert self.typo('הוא אמר "hi" ואז הלך.') == 'הוא אמר "hi" ואז הלך.'
+
+    def test_empty_and_none(self):
+        from services.subtitle_engine import quoted_phrases
+
+        assert quoted_phrases("") == ""
+        assert quoted_phrases(None) is None
