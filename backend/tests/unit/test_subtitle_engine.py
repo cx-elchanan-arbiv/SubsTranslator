@@ -489,12 +489,26 @@ class TestSparsePunctuationFallback:
         assert len(words_to_cues(words)) == len(words_to_cues(flat))
 
     def test_fallback_needs_at_least_eight_words(self):
-        from services.subtitle_engine import words_to_cues
+        """Four words with 0.5s pauses: enough pause for the FALLBACK, too few words.
 
+        The pauses are deliberately between :data:`PAUSE_SPLIT_GAP` (0.35) and
+        :data:`TURN_SPLIT_GAP` (0.7) — long enough that the sparse-punctuation fallback
+        would split on every one of them if it engaged, short enough that the speaker-turn
+        splitter (which engages on every transcript, punctuated or not) will not. So one
+        cue means exactly one thing: the fallback stayed out.
+        """
+        from services.subtitle_engine import (
+            PAUSE_SPLIT_GAP,
+            TURN_SPLIT_GAP,
+            words_to_cues,
+        )
+
+        gap = 0.5
+        assert PAUSE_SPLIT_GAP < gap < TURN_SPLIT_GAP
         words, t = [], 0.0
         for i in range(4):
             words.append({"s": t, "e": t + 0.25, "w": f"word{i}"})
-            t += 1.5  # huge pauses; too few words for the fallback to engage
+            t += 0.25 + gap
         assert len(words_to_cues(words)) == 1
 
 
@@ -523,18 +537,42 @@ class TestMergeGap:
         assert cues[0]["text"] == "Hello. Bye."
 
     def test_gap_is_measured_from_the_previous_cue_end(self):
-        from services.subtitle_engine import MERGE_MAX_GAP
+        """The effective ceiling is min(MERGE_MAX_GAP, TURN_SPLIT_GAP).
 
+        It used to be MERGE_MAX_GAP alone, and that was a contradiction: a 0.72s silence
+        was simultaneously long enough to be called a speaker TURN and short enough to
+        merge across, so it merged — gluing "Let's give them a new task." to another
+        man's "Yeah, of course." in a real job. A silence cannot be both.
+        """
+        from services.subtitle_engine import MERGE_MAX_GAP, TURN_SPLIT_GAP
+
+        effective = min(MERGE_MAX_GAP, TURN_SPLIT_GAP)
         just_inside = [
             {"s": 0.0, "e": 0.5, "w": "Hello."},
-            {"s": 0.5 + MERGE_MAX_GAP - 0.01, "e": 0.5 + MERGE_MAX_GAP + 0.3, "w": "Bye."},
+            {"s": 0.5 + effective - 0.01, "e": 0.5 + effective + 0.3, "w": "Bye."},
         ]
         just_outside = [
             {"s": 0.0, "e": 0.5, "w": "Hello."},
-            {"s": 0.5 + MERGE_MAX_GAP + 0.01, "e": 0.5 + MERGE_MAX_GAP + 0.3, "w": "Bye."},
+            {"s": 0.5 + effective + 0.01, "e": 0.5 + effective + 0.3, "w": "Bye."},
         ]
         assert len(words_to_cues(just_inside)) == 1
         assert len(words_to_cues(just_outside)) == 2
+
+    def test_a_turn_length_silence_is_never_merged_across(self):
+        """D's repro, reduced: the 0.72s pause inside 'בייב' cue 9."""
+        from services.subtitle_engine import words_to_cues
+
+        words = [
+            {"s": 25.42, "e": 25.76, "w": "Let's"},
+            {"s": 25.76, "e": 26.12, "w": "give"},
+            {"s": 26.12, "e": 26.52, "w": "task."},
+            {"s": 27.24, "e": 27.60, "w": "Yeah,"},  # 0.72s later: a different speaker
+            {"s": 27.72, "e": 27.96, "w": "course."},
+        ]
+        cues = words_to_cues(words)
+        assert len(cues) == 2, f"two speakers glued into one cue: {cues}"
+        assert cues[0]["text"] == "Let's give task."
+        assert cues[1]["text"] == "Yeah, course."
 
 
 @pytest.mark.unit
@@ -772,11 +810,23 @@ class TestGeresh:
 # =============================================================================
 @pytest.mark.unit
 class TestDropHallucinatedCues:
-    """Physically-unspeakable source cues are ASR inventions, not speech."""
+    """The gate is SCORED now: one signal is a suspicion, agreement is a verdict.
+
+    Every threshold below was measured against this project's own 20-run corpus archive.
+    The rule these tests replaced — "drop anything over 35 CPS" — deleted 8 real cues
+    there and caught 0 fabrications, so the tests that pinned it were pinning a defect.
+    """
 
     @staticmethod
-    def _cue(text, start, end):
-        return {"start": start, "end": end, "text": text}
+    def _cue(text, start, end, **extra):
+        cue = {"start": start, "end": end, "text": text}
+        cue.update(extra)
+        return cue
+
+    @staticmethod
+    def _stats(run=0, words=8):
+        return {"words": words, "degenerate": run, "degenerate_run": run,
+                "min_word_dur": 0.0 if run else 0.2}
 
     def test_normal_speech_is_kept(self):
         from services.subtitle_engine import drop_hallucinated_cues
@@ -785,7 +835,7 @@ class TestDropHallucinatedCues:
         kept, dropped = drop_hallucinated_cues(cues)
         assert kept == cues and dropped == []
 
-    def test_impossible_density_is_dropped(self):
+    def test_impossible_density_is_dropped_on_its_own(self):
         from services.subtitle_engine import drop_hallucinated_cues
 
         # 57 characters in 0.26s = 219 CPS — a real fabricated Trump line.
@@ -794,32 +844,131 @@ class TestDropHallucinatedCues:
         assert kept == []
         assert len(dropped) == 1
         assert dropped[0]["cps"] > 200
-        assert "35" in dropped[0]["drop_reason"]
+        assert any(s.startswith("cps_impossible") for s in dropped[0]["signals"])
+
+    def test_fast_speech_alone_is_no_longer_enough(self):
+        """The measured regression: real standup delivery at 39 CPS was being deleted."""
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        real = self._cue("and they were screaming and yelling at each other.", 8.78, 10.06)
+        kept, dropped = drop_hallucinated_cues([real])
+        assert (10.06 - 8.78) and len(real["text"]) / (10.06 - 8.78) > 35
+        assert kept == [real] and dropped == []
+
+    def test_two_soft_signals_together_do_drop(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cue = self._cue("x" * 40, 0.0, 1.0, word_stats=self._stats(run=5))
+        kept, dropped = drop_hallucinated_cues([cue])
+        assert kept == []
+        assert dropped[0]["signals"] == [
+            "cps_fast(40.0>35)",
+            "degenerate_words(run=5)",
+        ]
+
+    def test_a_degenerate_run_alone_is_not_enough(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cue = self._cue("Do you have a boyfriend?", 59.14, 60.0, word_stats=self._stats(run=6))
+        kept, _dropped = drop_hallucinated_cues([cue])
+        assert kept == [cue]
+
+    def test_a_short_degenerate_run_is_not_a_signal(self):
+        from services.subtitle_engine import DEGENERATE_WORD_RUN, drop_hallucinated_cues
+
+        cue = self._cue("x" * 40, 0.0, 1.0, word_stats=self._stats(run=DEGENERATE_WORD_RUN - 1))
+        kept, dropped = drop_hallucinated_cues([cue])
+        assert kept == [cue] and dropped == []
+
+    def test_an_exact_repeat_of_the_previous_cue_is_dropped(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        first = self._cue("That was some day we had together, though.", 105.62, 107.96)
+        loop = self._cue("that was some day we had together though", 108.12, 109.94)
+        kept, dropped = drop_hallucinated_cues([first, loop])
+        assert kept == [first]
+        assert dropped[0]["signals"] == ["duplicate_of_previous"]
+
+    def test_a_duplicate_is_not_handed_back_as_context(self):
+        """Its text is by definition still in the cue that was kept."""
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cues = [self._cue("Thank you very much.", 0.0, 1.5),
+                self._cue("Thank you very much.", 1.6, 3.0)]
+        _kept, dropped = drop_hallucinated_cues(cues)
+        assert dropped[0]["context_only"] is False
+
+    def test_a_dropped_cue_is_offered_to_the_translator_as_context(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cue = self._cue("x" * 40, 0.0, 1.0, word_stats=self._stats(run=5))
+        _kept, dropped = drop_hallucinated_cues([cue])
+        assert dropped[0]["context_only"] is True
+
+    def test_two_consecutive_copies_of_a_hallucination_both_go(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        bad = self._cue("y" * 200, 2.0, 2.5)
+        kept, dropped = drop_hallucinated_cues([bad, dict(bad, start=2.6, end=3.1)])
+        assert kept == [] and len(dropped) == 2
+
+    def test_loud_audio_vetoes_a_soft_signal_drop(self):
+        """Cross-talk: Whisper compressed the timing, but someone was plainly talking."""
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cue = self._cue("x" * 40, 0.0, 1.0, word_stats=self._stats(run=5))
+        kept, dropped = drop_hallucinated_cues([cue], energy_probe=lambda s, e: -0.1)
+        assert kept == [cue] and dropped == []
+
+    def test_quiet_audio_does_not_veto(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cue = self._cue("x" * 40, 0.0, 1.0, word_stats=self._stats(run=5))
+        kept, dropped = drop_hallucinated_cues([cue], energy_probe=lambda s, e: -14.9)
+        assert kept == []
+        assert dropped[0]["energy_db"] == -14.9
+
+    def test_the_veto_cannot_save_a_hard_signal(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cue = self._cue("z" * 200, 0.0, 1.0)  # 200 CPS
+        kept, _dropped = drop_hallucinated_cues([cue], energy_probe=lambda s, e: 3.0)
+        assert kept == []
+
+    def test_the_probe_is_only_consulted_for_candidates(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        calls = []
+
+        def probe(start, end):
+            calls.append((start, end))
+            return 0.0
+
+        drop_hallucinated_cues(
+            [self._cue("An ordinary line.", 0.0, 3.0),
+             self._cue("x" * 40, 5.0, 6.0, word_stats=self._stats(run=5))],
+            energy_probe=probe,
+        )
+        assert calls == [(5.0, 6.0)]
+
+    def test_a_probe_that_raises_never_fails_the_gate(self):
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        def probe(start, end):
+            raise RuntimeError("ffmpeg exploded")
+
+        cue = self._cue("x" * 40, 0.0, 1.0, word_stats=self._stats(run=5))
+        kept, dropped = drop_hallucinated_cues([cue], energy_probe=probe)
+        assert kept == [] and len(dropped) == 1
 
     def test_boundary_exactly_at_threshold_is_kept(self):
         """Strictly-greater-than, so a cue measuring exactly the limit survives."""
-        from services.subtitle_engine import MAX_SOURCE_CPS, drop_hallucinated_cues
+        from services.subtitle_engine import IMPOSSIBLE_SOURCE_CPS, drop_hallucinated_cues
 
-        text = "x" * 35
+        text = "x" * int(IMPOSSIBLE_SOURCE_CPS)
         kept, dropped = drop_hallucinated_cues([self._cue(text, 0.0, 1.0)])
-        assert len(text) / 1.0 == MAX_SOURCE_CPS
+        assert len(text) / 1.0 == IMPOSSIBLE_SOURCE_CPS
         assert len(kept) == 1 and dropped == []
-
-    def test_boundary_just_over_threshold_is_dropped(self):
-        from services.subtitle_engine import drop_hallucinated_cues
-
-        kept, dropped = drop_hallucinated_cues([self._cue("x" * 36, 0.0, 1.0)])
-        assert kept == [] and len(dropped) == 1
-
-    def test_the_real_48_and_50_cps_incidents_are_caught(self):
-        from services.subtitle_engine import drop_hallucinated_cues
-
-        cues = [
-            self._cue("x" * 48, 0.0, 1.0),   # 48 CPS
-            self._cue("x" * 100, 5.0, 7.0),  # 50 CPS
-        ]
-        kept, dropped = drop_hallucinated_cues(cues)
-        assert kept == [] and len(dropped) == 2
 
     def test_zero_duration_cue_is_kept_not_dropped(self):
         """Infinite CPS by arithmetic says nothing about whether the text is real."""
@@ -839,19 +988,21 @@ class TestDropHallucinatedCues:
         from services.subtitle_engine import drop_hallucinated_cues
 
         good_a = self._cue("First real line.", 0.0, 2.0)
-        bad = self._cue("y" * 90, 2.0, 2.5)
+        bad = self._cue("y" * 200, 2.0, 2.5)
         good_b = self._cue("Second real line.", 3.0, 5.0)
         kept, dropped = drop_hallucinated_cues([good_a, bad, good_b])
         assert kept == [good_a, good_b]
         assert kept[0] is good_a and kept[1] is good_b  # not copies
         assert dropped[0]["text"] == bad["text"]
-        assert bad == {"start": 2.0, "end": 2.5, "text": "y" * 90}  # not mutated
+        assert bad == {"start": 2.0, "end": 2.5, "text": "y" * 200}  # not mutated
 
     def test_custom_key_and_threshold(self):
         from services.subtitle_engine import drop_hallucinated_cues
 
         cues = [{"start": 0.0, "end": 1.0, "translated_text": "x" * 20}]
-        kept, dropped = drop_hallucinated_cues(cues, key="translated_text", max_cps=10)
+        kept, dropped = drop_hallucinated_cues(
+            cues, key="translated_text", impossible_cps=10
+        )
         assert kept == [] and len(dropped) == 1
 
     def test_empty_input(self):
@@ -864,9 +1015,53 @@ class TestDropHallucinatedCues:
         from services.subtitle_engine import drop_hallucinated_cues
 
         with caplog.at_level("WARNING"):
-            drop_hallucinated_cues([self._cue("z" * 90, 0.0, 1.0)])
+            drop_hallucinated_cues([self._cue("z" * 200, 0.0, 1.0)])
         assert "hallucination gate" in caplog.text
         assert "zzz" in caplog.text
+
+
+@pytest.mark.unit
+class TestAbsorbDroppedTime:
+    """A dropped cue leaves a hole; the previous line holds the screen over it."""
+
+    def test_previous_cue_grows_into_the_freed_span(self):
+        from services.subtitle_engine import absorb_dropped_time
+
+        kept = [{"start": 0.0, "end": 2.0, "text": "a"}, {"start": 6.0, "end": 8.0, "text": "b"}]
+        dropped = [{"start": 2.5, "end": 4.0, "text": "gone"}]
+        out = absorb_dropped_time(kept, dropped)
+        assert out[0]["end"] == 4.0
+        assert out[1] == kept[1]
+
+    def test_it_never_overlaps_the_next_surviving_cue(self):
+        from services.subtitle_engine import MIN_CUE_GAP, absorb_dropped_time
+
+        kept = [{"start": 0.0, "end": 2.0, "text": "a"}, {"start": 3.0, "end": 5.0, "text": "b"}]
+        dropped = [{"start": 2.1, "end": 4.5, "text": "gone"}]
+        out = absorb_dropped_time(kept, dropped)
+        assert out[0]["end"] == round(3.0 - MIN_CUE_GAP, 3)
+
+    def test_it_never_exceeds_max_cue_duration(self):
+        from services.subtitle_engine import MAX_CUE_DUR, absorb_dropped_time
+
+        kept = [{"start": 0.0, "end": 5.5, "text": "a"}]
+        dropped = [{"start": 5.6, "end": 20.0, "text": "gone"}]
+        out = absorb_dropped_time(kept, dropped)
+        assert out[0]["end"] == MAX_CUE_DUR
+
+    def test_a_hole_before_the_first_cue_is_left_alone(self):
+        from services.subtitle_engine import absorb_dropped_time
+
+        kept = [{"start": 5.0, "end": 7.0, "text": "a"}]
+        out = absorb_dropped_time(kept, [{"start": 1.0, "end": 2.0, "text": "gone"}])
+        assert out == kept
+
+    def test_nothing_dropped_is_a_no_op(self):
+        from services.subtitle_engine import absorb_dropped_time
+
+        kept = [{"start": 0.0, "end": 2.0, "text": "a"}]
+        assert absorb_dropped_time(kept, []) == kept
+        assert absorb_dropped_time(kept, [])[0] is not kept[0]  # copies
 
 
 # =============================================================================
@@ -1003,3 +1198,265 @@ class TestPrimedFallbackLogging:
         assert words_to_cues(words, asr_primed=True) == words_to_cues(
             words, asr_primed=False
         )
+
+
+# =============================================================================
+# R4 — turn structure & timing hygiene
+# =============================================================================
+@pytest.mark.unit
+class TestTurnSplitting:
+    """A silence inside a cue is a speaker turn, and the word timestamps see it."""
+
+    def test_a_sentence_is_split_at_an_internal_turn_pause(self):
+        from services.subtitle_engine import TURN_SPLIT_GAP, words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 0.4, "w": "Who"},
+            {"s": 0.4, "e": 0.9, "w": "protects"},
+            {"s": 0.9, "e": 1.4, "w": "women"},
+            # No terminal, so this is ONE sentence group — the pause is the only signal.
+            # round(): 1.4 + 0.7 is 2.0999999999999996 in binary floating point, which is
+            # a hair UNDER the threshold and would silently make this test vacuous.
+            {"s": round(1.4 + TURN_SPLIT_GAP, 3), "e": 2.6, "w": "From"},
+            {"s": 2.6, "e": 3.2, "w": "whom"},
+        ]
+        cues = words_to_cues(words)
+        assert len(cues) == 2
+        assert cues[0]["text"] == "Who protects women"
+        assert cues[1]["text"] == "From whom"
+
+    def test_a_pause_below_the_threshold_does_not_split(self):
+        from services.subtitle_engine import TURN_SPLIT_GAP, words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 0.4, "w": "Who"},
+            {"s": 0.4, "e": 1.4, "w": "protects"},
+            {"s": 1.4 + TURN_SPLIT_GAP - 0.05, "e": 2.6, "w": "women"},
+        ]
+        assert len(words_to_cues(words)) == 1
+
+    def test_turn_splitting_can_be_switched_off(self):
+        """With turn_gap=0 the two unpunctuated words are one sentence again."""
+        from services.subtitle_engine import words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 0.4, "w": "Who"},
+            {"s": 3.0, "e": 3.4, "w": "whom"},
+        ]
+        assert len(words_to_cues(words, turn_gap=0)) == 1
+        assert len(words_to_cues(words)) == 2
+
+    def test_no_text_is_lost_by_a_split(self):
+        from services.subtitle_engine import words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 0.4, "w": "one"},
+            {"s": 0.4, "e": 0.8, "w": "two"},
+            {"s": 1.8, "e": 2.2, "w": "three"},
+            {"s": 2.2, "e": 2.6, "w": "four"},
+        ]
+        joined = " ".join(c["text"].replace("— ", "") for c in words_to_cues(words))
+        assert joined == "one two three four"
+
+
+@pytest.mark.unit
+class TestDialogueDash:
+    """A turn split that separates a question from the answer marks BOTH sides."""
+
+    @staticmethod
+    def _question_then_answer():
+        # 'boyfriend?' has a degenerate 0.0s duration, so the terminal split is refused
+        # (see TestRefuseSplitOnDegenerateTerminal) and both sentences stay in ONE group
+        # — which is exactly the state in which the turn pause has to do the work.
+        return [
+            {"s": 0.0, "e": 0.4, "w": "Do"},
+            {"s": 0.4, "e": 0.8, "w": "you"},
+            {"s": 0.8, "e": 1.2, "w": "have"},
+            {"s": 1.2, "e": 1.2, "w": "someone?"},
+            {"s": 2.2, "e": 2.6, "w": "I"},
+            {"s": 2.6, "e": 3.0, "w": "did"},
+            {"s": 3.0, "e": 3.4, "w": "once"},
+        ]
+
+    def test_both_halves_carry_the_dash(self):
+        from services.subtitle_engine import DIALOGUE_DASH, words_to_cues
+
+        cues = words_to_cues(self._question_then_answer())
+        assert len(cues) == 2
+        assert cues[0]["text"] == f"{DIALOGUE_DASH}Do you have someone?"
+        assert cues[1]["text"] == f"{DIALOGUE_DASH}I did once"
+
+    def test_a_dashed_turn_is_never_merged_back(self):
+        from services.subtitle_engine import DIALOGUE_DASH, words_to_cues
+
+        cues = words_to_cues(self._question_then_answer(), max_line=200, max_lines=2)
+        assert len(cues) == 2, "the merge step undid the turn split"
+        assert all(c["text"].startswith(DIALOGUE_DASH) for c in cues)
+
+    def test_no_dash_when_the_earlier_half_is_not_a_question(self):
+        from services.subtitle_engine import DIALOGUE_DASH, words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 0.4, "w": "Statement"},
+            {"s": 0.4, "e": 0.8, "w": "here."},
+            {"s": 1.8, "e": 2.2, "w": "Another"},
+            {"s": 2.2, "e": 2.6, "w": "one."},
+        ]
+        assert all(DIALOGUE_DASH not in c["text"] for c in words_to_cues(words))
+
+    def test_the_dash_matches_the_translator_prompt_constant(self):
+        """One dash, two modules. They must not drift."""
+        from services.subtitle_engine import DIALOGUE_DASH
+        from services.translation_v2 import DIALOGUE_DASH as PROMPT_DASH
+
+        assert DIALOGUE_DASH == PROMPT_DASH == "— "
+
+
+@pytest.mark.unit
+class TestRefuseSplitOnDegenerateTerminal:
+    """A full stop on a word with no duration is punctuation nobody spoke."""
+
+    def test_a_zero_duration_terminal_does_not_end_a_sentence(self):
+        from services.subtitle_engine import words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 0.5, "w": "They"},
+            {"s": 0.5, "e": 1.0, "w": "have"},
+            {"s": 1.0, "e": 1.0, "w": "record."},   # 0.000s — the corpus case
+            {"s": 1.0, "e": 1.5, "w": "They"},
+            {"s": 1.5, "e": 2.0, "w": "have"},
+            {"s": 2.0, "e": 2.6, "w": "reputation."},
+        ]
+        cues = words_to_cues(words)
+        assert len(cues) == 1, f"split on punctuation with no speech under it: {cues}"
+
+    def test_a_real_terminal_still_ends_a_sentence(self):
+        from services.subtitle_engine import words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 0.5, "w": "They"},
+            {"s": 0.5, "e": 1.0, "w": "have"},
+            {"s": 1.0, "e": 1.3, "w": "record."},   # 0.30s: really said
+            {"s": 2.2, "e": 2.7, "w": "They"},
+            {"s": 2.7, "e": 3.2, "w": "have"},
+            {"s": 3.2, "e": 3.8, "w": "reputation."},
+        ]
+        assert len(words_to_cues(words)) == 2
+
+    def test_the_refusal_is_logged(self, caplog):
+        from services.subtitle_engine import words_to_cues
+
+        with caplog.at_level("INFO"):
+            words_to_cues(
+                [
+                    {"s": 0.0, "e": 0.5, "w": "Hello"},
+                    {"s": 0.5, "e": 0.5, "w": "there."},
+                    {"s": 0.5, "e": 1.0, "w": "Bye."},
+                ]
+            )
+        assert "refused" in caplog.text
+
+
+@pytest.mark.unit
+class TestLeadOutCap:
+    """A lead-out buys reading time; past a second it is a caption sitting on silence."""
+
+    def test_a_cue_never_holds_more_than_the_cap_past_its_own_speech(self):
+        from services.subtitle_engine import LEAD_OUT_MAX, words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 0.4, "w": "From"},
+            {"s": 0.4, "e": 0.8, "w": "whom?"},
+            {"s": 20.0, "e": 20.5, "w": "Later."},
+        ]
+        cues = words_to_cues(words)
+        # 3.84s on screen for a 4-character answer was the measured defect.
+        assert cues[0]["end"] <= 0.8 + LEAD_OUT_MAX + 1e-6, cues[0]
+
+    def test_the_minimum_duration_floor_still_wins_over_the_cap(self):
+        from services.subtitle_engine import MIN_CUE_DUR, words_to_cues
+
+        cues = words_to_cues([{"s": 0.0, "e": 0.1, "w": "Hi."}])
+        assert cues[0]["end"] - cues[0]["start"] >= MIN_CUE_DUR - 1e-6
+
+    def test_the_last_cue_is_capped_too(self):
+        from services.subtitle_engine import LEAD_OUT_MAX, words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 2.0, "w": "A"},
+            {"s": 2.0, "e": 4.0, "w": "long sentence that has plenty of duration."},
+        ]
+        cues = words_to_cues(words)
+        assert cues[-1]["end"] <= 4.0 + LEAD_OUT_MAX + 1e-6
+
+    def test_the_cap_is_configurable(self):
+        from services.subtitle_engine import words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 2.0, "w": "Something"},
+            {"s": 2.0, "e": 4.0, "w": "spoken here."},
+            {"s": 30.0, "e": 31.0, "w": "Later."},
+        ]
+        tight = words_to_cues(words, lead_out_max=0.2)
+        assert tight[0]["end"] <= 4.0 + 0.2 + 1e-6
+
+
+@pytest.mark.unit
+class TestVideoDurationClamp:
+    """No cue may end after the picture does."""
+
+    def test_the_final_lead_out_is_clamped_to_eof(self):
+        from services.subtitle_engine import words_to_cues
+
+        words = [{"s": 0.0, "e": 2.0, "w": "A sentence with real duration here."}]
+        cues = words_to_cues(words, video_duration=2.3)
+        assert cues[-1]["end"] == 2.3
+
+    def test_a_clamped_cue_still_has_positive_duration(self):
+        from services.subtitle_engine import words_to_cues
+
+        cues = words_to_cues([{"s": 5.0, "e": 5.5, "w": "Late."}], video_duration=5.1)
+        assert cues[0]["end"] > cues[0]["start"]
+
+    def test_no_duration_means_no_clamp(self):
+        from services.subtitle_engine import words_to_cues
+
+        words = [{"s": 0.0, "e": 2.0, "w": "A sentence with real duration here."}]
+        assert words_to_cues(words, video_duration=None)[-1]["end"] > 2.3
+
+    def test_the_clamp_is_logged(self, caplog):
+        from services.subtitle_engine import words_to_cues
+
+        with caplog.at_level("INFO"):
+            words_to_cues([{"s": 0.0, "e": 2.0, "w": "Words here now."}], video_duration=2.1)
+        assert "clamped" in caplog.text
+
+
+@pytest.mark.unit
+class TestWordStats:
+    """Each cue carries the degeneracy read-out the hallucination gate needs."""
+
+    def test_stats_are_attached_to_every_cue(self):
+        from services.subtitle_engine import words_to_cues
+
+        cues = words_to_cues([{"s": 0.0, "e": 0.5, "w": "Hello."}])
+        assert cues[0]["word_stats"] == {
+            "words": 1,
+            "degenerate": 0,
+            "degenerate_run": 0,
+            "min_word_dur": 0.5,
+        }
+
+    def test_a_run_of_degenerate_words_is_counted(self):
+        from services.subtitle_engine import words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 0.5, "w": "Do"},
+            {"s": 60.0, "e": 60.0, "w": "you"},
+            {"s": 60.0, "e": 60.0, "w": "have"},
+            {"s": 60.0, "e": 60.0, "w": "a"},
+            {"s": 60.0, "e": 60.04, "w": "boyfriend?"},
+        ]
+        stats = words_to_cues(words)[-1]["word_stats"]
+        assert stats["degenerate_run"] >= 4
+        assert stats["min_word_dur"] == 0.0

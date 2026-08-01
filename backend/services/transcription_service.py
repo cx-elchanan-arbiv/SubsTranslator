@@ -96,6 +96,33 @@ ASR_PUNCTUATION_PRIMER = (
     "and it is not that simple."
 )
 
+#: Language-matched primers, keyed by the base language code the caller asked for.
+#:
+#: ``initial_prompt`` is text the decoder CONTINUES, so its language is not incidental:
+#: priming a Hebrew clip with an English sentence asks the model to continue English
+#: into Hebrew audio, which is at best a wasted 20 tokens and at worst a nudge toward
+#: transliteration. Each entry is a straight translation of the English primer — same
+#: shape, same punctuation, same register, same deliberate absence of proper nouns and
+#: short emphatic sentences (see above: those cost a fabricated line).
+#:
+#: Only used when the caller NAMES the source language. ``source_lang="auto"`` keeps the
+#: English primer, because guessing the language from a primer is exactly backwards.
+ASR_PUNCTUATION_PRIMERS = {
+    "he": "אז מה אתה חושב על זה? טוב, זאת אומרת, זה תלוי, וזה לא כל כך פשוט.",
+    "en": ASR_PUNCTUATION_PRIMER,
+}
+
+
+def asr_primer_for(source_lang) -> str:
+    """The punctuation primer to hand Whisper for this source language.
+
+    Falls back to the English primer for ``"auto"``, ``None`` and any language with no
+    entry of its own — the English one still demonstrates punctuation, which is the
+    behaviour being primed.
+    """
+    code = str(source_lang or "auto").strip().lower().replace("_", "-").split("-")[0]
+    return ASR_PUNCTUATION_PRIMERS.get(code, ASR_PUNCTUATION_PRIMER)
+
 #: Whether the v2 path lets Whisper condition each window on its own previous output.
 #:
 #: This is the *other* lever the ablation moved, and the two interact. Conditioning is
@@ -880,14 +907,15 @@ def transcribe_with_words(
         # returns some clips entirely unpunctuated and lowercase, and every stage below
         # (sentence spotting, cue splitting, translation punctuation) is built on
         # sentences that then do not exist. See ASR_PUNCTUATION_PRIMER.
-        "initial_prompt": ASR_PUNCTUATION_PRIMER,
+        "initial_prompt": asr_primer_for(source_lang),
     }
     if source_lang != "auto":
         options["language"] = source_lang
 
     logger.info(
         f"💾 v2 transcription settings: model={model_name}, beam_size={options['beam_size']}, "
-        f"collect_words={collect_words}, punctuation_priming=on, "
+        f"collect_words={collect_words}, punctuation_priming=on "
+        f"(primer language={str(source_lang or 'auto').split('-')[0]}), "
         f"condition_on_previous_text={ASR_CONDITION_ON_PREVIOUS_TEXT}"
     )
 

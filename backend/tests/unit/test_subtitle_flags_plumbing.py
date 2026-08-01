@@ -409,7 +409,14 @@ class TestNormalizeCues:
         normalized = normalize_cues(cues)
         assert normalized
         for cue in normalized:
-            assert set(cue) == {"start", "end", "text", "translated_text"}
+            # The four normalised keys, plus whatever the producer added. `word_stats`
+            # is `words_to_cues`'s degeneracy read-out and the hallucination gate reads
+            # it downstream of this function — a normaliser that dropped it would be an
+            # allow-list, which is exactly what `normalize_cues` documents it is not.
+            assert {"start", "end", "text", "translated_text"} <= set(cue)
+            assert set(cue) - {"start", "end", "text", "translated_text"} == {
+                "word_stats"
+            }
 
 
 # =====================================================================================

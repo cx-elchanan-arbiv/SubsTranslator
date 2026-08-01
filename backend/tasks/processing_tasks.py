@@ -16,7 +16,7 @@ from logging_config import (
 )
 from services.research_recorder import start_run
 from services.subtitle_engine import (
-    MAX_SOURCE_CPS,
+    absorb_dropped_time,
     drop_hallucinated_cues,
     layout_params,
     reflow_dangling_connectors,
@@ -39,6 +39,7 @@ from services.transcription_service import (
 )
 from services.translation_v2 import cps_report, enforce_cps, translate_cues
 from utils.file_utils import clean_filename
+from utils.video_utils import get_video_duration, relative_energy_probe
 
 from .progress_manager import ProgressManager
 
@@ -211,10 +212,17 @@ def process_video_task(
         logger.info(f"Subtitle quality flags [task={task_id}]: {flags_summary(flags)}")
         recorder.update_meta(**flags)
 
-        # Experiment read-outs. Only the translation_v2 path can fill these in; every
-        # other path leaves the honest zero rather than an invented number.
+        # Experiment read-outs. Only the translation_v2 path can fill these in.
+        #
+        # `cps_over_budget` starts as None, NOT 0, and that distinction is the whole
+        # point: 0 means "measured, and nothing was over budget" — a perfect score. A
+        # legacy run never measures reading speed at all, and recording its silence as a
+        # perfect score made every legacy row in the corpus index read as a win over the
+        # v2 rows that honestly reported their misses. Absent and zero are different
+        # claims and the archive has to be able to tell them apart.
         translation_usage_totals = {"tokens": 0, "cost_usd": 0.0}
-        cps_over_budget = 0
+        cps_over_budget = None
+        translation_mode = None
 
         wants_translation = bool(target_lang and target_lang != "auto")
 
@@ -260,12 +268,15 @@ def process_video_task(
             # to the landscape numbers that predate this.
             video_w, video_h = subtitle_service.probe_video_dimensions(video_path)
             layout = layout_params(video_w, video_h)
+            # The end of the picture. Every timing rule below is bounded by it: a cue
+            # that ends after the video does is time that does not exist.
+            video_duration = get_video_duration(video_path) or 0.0
             logger.info(
                 f"Subtitle layout [task={task_id}]: {video_w}x{video_h} -> "
                 f"font {layout['font_px']}px, {layout['max_line_chars']} chars/line, "
                 f"{layout['max_chars_per_cue']} chars/cue"
             )
-            recorder.update_meta(layout=layout)
+            recorder.update_meta(layout=layout, video_duration_probe=video_duration)
 
             youtube_url = (
                 processing_info.get("user_choices", {}).get("url")
@@ -304,6 +315,7 @@ def process_video_task(
                     max_line=layout["max_line_chars"],
                     max_lines=layout["max_lines"],
                     asr_primed=asr_primed,
+                    video_duration=video_duration or None,
                 )
                 logger.info(
                     f"spotting_v2: {len(words)} words -> {len(cues)} cues "
@@ -325,14 +337,24 @@ def process_video_task(
             # something in the language that was spoken, dropping early costs no
             # tokens, and neighbouring cues never receive a fabricated sentence as
             # scene context.
-            segments, dropped_cues = drop_hallucinated_cues(segments)
+            # The audio itself gets a vote. Whisper mis-TIMES real speech constantly
+            # (cross-talk compresses its word timestamps), and the only thing that
+            # separates "spoken too fast to be plausible" from "never spoken at all" is
+            # whether anyone was making a noise at that moment. Built lazily: the
+            # baseline measurement is not taken unless a cue is actually in question.
+            segments, dropped_cues = drop_hallucinated_cues(
+                segments, energy_probe=relative_energy_probe(video_path)
+            )
             if dropped_cues:
                 logger.warning(
                     f"hallucination gate [task={task_id}]: dropped "
-                    f"{len(dropped_cues)} source cue(s) above "
-                    f"{MAX_SOURCE_CPS:.0f} CPS before translation"
+                    f"{len(dropped_cues)} source cue(s) as probable ASR hallucination "
+                    f"before translation"
                 )
-                recorder.save_dropped_cues(dropped_cues, reason="source_cps_hallucination")
+                recorder.save_dropped_cues(dropped_cues, reason="hallucination_gate_v2")
+                # No holes: the previous cue holds the screen over the freed time
+                # instead of the picture going bare.
+                segments = absorb_dropped_time(segments, dropped_cues)
 
             recorder.save_cues("pre_translation", segments)
 
@@ -366,23 +388,48 @@ def process_video_task(
                         progress_manager.set_step_progress(3, percent, message=message)
                         progress_manager.log(message, step_index=3)
 
+                    # Text the gate refused to SHIP is still text the model should
+                    # READ: a dropped cue vanishing from the prompt entirely is how a
+                    # translator loses the antecedent of the next line's pronoun. These
+                    # ride along marked [CONTEXT-ONLY] and are filtered back out below.
+                    context_carriers = [
+                        dict(cue, context_only=True)
+                        for cue in dropped_cues
+                        if cue.get("context_only")
+                    ]
+                    translate_input = segments
+                    if context_carriers:
+                        translate_input = sorted(
+                            list(segments) + context_carriers,
+                            key=lambda cue: float(cue.get("start") or 0),
+                        )
+                        logger.info(
+                            f"translation_v2: {len(context_carriers)} dropped cue(s) "
+                            f"handed to the model as [CONTEXT-ONLY]"
+                        )
                     try:
                         translated = translate_cues(
-                            segments,
+                            translate_input,
                             target_lang,
                             style=flags["translation_style"],
                             max_chars_per_cue=layout["max_chars_per_cue"],
                             glossary=glossary,
                             progress_callback=translation_progress,
                             recorder=recorder,
+                            source_lang=detected_language,
                         )
+                        translation_mode = getattr(translated, "mode", "translate")
                         translation_usage = translated.usage
-                        logger.info(f"translation_v2 usage: {translation_usage.as_dict()}")
+                        logger.info(
+                            f"translation_v2 usage ({translation_mode}): "
+                            f"{translation_usage.as_dict()}"
+                        )
                         condensed = enforce_cps(
                             translated,
                             max_chars_per_cue=layout["max_chars_per_cue"],
                             progress_callback=translation_progress,
                             recorder=recorder,
+                            video_duration=video_duration or None,
                         )
                         logger.info(
                             f"translation_v2 enforce_cps usage: {condensed.usage.as_dict()}"
@@ -393,13 +440,19 @@ def process_video_task(
                             "cost_usd": translation_usage.cost_usd
                             + condensed.usage.cost_usd,
                         }
-                        segments = normalize_cues(condensed)
+                        segments = [
+                            cue
+                            for cue in normalize_cues(condensed)
+                            if not cue.get("context_only")
+                        ]
                         recorder.save_cues("post_translation", segments)
                         segments = reflow_dangling_connectors(
                             segments, max_chars=layout["max_chars_per_cue"]
                         )
                         recorder.save_cues("post_reflow", segments)
                         recorder.update_meta(
+                            translation_mode=translation_mode,
+                            context_only_cues=len(context_carriers),
                             translation_tokens=translation_usage_totals["tokens"],
                             translation_cost_usd=round(
                                 translation_usage_totals["cost_usd"], 6

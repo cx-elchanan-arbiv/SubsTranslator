@@ -531,3 +531,66 @@ class TestTheMeasurementItselfWorks:
         two = render("metric__two_bands", visual_reference(["שלום", "עולם"]))
         three = render("metric__three_bands", visual_reference(["שלום", "עולם", "היום"]))
         assert layout_difference(two, three) == MISMATCH
+
+
+class TestDialogueDashRendersOnTheRightEdge:
+    """R4's speaker-turn marker, pixel-checked.
+
+    "— " is an em dash followed by a space, prefixed to a Hebrew line. Its Unicode bidi
+    class is ON (neutral), so it takes the direction of the paragraph around it — which
+    means it only lands where a Hebrew reader expects it (the RIGHT-hand edge, where the
+    line starts) if the line declares its direction. ``bidi_isolate`` does that with the
+    line-level RLI, and this asserts the result rather than the intention: a dash that
+    renders on the left is not a dialogue marker, it is a typo.
+    """
+
+    LINE = "שלום עולם"
+    DASH = "— "
+
+    def _dashed(self, tag):
+        from services.subtitle_engine import bidi_isolate
+
+        return render(tag, bidi_isolate(self.DASH + self.LINE))
+
+    def test_the_dash_is_at_the_right_hand_edge(self):
+        """Measured INSIDE one render: the subtitle is centre-aligned, so absolute x
+        positions are not comparable between two different lines."""
+        spans, _buffer = _band_spans(self._dashed("dash__rtl"))
+        assert len(spans) == 3, f"expected two words and a dash: {spans}"
+        *text_bands, dash = spans
+        assert dash[1] < min(width for _s, width in text_bands), (
+            f"the rightmost run is too wide to be the dash: {spans}"
+        )
+        assert dash[0] > max(start + width for start, width in text_bands), (
+            f"the dash at x={dash[0]} is not right of the Hebrew: {spans}"
+        )
+
+    def test_the_dash_does_not_reorder_the_words(self):
+        """Adding the marker must not disturb the line it marks."""
+        dashed, _ = _band_spans(self._dashed("dash__order"))
+        plain, _ = _band_spans(render("dash__order_plain", _bidi(self.LINE)))
+        dashed_widths = [width for _s, width in dashed[:-1]]
+        plain_widths = [width for _s, width in plain]
+        assert len(dashed_widths) == len(plain_widths)
+        # +-2px: the line re-centres when the dash is added, and a sub-pixel shift can
+        # move one antialiased column across the ink threshold.
+        for a, b in zip(dashed_widths, plain_widths):
+            assert abs(a - b) <= 2, (dashed_widths, plain_widths)
+
+    def test_the_dash_survives_the_full_ass_pipeline(self):
+        """Through build_ass, which is what actually reaches the renderer."""
+        from services.subtitle_engine import DIALOGUE_DASH, build_ass
+
+        body = build_ass(
+            [{"start": 0.0, "end": 2.0, "text": f"{DIALOGUE_DASH}{self.LINE}"}],
+            video_w=W, video_h=H, rtl=True,
+        )
+        event = [line for line in body.splitlines() if line.startswith("Dialogue:")][0]
+        assert "—" in event
+        assert event.index("—") < event.index("ש"), "the dash lost its leading position"
+
+
+def _bidi(text):
+    from services.subtitle_engine import bidi_isolate
+
+    return bidi_isolate(text)

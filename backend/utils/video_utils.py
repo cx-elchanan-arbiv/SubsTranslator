@@ -5,6 +5,7 @@ Video utilities for video processing operations.
 import subprocess
 import os
 import logging
+import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -516,3 +517,64 @@ def merge_videos_ffmpeg(
     except Exception as e:
         logger.error(f"Error merging videos: {str(e)}")
         return False
+
+
+# ----------------------------------------------------------------------------------
+# Audio level probing (used by the hallucination gate)
+# ----------------------------------------------------------------------------------
+#: Matches FFmpeg's ``volumedetect`` mean level line: ``mean_volume: -21.7 dB``.
+_MEAN_VOLUME_RE = re.compile(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
+
+
+def mean_volume_db(media_path: str, start: float = None, duration: float = None):
+    """Mean audio level of a media file, or of one window inside it, in dBFS.
+
+    Uses FFmpeg's ``volumedetect`` filter with ``-f null``, so nothing is written and no
+    stream is re-encoded: the cost is decoding the requested window, which for the
+    fractions of a second this is asked about is a few tens of milliseconds.
+
+    Returns ``None`` for anything that does not produce a number — no audio stream, a
+    window past the end of the file, a missing FFmpeg. A caller that cannot measure must
+    be able to carry on without measuring.
+    """
+    if not media_path:
+        return None
+    cmd = ["ffmpeg", "-v", "info"]
+    if start is not None:
+        cmd += ["-ss", f"{max(0.0, float(start)):.3f}"]
+    cmd += ["-i", media_path]
+    if duration is not None:
+        cmd += ["-t", f"{max(0.05, float(duration)):.3f}"]
+    cmd += ["-af", "volumedetect", "-f", "null", "-"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except Exception as exc:  # noqa: BLE001 - measurement must never raise at a caller
+        logger.debug(f"mean_volume_db failed for {media_path}: {exc}")
+        return None
+    match = _MEAN_VOLUME_RE.search(result.stderr or "")
+    return float(match.group(1)) if match else None
+
+
+def relative_energy_probe(media_path: str):
+    """Build a ``(start, end) -> dB relative to the whole file`` callable, or ``None``.
+
+    The whole file is measured ONCE, lazily, and every window is reported relative to
+    that baseline. Relative is the only comparable quantity: an absolute -25 dBFS means
+    "quiet" in a loud podcast and "normal" in a quietly-mastered interview, and the
+    question being asked — "is anyone speaking here?" — is about this file's own idea of
+    speech.
+
+    ``subtitle_engine.drop_hallucinated_cues`` consumes exactly this shape and treats a
+    ``None`` result, or a probe that raises, as "no measurement".
+    """
+    baseline = {}
+
+    def probe(start: float, end: float):
+        if "value" not in baseline:
+            baseline["value"] = mean_volume_db(media_path)
+        if baseline["value"] is None:
+            return None
+        window = mean_volume_db(media_path, start=start, duration=float(end) - float(start))
+        return None if window is None else round(window - baseline["value"], 2)
+
+    return probe

@@ -314,6 +314,11 @@ class TestLandscapeRender:
 # ======================================================================================
 FOX_CLIP = "/app/uploads/IMG_2870.MP4"
 CLEAN_CLIP = "/app/uploads/corpus/clean_speech.mp4"
+#: The clip that proved the detector was structurally blind: its BREAKING NEWS bar sits
+#: 12px BELOW the sampled subtitle band, inside the bottom margin the old band stopped at.
+BOTTOM_BAR_CLIP = "/app/uploads/corpus/eng_chyron.mp4"
+#: Must stay quiet: a 1920x1080 rally clip with no lower third at all.
+QUIET_HD_CLIP = "/app/uploads/corpus/טראמפ בדיקה 3.mp4"
 
 
 @pytest.mark.integration
@@ -373,6 +378,67 @@ class TestLowerThirdAvoidance:
             out = str(tmp_path / f"fox_{tag}.mp4")
             assert subtitle_service.create_video_with_ass(
                 FOX_CLIP, cues, out, target_language="he",
+                layout=layout, detect_lower_third=detect,
+            )
+            style = [
+                line for line in open(os.path.splitext(out)[0] + ".ass", encoding="utf-8")
+                if line.startswith("Style:")
+            ][0]
+            margins[tag] = int(style.strip().split(",")[21])
+        assert margins["auto"] > margins["off"], margins
+
+    def test_a_chyron_in_the_bottom_margin_is_detected(self):
+        """R3's central case. Before the two-band fix this scored 0.0093 and was 'clear'.
+
+        The subtitle band alone still reads clear — that is the point. The bar is in the
+        bottom strip, which the detector could not previously see at all.
+        """
+        if not os.path.exists(BOTTOM_BAR_CLIP):
+            pytest.skip("eng_chyron.mp4 is not in the container")
+        decision, _ = self._decide(BOTTOM_BAR_CLIP)
+        assert decision["busy"] is True, decision
+        assert decision["decided_by"] == "bottom", decision
+        assert decision["bands"]["subtitle"]["score"] < decision["threshold"]
+        assert decision["bands"]["bottom"]["score"] > decision["threshold"]
+
+    def test_merging_the_two_bands_would_have_missed_it(self):
+        """Kept as an executable argument against the obvious simplification.
+
+        Scoring one taller band averages the busy strip with the clear band above it.
+        Measured: 0.0450 against a 0.070 threshold — still 'clear', still wrong.
+        """
+        if not os.path.exists(BOTTOM_BAR_CLIP):
+            pytest.skip("eng_chyron.mp4 is not in the container")
+        decision, _ = self._decide(BOTTOM_BAR_CLIP)
+        subtitle = decision["bands"]["subtitle"]
+        bottom = decision["bands"]["bottom"]
+        weighted = (
+            subtitle["score"] * subtitle["h"] + bottom["score"] * bottom["h"]
+        ) / (subtitle["h"] + bottom["h"])
+        assert weighted < decision["threshold"], (
+            f"the merged band scores {weighted:.4f} — this test's premise is stale"
+        )
+
+    def test_a_clean_hd_clip_stays_quiet_with_both_bands_scored(self):
+        """The false-positive guard: adding a band must not start firing on clean video."""
+        if not os.path.exists(QUIET_HD_CLIP):
+            pytest.skip("the HD rally clip is not in the container")
+        decision, _ = self._decide(QUIET_HD_CLIP)
+        assert decision["busy"] is False, decision
+        assert decision["bands"]["bottom"]["score"] <= decision["threshold"]
+
+    def test_render_moves_the_box_up_off_the_bottom_bar(self, tmp_path):
+        from services.subtitle_service import subtitle_service
+
+        if not os.path.exists(BOTTOM_BAR_CLIP):
+            pytest.skip("eng_chyron.mp4 is not in the container")
+        _, layout = self._decide(BOTTOM_BAR_CLIP)
+        cues = [{"start": 0.5, "end": 4.0, "text": "x", "translated_text": "שורת בדיקה"}]
+        margins = {}
+        for tag, detect in (("auto", True), ("off", False)):
+            out = str(tmp_path / f"bar_{tag}.mp4")
+            assert subtitle_service.create_video_with_ass(
+                BOTTOM_BAR_CLIP, cues, out, target_language="he",
                 layout=layout, detect_lower_third=detect,
             )
             style = [

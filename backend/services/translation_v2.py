@@ -100,6 +100,32 @@ DEFAULT_MAX_CHARS_PER_CUE = 84
 #: Netflix Hebrew TTSG: 17 characters per second (adult programming).
 DEFAULT_MAX_CPS = 17.0
 
+#: How far over its budget a cue must be before :func:`enforce_cps` will rewrite it.
+#:
+#: A cue 2 characters over an 84-character budget is about a tenth of a second of
+#: reading time over — invisible. Rewriting it costs tokens AND risks the failure mode
+#: this whole pass had to be rebuilt for: a model asked to shorten a nearly-compliant cue
+#: has nothing safe to cut, so it cuts something unsafe. 10% is roughly "one word", the
+#: smallest edit a condensation can honestly be.
+CPS_TRIGGER_MARGIN = 1.10
+
+#: The FLOOR on a condensed cue, as a fraction of its own character limit.
+#:
+#: The measured failure it stops: cues returned at 31 characters against a 51-character
+#: limit, at 9-16 characters under budget on portrait clips, and one that deleted the
+#: noun "העולמי" out of "מרכז הסחר העולמי" with 13 characters to spare. Condensation is
+#: supposed to be the minimum edit that fits, and without a lower bound the model has no
+#: way to know that — "under the limit" is satisfied just as well by deleting half the
+#: sentence.
+CPS_MIN_KEEP_FRACTION = 0.85
+
+#: Longest a cue may be stretched to by :func:`apply_time_relief`, and the gap it leaves
+#: before the next cue. Mirrors ``subtitle_engine.MAX_CUE_DUR`` / ``MIN_CUE_GAP``;
+#: restated here because this module deliberately imports nothing, and pinned to them by
+#: ``tests/unit/test_translation_v2.py``.
+CPS_MAX_CUE_DUR = 6.0
+CPS_MIN_CUE_GAP = 0.08
+
 #: Low but not zero — deterministic enough for subtitles, still idiomatic.
 TEMPERATURE = 0.2
 
@@ -120,6 +146,12 @@ GERESH = "׳"
 MAX_GLOSSARY_ENTRIES = 40
 
 CONTEXT_MARKER = "[CONTEXT-ONLY]"
+
+#: U+2014 EM DASH + space — the dialogue dash ``subtitle_engine.DIALOGUE_DASH`` prefixes
+#: onto both halves of a speaker turn. Spelled out again here rather than imported: this
+#: module deliberately depends on nothing, and the two constants are pinned to each other
+#: by ``tests/unit/test_subtitle_engine.py``.
+DIALOGUE_DASH = "— "
 
 STYLES = ("clean", "faithful")
 
@@ -220,9 +252,12 @@ class TranslationResult(list):
     bill the request without a second channel.
     """
 
-    def __init__(self, cues=(), usage: TokenUsage = None):
+    def __init__(self, cues=(), usage: TokenUsage = None, mode: str = "translate"):
         super().__init__(cues)
         self.usage = usage if usage is not None else TokenUsage()
+        #: Which contract produced these cues — ``"translate"`` or ``"proofread"``.
+        #: A plain list has no room for it and the caller has to archive it.
+        self.mode = mode
 
 
 # --------------------------------------------------------------------------------------
@@ -334,18 +369,26 @@ def build_system_prompt(
         f"Translate each numbered cue into {lang} for burned-in subtitles."
     )
 
+    filler_examples = (
+        '"uh", "um", "you know", "I mean", "listen", "look", "so", sentence-initial '
+        '"like", stutters and false starts'
+    )
     if style == "clean":
         filler_rule = (
-            'REMOVE spoken disfluencies and filler: "uh", "um", "you know", "I mean", '
-            '"listen", "look", stutters and false starts. Subtitles are read, not heard '
-            "— filler wastes reading time."
+            f"REMOVE spoken disfluencies and filler: {filler_examples}. Subtitles are "
+            "read, not heard — filler wastes reading time. Note that these are FILLER "
+            "only when they carry no meaning: sentence-initial \"like\" ("
+            '"Like, I was there") is filler and is deleted, while comparative "like" '
+            '("it moves like a train") is meaning and is translated. The same test '
+            'applies to "look" and "listen": drop the interjection, keep the verb.'
         )
     else:
         filler_rule = (
-            'KEEP spoken disfluencies and filler: "uh", "um", "you know", "I mean", '
-            '"listen", "look", stutters and false starts. Render them with their natural '
-            f"{lang} equivalents — this is a faithful, verbatim rendering of the "
-            "speaker's delivery."
+            f"KEEP spoken disfluencies and filler: {filler_examples}. Render them with "
+            f"their natural {lang} equivalents — this is a faithful, verbatim rendering "
+            "of the speaker's delivery. Even here, sentence-initial \"like\" is an "
+            "interjection, NOT the comparative \"like\": never render it as a "
+            "comparison word."
         )
 
     rules = [
@@ -366,11 +409,26 @@ def build_system_prompt(
     # X"). A translator collapsing two names onto one target word is normally right —
     # it is the same referent — which is exactly why it needs an explicit exception.
     rules.append(
-        "When the source DISTINGUISHES two names or terms for the same thing "
-        '("it is not called X, it is called Y", "X, not Y", "we say X rather than Y"), '
-        f"the {lang} MUST keep them distinguishable. Transliterate or quote the foreign "
-        "term instead of translating both to the same word — a cue that reads "
-        '"it is not called A, it is called A" is a mistranslation, not a subtitle.'
+        "When the source DISTINGUISHES two names or terms for the same thing, the "
+        f"{lang} MUST keep them distinguishable. TRANSLITERATE the foreign term "
+        f"phonetically into {lang} (optionally in quotes) instead of translating both "
+        "names to the same word. This rule is triggered by the SYNTACTIC FRAME, not by "
+        "the words in it — treat every one of these as the same construction:\n"
+        "   \"it wasn't called X, it was called Y\" / \"they didn't call it X, they "
+        'called it Y"\n'
+        '   "X, not Y" / "we say X rather than Y" / "the real name is X, not Y"\n'
+        "Worked examples. \"They didn't call it Hebrew, they called it Ivrit\" must not "
+        'become "לא קראו לזה עברית. קראו לזה עברית." — the second name is '
+        'transliterated: "קראו לזה עִברית". "It is not Farsi, it is Parsi" turns on a '
+        "single consonant and must keep it: פארסי vs פרסי. A cue that reads \"it is not "
+        'called A, it is called A" is a mistranslation, not a subtitle.'
+    )
+    rules.append(
+        f"A cue that begins with the dialogue dash \"{DIALOGUE_DASH}\" MUST begin with "
+        "that same dash in your translation. It marks a change of speaker inside the "
+        "scene and the timing of that change has already been established from the "
+        "audio — do not add it where it is absent and do not remove it where it is "
+        "present."
     )
 
     if lang == "Hebrew":
@@ -404,10 +462,12 @@ def build_system_prompt(
         "capitalization (a known transcription artifact). Infer sentence boundaries "
         "yourself and punctuate the translation correctly regardless of how broken "
         "the source looks.",
-        "When a speaker's or addressee's gender cannot be determined from context, "
-        "use MASCULINE grammatical forms consistently (the broadcast convention for "
-        "Hebrew and other gendered languages). Never switch grammatical gender "
-        "mid-conversation.",
+        "INFER each speaker's and each addressee's gender from ALL the evidence in the "
+        "scene before choosing grammatical forms: names, forms of address, the content "
+        "of what they say about themselves, and how other speakers answer them. A woman "
+        "answering a question is addressed and answers in FEMININE forms. Only when "
+        "nothing in the scene indicates gender at all, default to masculine. Once a "
+        "speaker's gender is established, never switch it mid-conversation.",
         f"Cues marked {CONTEXT_MARKER} are surrounding dialogue given only so you "
         "understand the scene. Read them, never translate them, and never include "
         "their ids in your output.",
@@ -439,13 +499,160 @@ def build_system_prompt(
     )
 
 
-def build_user_prompt(target_lang: str, items) -> str:
+def same_language(source_lang, target_lang) -> bool:
+    """Are these two codes the same language (ignoring region and case)?
+
+    ``"he"``/``"he-IL"``/``"HE"`` are one language; ``"auto"``, ``None`` and anything
+    unrecognised are NOT a match, because "we do not know what was spoken" is not the
+    same claim as "it was spoken in the target language".
+    """
+    def base(code):
+        if not code or not isinstance(code, str):
+            return None
+        head = code.strip().lower().replace("_", "-").split("-")[0]
+        return head if head in LANGUAGE_NAMES else None
+
+    source, target = base(source_lang), base(target_lang)
+    return bool(source) and source == target
+
+
+def build_proofread_prompt(
+    lang_code: str,
+    style: str = "clean",
+    *,
+    max_chars_per_cue: int = DEFAULT_MAX_CHARS_PER_CUE,
+    context_note: str = None,
+    glossary: dict = None,
+) -> str:
+    """Build the system prompt for SAME-LANGUAGE work: proofreading, not translating.
+
+    The defect this closes
+    ----------------------
+    A Hebrew news clip subtitled into Hebrew went through the translator and paid for two
+    GPT calls to hand back **23 of 24 cues byte-identical** to their input. That is the
+    correct behaviour for a translator — there is nothing to translate — and it is a
+    wasted opportunity, because the same call sitting in front of the same text could
+    have repaired what the ASR got wrong. The broadcaster's own burned-in captions on
+    that clip prove the errors were real and correctable:
+
+        מפכה        -> מפכ״ל        (a rank, missing its gershayim)
+        יצחקי ארצוג -> יצחק הרצוג   (a garbled proper noun)
+        ההבטחה      -> האבטחה       (the security, heard as the promise)
+        עווה        -> עבה
+        שאותיר      -> שהותיר
+
+    Every one is a MISHEARING, and every one is obvious from the surrounding sentence to
+    a reader who knows the language — which is exactly what the model is.
+
+    The contract
+    ------------
+    Identical to :func:`build_system_prompt`'s in every mechanical respect — same cue-id
+    JSON, same character budget, same filler semantics, same typography rules — and
+    opposite in intent: **preserve, do not improve.** Wording, register and word order
+    are the speaker's; only what the transcriber demonstrably got wrong may change.
+    """
+    if style not in STYLES:
+        raise ValueError(f"style must be one of {STYLES}, got {style!r}")
+
+    lang = language_name(lang_code)
+    glossary = normalize_glossary(glossary)
+
+    header = [
+        f"You are a professional {lang} transcript proofreader preparing broadcast "
+        "subtitles.",
+    ]
+    if context_note:
+        header.append(str(context_note).strip())
+    header.append(
+        f"Each numbered cue is raw {lang} speech-recognition output of {lang} speech. "
+        f"Return it in {lang}, corrected. This is NOT a translation task."
+    )
+
+    if style == "clean":
+        filler_rule = (
+            'REMOVE spoken disfluencies and filler ("uh", "um", stutters, false starts, '
+            "repeated words). Subtitles are read, not heard."
+        )
+    else:
+        filler_rule = (
+            "KEEP spoken disfluencies and filler exactly as transcribed — this is a "
+            "verbatim record of the delivery."
+        )
+
+    rules = [
+        "PRESERVE the speaker's own words. Do not paraphrase, do not improve the style, "
+        "do not reorder, do not shorten. A cue with nothing wrong in it must come back "
+        "CHARACTER-FOR-CHARACTER unchanged.",
+        "CORRECT what the speech recogniser plainly got wrong, using the surrounding "
+        "cues to decide what was actually said:",
+        "  (a) garbled proper nouns — names of people, places, organisations and ranks;",
+        "  (b) real words misheard as other real words, where the sentence only makes "
+        "sense with the other one;",
+        "  (c) missing or wrong punctuation, including sentence-final punctuation;",
+        filler_rule,
+        f"Maximum {max_chars_per_cue} characters per cue.",
+        "Numbers one to ten are spelled out in words; 11 and above stay as numerals.",
+        "When you are not certain a word is wrong, LEAVE IT ALONE. A faithful "
+        "transcription error is recoverable by a viewer who heard the audio; an "
+        "invented 'correction' is not.",
+    ]
+
+    if lang == "Hebrew":
+        rules.append(
+            f"Restore Hebrew typography the recogniser drops: gershayim {GERSHAYIM} "
+            f"(U+05F4) inside acronyms and ranks — מפכ{GERSHAYIM}ל, צה{GERSHAYIM}ל, "
+            f"חו{GERSHAYIM}ל — and geresh {GERESH} (U+05F3) in foreign names — "
+            f"ג{GERESH}ורג{GERESH}. Never the ASCII \" or '."
+        )
+    elif lang == "Arabic":
+        rules.append(
+            "Use correct Arabic punctuation: Arabic comma ، and Arabic question mark ؟."
+        )
+
+    rules += [
+        "Read the whole sequence first — it is ONE continuous recording, and a name "
+        "spelled correctly in one cue tells you how to spell it in the next.",
+        f"A cue that begins with the dialogue dash \"{DIALOGUE_DASH}\" MUST keep it.",
+        f"Cues marked {CONTEXT_MARKER} are surrounding dialogue given only so you "
+        "understand the scene. Read them, never return them, and never include their "
+        "ids in your output.",
+    ]
+
+    numbered = "\n".join(f"{i}. {rule}" for i, rule in enumerate(rules, 1))
+
+    glossary_block = ""
+    if glossary:
+        entries = "\n".join(
+            f'- "{source}" -> "{target}"' for source, target in glossary.items()
+        )
+        glossary_block = (
+            "\n\nGLOSSARY (binding — overrides every rule above)\n"
+            "Whenever one of these terms appears, however the recogniser spelled it, "
+            "render it EXACTLY as given:\n" + entries
+        )
+
+    return (
+        "\n".join(header)
+        + "\n\nHARD RULES\n"
+        + numbered
+        + glossary_block
+        + '\n\nReturn ONLY JSON: {"cues":[{"id":<int>,"t":"<corrected '
+        + lang
+        + ' text>"}]} — exactly one entry for every cue you were asked to proofread, '
+        "reusing the ids you were given."
+    )
+
+
+def build_user_prompt(target_lang: str, items, *, mode: str = "translate") -> str:
     """
     Build the user message.
 
     ``items`` is an ordered sequence of ``(cue_id, text, is_context)`` triples. Context
     cues are rendered with the ``[CONTEXT-ONLY]`` marker and are *not* counted in the
     "translate N cues" instruction, so the model knows exactly which ids to emit.
+
+    ``mode`` is ``"translate"`` or ``"proofread"`` — the same JSON contract either way,
+    but the instruction has to name the job the system prompt was written for.
     """
     lang = language_name(target_lang)
     translate_ids = [cid for cid, _text, is_ctx in items if not is_ctx]
@@ -461,13 +668,20 @@ def build_user_prompt(target_lang: str, items) -> str:
             lines.append(f"{cue_id}. {clean_text}")
 
     ids_str = _format_id_list(translate_ids)
-    head = (
-        f"Translate {len(translate_ids)} cues into {lang}.\n"
-        f"Emit exactly these ids: {ids_str}.\n"
-    )
+    if mode == "proofread":
+        head = (
+            f"Proofread {len(translate_ids)} {lang} cues, correcting only what the "
+            "speech recogniser got wrong.\n"
+            f"Emit exactly these ids: {ids_str}.\n"
+        )
+    else:
+        head = (
+            f"Translate {len(translate_ids)} cues into {lang}.\n"
+            f"Emit exactly these ids: {ids_str}.\n"
+        )
     if len(translate_ids) != len(items):
         head += (
-            f"Lines marked {CONTEXT_MARKER} are context only — do not translate them "
+            f"Lines marked {CONTEXT_MARKER} are context only — do not return them "
             "and do not include them in the output.\n"
         )
     return head + "\n" + "\n".join(lines)
@@ -701,13 +915,19 @@ def translate_cues(
     glossary=None,
     progress_callback=None,
     recorder=None,
+    source_lang=None,
 ):
     """
-    Translate subtitle cues with whole-scene context.
+    Translate subtitle cues with whole-scene context — or PROOFREAD them when the source
+    language is already the target language.
 
     Args:
         cues: sequence of ``{"start": float, "end": float, "text": str}``. Extra keys
-            are preserved. The input is never mutated — copies are returned.
+            are preserved. The input is never mutated — copies are returned. A cue
+            carrying a truthy ``"context_only"`` key is shown to the model as scene
+            context and never translated: that is how text the hallucination gate
+            REFUSED to ship still reaches the model, so the cue after it does not lose
+            the antecedent of its own first pronoun.
         target_lang: app language code (``"he"``, ``"es"``, ...). The prompt always
             uses the full English name from :data:`LANGUAGE_NAMES`.
         style: ``"clean"`` removes spoken filler, ``"faithful"`` keeps it. This is a
@@ -741,11 +961,20 @@ def translate_cues(
             this function makes — scene chunks and the targeted retry — is handed over
             verbatim. ``None`` disables it entirely, and a recorder that raises is
             logged and ignored; see :func:`_record_llm`.
+        source_lang: the language actually spoken, when it is known. When it equals
+            ``target_lang`` the system prompt is swapped for the ASR-PROOFREADING
+            contract (:func:`build_proofread_prompt`) — same JSON, same budget, opposite
+            intent: correct what the recogniser misheard and change nothing else.
+            ``None`` or ``"auto"`` means "unknown", and the translation prompt is used.
 
     Returns:
         :class:`TranslationResult` — a ``list[dict]`` of cue copies each with an added
         ``"translated"`` key, plus a ``.usage`` attribute (:class:`TokenUsage`) carrying
-        token counts and USD cost.
+        token counts and USD cost. Context-only cues come back with ``"translated": ""``
+        — they are the caller's to discard.
+
+        The result also carries ``.mode`` (``"translate"`` or ``"proofread"``) so the
+        caller can log and archive which contract was actually used.
 
     Batching:
         <= 40 cues go in a SINGLE request so the model sees the whole scene. Longer
@@ -764,36 +993,54 @@ def translate_cues(
     usage = TokenUsage()
     cue_list = list(cues or [])
     out = [dict(cue) for cue in cue_list]
+    proofread = same_language(source_lang, target_lang)
+    mode = "proofread" if proofread else "translate"
     if not out:
-        return TranslationResult(out, usage)
+        return TranslationResult(out, usage, mode=mode)
 
     # Blank cues never go to the model; they would be reported as "missing ids".
+    # Context-only cues DO go to the model, as context, and are never asked for back.
     texts = {}
+    context_only = set()
     for idx, cue in enumerate(out):
         text = (cue.get("text") or "").strip()
-        if text:
-            texts[idx + 1] = text
-        else:
+        if not text:
+            cue["translated"] = ""
+            continue
+        texts[idx + 1] = text
+        if cue.get("context_only"):
+            context_only.add(idx + 1)
             cue["translated"] = ""
 
-    if not texts:
+    if not texts or not (set(texts) - context_only):
         logger.warning("translation_v2: no non-empty cue text to translate")
-        return TranslationResult(out, usage)
+        return TranslationResult(out, usage, mode=mode)
 
     # Prompt first: an unsupported language must fail before we go looking for an API key.
-    system = build_system_prompt(
+    build_prompt = build_proofread_prompt if proofread else build_system_prompt
+    system = build_prompt(
         target_lang,
         style,
         max_chars_per_cue=max_chars_per_cue,
         context_note=context_note,
         glossary=glossary,
     )
+    if proofread:
+        logger.info(
+            "translation_v2: source and target are both %s — running the ASR-PROOFREAD "
+            "contract instead of translating",
+            language_name(target_lang),
+        )
     client = _resolve_client(client)
 
     total = len(out)
     bounds = _chunk_bounds(total)
     for chunk_index, (chunk_start, chunk_end) in enumerate(bounds):
-        target_ids = [i for i in range(chunk_start + 1, chunk_end + 1) if i in texts]
+        target_ids = [
+            i
+            for i in range(chunk_start + 1, chunk_end + 1)
+            if i in texts and i not in context_only
+        ]
         if not target_ids:
             continue
 
@@ -801,19 +1048,27 @@ def translate_cues(
             progress_callback,
             chunk_start,
             total,
-            f"Translating cues {chunk_start + 1}-{chunk_end} of {total} "
+            f"{'Proofreading' if proofread else 'Translating'} cues "
+            f"{chunk_start + 1}-{chunk_end} of {total} "
             f"(chunk {chunk_index + 1}/{len(bounds)})",
         )
 
+        # Read-only neighbours: the overlap on either side of the chunk, plus every
+        # context-only cue INSIDE it (text the hallucination gate refused to ship —
+        # dropping it from the prompt as well is how a translator loses the antecedent
+        # of the next line's pronoun).
         context_ids = [
             i
             for i in list(range(max(1, chunk_start + 1 - OVERLAP_CUES), chunk_start + 1))
             + list(range(chunk_end + 1, min(total, chunk_end + OVERLAP_CUES) + 1))
             if i in texts
         ]
+        context_ids += [
+            i for i in range(chunk_start + 1, chunk_end + 1) if i in context_only
+        ]
         items = sorted(
             [(i, texts[i], False) for i in target_ids]
-            + [(i, texts[i], True) for i in context_ids],
+            + [(i, texts[i], True) for i in sorted(set(context_ids))],
             key=lambda item: item[0],
         )
 
@@ -821,10 +1076,10 @@ def translate_cues(
             client,
             model,
             system,
-            build_user_prompt(target_lang, items),
+            build_user_prompt(target_lang, items, mode=mode),
             usage,
             recorder=recorder,
-            stage=f"translate_chunk_{chunk_index + 1}",
+            stage=f"{mode}_chunk_{chunk_index + 1}",
         )
 
         extra = set(translated) - set(target_ids)
@@ -855,10 +1110,10 @@ def translate_cues(
                     client,
                     model,
                     system,
-                    build_user_prompt(target_lang, retry_items),
+                    build_user_prompt(target_lang, retry_items, mode=mode),
                     usage,
                     recorder=recorder,
-                    stage=f"translate_retry_{chunk_index + 1}",
+                    stage=f"{mode}_retry_{chunk_index + 1}",
                 )
             except TranslationV2Error as exc:
                 logger.error("translation_v2: retry request failed: %s", exc)
@@ -885,10 +1140,28 @@ def translate_cues(
             f"Translated {chunk_end} of {total} cues",
         )
 
+    if proofread:
+        unchanged = sum(
+            1
+            for i, text in texts.items()
+            if i not in context_only
+            and " ".join(str(out[i - 1].get("translated") or "").split())
+            == " ".join(text.split())
+        )
+        asked = len(set(texts) - context_only)
+        logger.info(
+            "translation_v2: proofread %d %s cues (%d returned unchanged, %d corrected)",
+            asked,
+            language_name(target_lang),
+            unchanged,
+            asked - unchanged,
+        )
+
     logger.info(
-        "translation_v2: translated %d cues -> %s (style=%s, model=%s) | "
+        "translation_v2: %s %d cues -> %s (style=%s, model=%s) | "
         "tokens in=%d out=%d requests=%d cost=$%.4f",
-        len(texts),
+        "proofread" if proofread else "translated",
+        len(set(texts) - context_only),
         language_name(target_lang),
         style,
         model,
@@ -897,7 +1170,7 @@ def translate_cues(
         usage.requests,
         usage.cost_usd,
     )
-    return TranslationResult(out, usage)
+    return TranslationResult(out, usage, mode=mode)
 
 
 def _chunk_bounds(total: int):
@@ -930,14 +1203,157 @@ _CPS_SYSTEM_PROMPT = (
     "HARD RULES\n"
     "1. Keep each cue in the SAME language it is already written in. Do NOT translate.\n"
     "2. Never exceed the character limit given in parentheses for that cue.\n"
-    "3. Keep the meaning and the register. Drop redundancy, not information.\n"
-    "4. PRESERVE sentence punctuation: . , ? ! — every cue must end with proper "
+    "3. SHORTEN BY THE MINIMUM NECESSARY. This is the rule that matters most: you are "
+    "trimming a cue to fit, not rewriting it. Aim to land just under the limit. NEVER "
+    "return a cue shorter than 85% of its stated limit — a cue 15 characters under its "
+    "limit is not 'safer', it is a cue that threw away words it had room for.\n"
+    "4. Drop FILLER before content: redundant adverbs, repeated words, discourse "
+    "markers, doubled adjectives. Never delete a noun, a name, a number, a negation or "
+    "a whole clause while filler is still present.\n"
+    "5. Keep the meaning and the register. Drop redundancy, not information.\n"
+    "6. PRESERVE sentence punctuation: . , ? ! — every cue must end with proper "
     "punctuation.\n"
-    "5. Keep proper nouns, numbers and acronyms, and keep existing typography "
-    f"(Hebrew gershayim {GERSHAYIM}).\n\n"
+    "7. Keep proper nouns, numbers and acronyms, and keep existing typography "
+    f"(Hebrew gershayim {GERSHAYIM}, geresh {GERESH}).\n"
+    f"8. A cue that begins with the dialogue dash \"{DIALOGUE_DASH}\" must still begin "
+    "with it.\n\n"
     'Return ONLY JSON: {"cues":[{"id":<int>,"t":"<shortened cue>"}]} — one entry per '
     "cue given, reusing the same ids."
 )
+
+#: Second-pass prompt, sent only for the cues the first pass got wrong — in either
+#: direction. Both failures are named explicitly because the model has just produced one
+#: of them and needs to know which.
+_CPS_REASK_PROMPT = (
+    "You are a professional broadcast subtitler. A previous condensation pass produced "
+    "cues that are still wrong, and you are fixing exactly those.\n\n"
+    "Each line gives the ORIGINAL cue, its character limit, and the ATTEMPT that "
+    "failed. An attempt fails in one of two ways:\n"
+    "  TOO LONG   — it still exceeds the limit. Cut more.\n"
+    "  TOO SHORT  — it fits, but it threw away content it had room for. Restore what "
+    "was lost from the ORIGINAL, up to just under the limit.\n\n"
+    "HARD RULES\n"
+    "1. Keep the cue in the SAME language it is written in. Do NOT translate.\n"
+    "2. Never exceed the character limit given for that cue.\n"
+    "3. Land BETWEEN 85% and 100% of the limit. Both edges are real failures.\n"
+    "4. Work from the ORIGINAL, not from the failed attempt — the attempt may have "
+    "deleted the most important word in the cue.\n"
+    "5. Drop filler before content; keep proper nouns, numbers, negations and "
+    "punctuation.\n\n"
+    'Return ONLY JSON: {"cues":[{"id":<int>,"t":"<corrected cue>"}]} — one entry per '
+    "cue given, reusing the same ids."
+)
+
+
+def _cps_budget(duration, max_cps, max_chars_per_cue):
+    """Characters this cue may carry: the tighter of the reading-speed and frame limits."""
+    limit = max_chars_per_cue
+    if duration > 0:
+        limit = min(max_chars_per_cue, int(math.floor(max_cps * duration)))
+    return max(int(limit), 1)
+
+
+def apply_time_relief(
+    cues,
+    *,
+    max_cps=DEFAULT_MAX_CPS,
+    max_chars_per_cue=DEFAULT_MAX_CHARS_PER_CUE,
+    max_dur=CPS_MAX_CUE_DUR,
+    min_gap=CPS_MIN_CUE_GAP,
+    video_duration=None,
+):
+    """Give an over-long cue more TIME before anyone considers taking away its WORDS.
+
+    The defect this closes
+    ----------------------
+    ``enforce_cps`` used to reach straight for the model. But a cue is over budget
+    because of a RATIO — characters over seconds — and the pipeline had just finished
+    capping the denominator (``subtitle_engine.LEAD_OUT_MAX``). Deleting words to fix a
+    number that a free extra second of silence would have fixed is destroying content to
+    solve a problem that was not about content: the corpus holds a cue whose whole
+    subject noun ("העולמי", of "מרכז הסחר העולמי") was deleted while 13 characters of
+    headroom sat unused, and four portrait cues that came back 9-16 characters UNDER
+    their limit because a clause had been dropped rather than trimmed.
+
+    So: extend first, condense only what time cannot fix. This is the ONE place allowed
+    to exceed ``LEAD_OUT_MAX``, and only for a cue that genuinely cannot be read in the
+    time it has — a lead-out is a comfort, being unreadable is a defect.
+
+    Bounded by everything that bounds a cue: the next cue's start (less ``min_gap``),
+    ``max_dur`` from its own start, and the end of the video.
+
+    Args:
+        cues: cue dicts with ``start``, ``end`` and a translation. Not mutated.
+        video_duration: hard end of the picture, when known.
+
+    Returns:
+        ``(cues, relieved)`` — new copies, and how many cues were extended.
+    """
+    out = [dict(cue) for cue in (cues or [])]
+    relieved = 0
+    for index, cue in enumerate(out):
+        if cue.get("context_only"):
+            continue  # never shown, so it has no reading speed to relieve
+        text = _measured_text(cue)
+        if not text:
+            continue
+        duration = _duration(cue)
+        if duration <= 0:
+            continue
+        if len(text) <= _cps_budget(duration, max_cps, max_chars_per_cue):
+            continue
+        if len(text) > max_chars_per_cue:
+            continue  # over the FRAME budget: no amount of time can fix that
+
+        try:
+            start = float(cue.get("start", 0) or 0)
+            end = float(cue.get("end", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+
+        needed_end = start + len(text) / float(max_cps)
+        ceiling = start + float(max_dur)
+        if index + 1 < len(out):
+            try:
+                ceiling = min(ceiling, float(out[index + 1].get("start", 0) or 0) - min_gap)
+            except (TypeError, ValueError):
+                pass
+        if video_duration:
+            ceiling = min(ceiling, float(video_duration))
+
+        new_end = min(needed_end, ceiling)
+        if new_end > end:
+            cue["end"] = round(new_end, 3)
+            relieved += 1
+
+    if relieved:
+        logger.info(
+            "translation_v2.enforce_cps: gave %d over-long cue(s) more TIME instead of "
+            "shortening their text",
+            relieved,
+        )
+    return out, relieved
+
+
+def _choose_candidate(original, candidates, limit):
+    """Pick the best replacement for one cue: the LONGEST that fits its budget.
+
+    "Longest that fits" is the whole point. Every candidate here is a lossy compression
+    of the same sentence, so among the ones that are legal, the one that threw away the
+    least is the best one — which is the exact opposite of the instinct ("shortest is
+    safest") that deleted a proper noun with 13 characters to spare.
+
+    Falls back to the shortest of {every candidate, the original} when NONE fits: the
+    pass never blocks delivery, it just gets as close as it can and says so. The ORIGINAL
+    is in that fallback set deliberately — a "condensation" that came back LONGER than
+    what it was given has failed at the one thing it was asked to do, and shipping it
+    would make the cue worse in both dimensions at once.
+    """
+    fitting = [c for c in candidates if c and len(c) <= limit]
+    if fitting:
+        return max(fitting, key=len), True
+    usable = [c for c in candidates if c] + [original]
+    return min(usable, key=len), False
 
 
 def enforce_cps(
@@ -949,9 +1365,11 @@ def enforce_cps(
     client=None,
     progress_callback=None,
     recorder=None,
+    video_duration=None,
+    time_relief=True,
 ):
     """
-    Optional pass: condense cues that break the reading-speed budget.
+    Optional pass: make cues readable in the time they have — with time first, text last.
 
     Defaults are the Netflix Hebrew TTSG limits: 17 characters per second and 84
     characters per cue (2 lines x 42). Per cue the effective budget is
@@ -962,16 +1380,40 @@ def enforce_cps(
     condensed to what its narrow frame can render (66 chars at 720x1280) rather than to
     the landscape 84.
 
-    Only the violating cues are sent, in batches of at most
-    :data:`MAX_CUES_PER_CPS_REQUEST`, each with an explicit ``max_tokens`` ceiling.
-    There is no second pass: if a returned cue still breaks its budget, the shorter
-    of {model output, original} is kept and a warning is logged — this pass improves
-    readability but never blocks delivery, and never changes a compliant cue. A
-    failed batch leaves that batch's cues untouched and does not abort the rest.
+    What this pass does, in order
+    -----------------------------
+    1. **Time relief** (:func:`apply_time_relief`) — a cue that is over budget because it
+       is SHORT, not because it is WORDY, is given the silence in front of it instead of
+       losing words. Nothing is sent to the model for a cue this fixes.
+    2. **Trigger** — only cues more than :data:`CPS_TRIGGER_MARGIN` over what is left are
+       sent at all. A cue 2 characters over its budget is 0.1 seconds of reading time
+       over, which no viewer has ever noticed; paying tokens to rewrite it and risking a
+       deleted noun to save it is a bad trade in both directions.
+    3. **Condense** — one request per batch, under a prompt with an explicit FLOOR
+       (never below 85% of the limit) as well as a ceiling.
+    4. **Re-ask, once** — for every cue the first pass got wrong in EITHER direction:
+       still over the limit, or crushed below the floor. The re-ask is given the
+       original text, the limit and the failed attempt, and the winner is chosen by
+       :func:`_choose_candidate` — the longest candidate that fits.
+
+    Why the floor exists at all: the first version of this pass had only a ceiling, and
+    the model duly obeyed it by deleting whatever it liked. Measured on this project's
+    own corpus it cut a cue from 53 to 31 characters when 51 were allowed, deleted the
+    subject noun of "מרכז הסחר העולמי" with 13 characters of headroom, and returned four
+    portrait cues 9-16 characters under their limits with whole clauses missing. A budget
+    with no lower bound is not a budget, it is a licence.
+
+    This pass improves readability but never blocks delivery: a failed batch leaves that
+    batch's cues untouched, and a cue that cannot be fixed keeps the best available text
+    with a warning.
 
     Args:
         cues: cue dicts with ``start``, ``end`` and ``translated`` (as produced by
-            :func:`translate_cues`). Not mutated; copies are returned.
+            :func:`translate_cues`). Not mutated; copies are returned. TIMINGS MAY
+            CHANGE — see step 1; that is the point.
+        video_duration: end of the picture, so time relief cannot run past it.
+        time_relief: set False to keep the old text-only behaviour (used by tests that
+            pin condensation independently of timing).
         progress_callback: ``(done, total, message)``, called per batch. Best effort.
         recorder: optional research recorder, same contract as
             :func:`translate_cues` — every condensation request is archived verbatim.
@@ -984,34 +1426,44 @@ def enforce_cps(
     if not out:
         return TranslationResult(out, usage)
 
+    if time_relief:
+        out, _relieved = apply_time_relief(
+            out,
+            max_cps=max_cps,
+            max_chars_per_cue=max_chars_per_cue,
+            video_duration=video_duration,
+        )
+
     budgets = {}
+    originals = {}
     violators = []
     for idx, cue in enumerate(out):
         text = (cue.get("translated") or "").strip()
         if not text:
             continue
-        duration = _duration(cue)
-        limit = max_chars_per_cue
-        if duration > 0:
-            limit = min(max_chars_per_cue, int(math.floor(max_cps * duration)))
-        limit = max(limit, 1)
+        limit = _cps_budget(_duration(cue), max_cps, max_chars_per_cue)
         budgets[idx + 1] = limit
-        if len(text) > limit:
+        originals[idx + 1] = text
+        if len(text) > limit * CPS_TRIGGER_MARGIN:
             violators.append(idx + 1)
 
     if not violators:
         logger.info(
-            "translation_v2.enforce_cps: all %d cues within %.1f CPS / %d chars",
+            "translation_v2.enforce_cps: all %d cues within %.1f CPS / %d chars "
+            "(or inside the %.0f%% trigger margin)",
             len(out),
             max_cps,
             max_chars_per_cue,
+            (CPS_TRIGGER_MARGIN - 1) * 100,
         )
         return TranslationResult(out, usage)
 
     logger.info(
-        "translation_v2.enforce_cps: condensing %d/%d cues over budget (ids %s)",
+        "translation_v2.enforce_cps: condensing %d/%d cues more than %.0f%% over budget "
+        "(ids %s)",
         len(violators),
         len(out),
+        (CPS_TRIGGER_MARGIN - 1) * 100,
         violators,
     )
 
@@ -1020,6 +1472,8 @@ def enforce_cps(
         violators[i: i + MAX_CUES_PER_CPS_REQUEST]
         for i in range(0, len(violators), MAX_CUES_PER_CPS_REQUEST)
     ]
+    still_over = 0
+    over_condensed = 0
     for batch_index, batch in enumerate(batches):
         _report(
             progress_callback,
@@ -1028,13 +1482,14 @@ def enforce_cps(
             f"Condensing over-long cues (batch {batch_index + 1}/{len(batches)})",
         )
         lines = [
-            f"{cue_id}. (max {budgets[cue_id]} chars) "
-            f"{out[cue_id - 1]['translated'].strip()}"
+            f"{cue_id}. (max {budgets[cue_id]} chars, never below "
+            f"{_floor_chars(budgets[cue_id])}) {originals[cue_id]}"
             for cue_id in batch
         ]
         user = (
             f"Shorten these {len(batch)} subtitle cues so each fits its character "
-            "limit, keeping the same language, meaning and punctuation:\n\n"
+            "limit, keeping the same language, meaning and punctuation. Trim by the "
+            "minimum necessary — do not go below the stated minimum:\n\n"
             + "\n".join(lines)
         )
         try:
@@ -1059,9 +1514,11 @@ def enforce_cps(
             )
             continue
 
+        # Who still needs work, and why — both directions.
+        reask = {}
         for cue_id in batch:
-            original = out[cue_id - 1]["translated"].strip()
-            candidate = shortened.get(cue_id)
+            candidate = (shortened.get(cue_id) or "").strip()
+            limit = budgets[cue_id]
             if not candidate:
                 logger.warning(
                     "translation_v2.enforce_cps: no replacement for cue %d — "
@@ -1069,29 +1526,95 @@ def enforce_cps(
                     cue_id,
                 )
                 continue
-            if len(candidate) > budgets[cue_id]:
-                keep = candidate if len(candidate) < len(original) else original
+            if len(candidate) > limit:
+                reask[cue_id] = (candidate, "TOO LONG")
+            elif len(candidate) < _floor_chars(limit):
+                reask[cue_id] = (candidate, "TOO SHORT")
+            else:
+                out[cue_id - 1]["translated"] = candidate
+
+        if not reask:
+            continue
+
+        logger.info(
+            "translation_v2.enforce_cps: re-asking %d cue(s) from batch %d "
+            "(%d too long, %d over-condensed)",
+            len(reask),
+            batch_index + 1,
+            sum(1 for _c, why in reask.values() if why == "TOO LONG"),
+            sum(1 for _c, why in reask.values() if why == "TOO SHORT"),
+        )
+        reask_lines = [
+            f"{cue_id}. (max {budgets[cue_id]} chars, never below "
+            f"{_floor_chars(budgets[cue_id])}) [{why}: "
+            f"{len(attempt)} chars] ORIGINAL: {originals[cue_id]} || ATTEMPT: {attempt}"
+            for cue_id, (attempt, why) in sorted(reask.items())
+        ]
+        try:
+            second = _request_cue_map(
+                client,
+                model,
+                _CPS_REASK_PROMPT,
+                f"Fix these {len(reask)} cues:\n\n" + "\n".join(reask_lines),
+                usage,
+                max_tokens=len(reask) * CPS_TOKENS_PER_CUE,
+                recorder=recorder,
+                stage=f"cps_reask_{batch_index + 1}",
+            )
+        except TranslationV2Error as exc:
+            logger.warning(
+                "translation_v2.enforce_cps: re-ask for batch %d failed: %s",
+                batch_index + 1,
+                exc,
+            )
+            second = {}
+
+        for cue_id, (attempt, _why) in reask.items():
+            limit = budgets[cue_id]
+            best, fits = _choose_candidate(
+                originals[cue_id],
+                [attempt, (second.get(cue_id) or "").strip()],
+                limit,
+            )
+            out[cue_id - 1]["translated"] = best
+            if not fits:
+                still_over += 1
                 logger.warning(
-                    "translation_v2.enforce_cps: cue %d still over budget "
-                    "(%d chars > %d) — keeping the shorter version (%d chars)",
+                    "translation_v2.enforce_cps: cue %d still over budget after a "
+                    "re-ask (%d chars > %d) — keeping the shortest available",
                     cue_id,
-                    len(candidate),
-                    budgets[cue_id],
-                    len(keep),
+                    len(best),
+                    limit,
                 )
-                out[cue_id - 1]["translated"] = keep
-                continue
-            out[cue_id - 1]["translated"] = candidate
+            elif len(best) < _floor_chars(limit):
+                over_condensed += 1
+                logger.warning(
+                    "translation_v2.enforce_cps: cue %d came back over-condensed even "
+                    "after a re-ask (%d chars for a %d-char budget) — shipping it, but "
+                    "content was probably lost",
+                    cue_id,
+                    len(best),
+                    limit,
+                )
 
     _report(progress_callback, len(violators), len(violators), "Reading-speed pass done")
 
     logger.info(
-        "translation_v2.enforce_cps: done | tokens in=%d out=%d cost=$%.4f",
+        "translation_v2.enforce_cps: done | %d condensed, %d still over budget, "
+        "%d over-condensed | tokens in=%d out=%d cost=$%.4f",
+        len(violators),
+        still_over,
+        over_condensed,
         usage.prompt_tokens,
         usage.completion_tokens,
         usage.cost_usd,
     )
     return TranslationResult(out, usage)
+
+
+def _floor_chars(limit: int) -> int:
+    """The fewest characters a condensed cue may carry — see :data:`CPS_MIN_KEEP_FRACTION`."""
+    return int(math.ceil(int(limit) * CPS_MIN_KEEP_FRACTION))
 
 
 def _duration(cue) -> float:

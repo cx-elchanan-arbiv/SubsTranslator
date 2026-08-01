@@ -18,7 +18,7 @@ from config import get_config
 from core.exceptions import FFmpegProcessError, FFmpegTimeoutError, FileNotFoundError
 from logging_config import get_logger, log_external_service_call
 from performance_monitor import performance_monitor  # Phase A: Import performance monitoring
-from services.subtitle_engine import build_ass, layout_params
+from services.subtitle_engine import build_ass, hebrew_typography, layout_params
 from utils.rtl_utils import add_rtl_markers, clean_rtl_text, is_rtl_language
 
 logger = get_logger(__name__)
@@ -33,15 +33,22 @@ ASS_FONTS_DIR = os.getenv("ASS_FONTS_DIR", "/usr/share/fonts/truetype/hebrew")
 # Lower-third ("chyron") collision detection — constants
 # ----------------------------------------------------------------------------------
 #: Frames sampled across the video to decide whether the subtitle band is occupied.
-#: Five is enough to see through a single atypical shot and cheap enough to stay well
-#: inside the 2s budget (each grab is an input-seek, ~60-150ms).
-CHYRON_SAMPLE_FRAMES = 5
+#: Seven is enough to see through several atypical shots and still cheap: ONE decode per
+#: position now scores BOTH bands, because the crop covers them together and the split
+#: happens in numpy.
+CHYRON_SAMPLE_FRAMES = 7
 
 #: Where in the video those frames are taken, as fractions of its duration. FIXED, so
 #: the decision is reproducible for a given file — a random or "every N seconds" sample
-#: would make the rendered output depend on the clock. The first and last 10% are
-#: skipped: titles, fades and end cards are not representative of the body of the video.
-CHYRON_SAMPLE_POSITIONS = (0.1, 0.3, 0.5, 0.7, 0.9)
+#: would make the rendered output depend on the clock.
+#:
+#: The first 10% is no longer skipped. It was, on the theory that titles and fades are
+#: unrepresentative; the corpus says otherwise — a broadcast SUPER (the name-and-title
+#: card) lives almost exclusively in the first few seconds of an interview, and it is
+#: precisely the graphic a subtitle must not land on. Missing it to avoid a fade is the
+#: wrong trade, and the quantile rule below is what makes an unrepresentative sample
+#: harmless.
+CHYRON_SAMPLE_POSITIONS = (0.03, 0.07, 0.1, 0.3, 0.5, 0.7, 0.9)
 
 #: 8-bit luma step between neighbouring pixels that counts as an edge. Well above sensor
 #: noise and compression dither, low enough to catch anti-aliased caption text on a
@@ -83,6 +90,28 @@ CHYRON_MARGIN_V_FRAC = 0.24
 #: occupies — line spacing plus the opaque box's padding and 3px outline. Only used to
 #: aim the sampling crop at the right strip of picture; it is not a rendering value.
 CHYRON_BOX_HEIGHT_FACTOR = 1.35
+
+#: Quantile of the per-frame scores that decides, instead of the median.
+#:
+#: The median was chosen to survive fades to black, and it does — but it also survives
+#: the thing being looked for. A chyron that is on screen for a third of the video (a
+#: super, an intermittent breaking-news bar, a lower third that comes and goes with the
+#: shot) leaves a MINORITY of samples busy, and the median is by definition blind to a
+#: minority. Measured on the corpus: a podcast whose subtitle band is busy in 2 of 5
+#: samples scored a median of 0.0073 — 10x under the threshold — while those two samples
+#: read 0.0556 and 0.0589.
+#:
+#: The 75th percentile keeps the fade-to-black robustness (two dark frames out of seven
+#: cannot pull it down) while letting a real minority of busy frames be seen. Re-scored
+#: over the whole corpus it changes no verdict that was already right and introduces no
+#: false positive: the busiest clip WITHOUT a lower third reaches 0.0486 at this
+#: quantile, still comfortably under 0.070.
+CHYRON_SCORE_QUANTILE = 0.75
+
+#: A band is also called occupied when at least this many INDIVIDUAL samples are over
+#: the threshold, whatever the quantile says. Belt and braces for the intermittent case
+#: with many samples: two independent frames showing a graphic is not a fluke.
+CHYRON_MIN_BUSY_SAMPLES = 2
 
 
 def _edge_density(band) -> float:
@@ -185,6 +214,15 @@ class SubtitleService:
 
                     # Clean up text
                     text = text.replace("\n", " ").replace("\r", " ")
+
+                    # Hebrew punctuation repair, applied to the SRT and not only to the
+                    # ASS. `build_ass` has always called `hebrew_typography`, so the
+                    # burned-in picture read התנ״ך while the .srt shipped beside it read
+                    # התנ"ך with an ASCII quote — the same cue, two different spellings,
+                    # and the one a user can copy out of was the wrong one.
+                    # `clean_rtl_text` does not cover this: its `fix_hebrew_quotes` only
+                    # rewrites a PAIR of quotes, and an acronym mark has no partner.
+                    text = hebrew_typography(text)
 
                     # Add RTL markers for Hebrew/Arabic using enhanced rtl_utils
                     if use_translation and is_rtl_language(language):
@@ -899,8 +937,62 @@ class SubtitleService:
             height, width
         )
 
+    def _score_bands(self, video_path: str, at: float, geometry: dict):
+        """Decode ONE frame once and score BOTH bands from it.
+
+        One decode, two scores. The bands are adjacent, so a single crop covers them and
+        numpy splits the array — which is why doubling the number of measurements did not
+        double the cost. The two scores are computed on the two sub-arrays SEPARATELY and
+        are never averaged together: see :meth:`detect_lower_third` for why merging them
+        is the bug this method exists to avoid.
+
+        Returns ``(subtitle_score, bottom_score)``, either of which may be ``None``.
+        """
+        frame = self._grab_band(
+            video_path,
+            at,
+            geometry["x"],
+            geometry["top"],
+            geometry["w"],
+            geometry["total_h"],
+        )
+        if frame is None:
+            return None, None
+        split = geometry["box_h"]
+        subtitle = frame[:split] if split > 1 else None
+        bottom = frame[split:] if frame.shape[0] - split > 1 else None
+        return (
+            round(_edge_density(subtitle), 4) if subtitle is not None and subtitle.size else None,
+            round(_edge_density(bottom), 4) if bottom is not None and bottom.size else None,
+        )
+
+    @staticmethod
+    def _band_verdict(samples: list) -> dict:
+        """Turn one band's per-frame scores into a verdict.
+
+        Busy when the :data:`CHYRON_SCORE_QUANTILE` of the samples is over the threshold,
+        OR when at least :data:`CHYRON_MIN_BUSY_SAMPLES` individual frames are — the
+        second rule catching the intermittent graphic that a quantile still averages away.
+        """
+        usable = [s for s in samples if s is not None]
+        verdict = {
+            "samples": samples,
+            "score": None,
+            "busy_samples": 0,
+            "busy": False,
+        }
+        if not usable:
+            return verdict
+        verdict["score"] = round(float(np.quantile(usable, CHYRON_SCORE_QUANTILE)), 4)
+        verdict["busy_samples"] = sum(1 for s in usable if s > CHYRON_BUSY_THRESHOLD)
+        verdict["busy"] = bool(
+            verdict["score"] > CHYRON_BUSY_THRESHOLD
+            or verdict["busy_samples"] >= CHYRON_MIN_BUSY_SAMPLES
+        )
+        return verdict
+
     def detect_lower_third(self, video_path: str, layout: dict) -> dict:
-        """Decide whether the default subtitle band is already occupied by picture.
+        """Decide whether the picture under the subtitles is already occupied.
 
         The defect this closes
         ----------------------
@@ -910,42 +1002,66 @@ class SubtitleService:
         two coloured bars, and neither is readable. It is not a subtitle bug; it is a
         subtitle put somewhere the picture was already using.
 
-        How
-        ---
-        Five frames spread across the body of the video (:data:`CHYRON_SAMPLE_POSITIONS`)
-        are cropped — inside FFmpeg — to the exact rectangle the subtitle box would
-        occupy, converted to greyscale, and scored for **edge density**: the fraction of
-        neighbouring pixel pairs differing by more than :data:`CHYRON_EDGE_THRESHOLD`.
-        Graphics and caption text are dense in hard edges; skin, sky, walls and bokeh
-        are not. The score is a *ratio*, so it does not care how large the frame is.
+        The defect the FIRST version of this had
+        ----------------------------------------
+        It sampled exactly one rectangle: the one the subtitle box would occupy. That
+        rectangle stops at ``height - margin_v``, so **everything in the bottom margin
+        was invisible to it** — and a lower third that begins twelve pixels below the
+        subtitle box is still a lower third the subtitle will collide with, because the
+        opaque box, its outline and a two-line cue are all taller than the estimate.
+        Measured on a real BREAKING NEWS clip: the sampled band scored 0.0093 (7x under
+        the threshold, verdict "clear") while the bar itself, 12px lower, scored 0.1146
+        — 1.6x OVER it. The detector was not wrong about its band; it was looking at the
+        wrong band.
 
-        The MEDIAN of the samples decides, not the mean. That is the one line that makes
-        this robust to dark scenes, which is otherwise this method's obvious failure
-        mode: a fade to black scores ~0, and two such frames out of five would drag a
-        genuine chyron's mean under the threshold. A median survives two of them
-        outright. (Measured: the Fox clip's mean is 0.0873 and its median 0.0880 — on
-        real footage the two agree; the median only differs when something has gone
-        wrong, which is precisely when it should.)
+        So TWO bands are scored, SEPARATELY:
+
+        * the subtitle band — where the box goes;
+        * the bottom strip — ``height - margin_v`` down to the bottom edge, i.e. exactly
+          the picture the first version could not see.
+
+        Busy in EITHER raises the box. They are deliberately not merged into one taller
+        band: averaging a busy strip with a clear band dilutes the score below the
+        threshold and reproduces the original miss. On that same clip the merged band
+        scores 0.0450 — still under 0.070, still "clear", still wrong.
+
+        How the frames are judged
+        -------------------------
+        Seven frames spread across the whole video (:data:`CHYRON_SAMPLE_POSITIONS`,
+        including the first 10%, where broadcast supers live) are cropped inside FFmpeg
+        and scored for **edge density**: the fraction of neighbouring pixel pairs
+        differing by more than :data:`CHYRON_EDGE_THRESHOLD`. Graphics and caption text
+        are dense in hard edges; skin, sky, walls and bokeh are not. The score is a
+        *ratio*, so it does not care how large the frame is.
+
+        The verdict is the 75th percentile of the samples, not their median — see
+        :data:`CHYRON_SCORE_QUANTILE` — with a second rule for two or more individually
+        busy frames.
 
         Guarantees
         ----------
         * **Deterministic** — fixed sample positions, fixed threshold, no clock, no RNG.
-        * **Fast** — five input-seeks with an in-FFmpeg crop; well under 2s.
+        * **Fast** — seven input-seeks with an in-FFmpeg crop; ONE decode scores both
+          bands.
         * **Cannot fail a render** — every failure path returns ``busy=False``, i.e. the
           behaviour that shipped before this existed.
         * **Conservative on missing data** — fewer than three usable frames means no
           decision is made rather than a guess.
 
         Returns:
-            ``{"busy": bool, "score": float|None, "threshold": float,
-            "samples": [float,...], "band": {...}, "reason": str}`` — always all keys,
-            suitable for dropping straight into the research archive.
+            ``{"busy": bool, "score": float|None, "threshold": float, "samples": [...],
+            "sample_times": [...], "bands": {"subtitle": {...}, "bottom": {...}},
+            "band": {...}, "reason": str}`` — always all keys, suitable for dropping
+            straight into the research archive. ``score`` and ``samples`` describe the
+            band that decided (the busier one), so existing readers keep working.
         """
         decision = {
             "busy": False,
             "score": None,
             "threshold": CHYRON_BUSY_THRESHOLD,
             "samples": [],
+            "sample_times": [],
+            "bands": None,
             "band": None,
             "reason": "not evaluated",
         }
@@ -957,46 +1073,80 @@ class SubtitleService:
 
             height = int(layout["video_h"])
             width = int(layout["video_w"])
+            margin_v = max(0, int(layout["margin_v"]))
             box_h = int(
                 round(
                     layout["font_px"] * layout["max_lines"] * CHYRON_BOX_HEIGHT_FACTOR
                 )
             )
-            bottom = height - int(layout["margin_v"])
+            bottom = height - margin_v
             top = max(0, bottom - box_h)
             x = int(layout["margin_h"])
-            band_w = max(1, width - 2 * x)
-            band_h = max(1, bottom - top)
-            # FFmpeg's crop refuses a rectangle that leaves the frame.
-            band_w = min(band_w, width - x)
-            band_h = min(band_h, height - top)
-            decision["band"] = {"x": x, "y": top, "w": band_w, "h": band_h}
+            band_w = min(max(1, width - 2 * x), max(1, width - x))
+            box_h = min(max(1, bottom - top), max(1, height - top))
+            total_h = min(max(1, height - top), height - top)
+            geometry = {"x": x, "top": top, "w": band_w, "box_h": box_h, "total_h": total_h}
+            decision["band"] = {"x": x, "y": top, "w": band_w, "h": box_h}
+            decision["bands"] = {
+                "subtitle": {"x": x, "y": top, "w": band_w, "h": box_h},
+                "bottom": {
+                    "x": x,
+                    "y": top + box_h,
+                    "w": band_w,
+                    "h": max(0, total_h - box_h),
+                },
+            }
 
             started = time.time()
-            samples = []
+            subtitle_samples: list = []
+            bottom_samples: list = []
+            times: list = []
             for position in CHYRON_SAMPLE_POSITIONS[:CHYRON_SAMPLE_FRAMES]:
-                frame = self._grab_band(
-                    video_path, duration * position, x, top, band_w, band_h
-                )
-                if frame is None:
+                at = duration * position
+                sub_score, bottom_score = self._score_bands(video_path, at, geometry)
+                if sub_score is None and bottom_score is None:
                     continue
-                samples.append(round(_edge_density(frame), 4))
+                times.append(round(at, 2))
+                subtitle_samples.append(sub_score)
+                bottom_samples.append(bottom_score)
 
-            decision["samples"] = samples
+            decision["sample_times"] = times
             decision["elapsed_s"] = round(time.time() - started, 3)
-            if len(samples) < 3:
+            if len(times) < 3:
                 decision["reason"] = (
-                    f"only {len(samples)} of {len(CHYRON_SAMPLE_POSITIONS)} frames "
+                    f"only {len(times)} of {len(CHYRON_SAMPLE_POSITIONS)} frames "
                     "decoded — not enough to judge, leaving the default margin"
                 )
                 return decision
 
-            score = float(np.median(samples))
-            decision["score"] = round(score, 4)
-            decision["busy"] = score > CHYRON_BUSY_THRESHOLD
+            subtitle = self._band_verdict(subtitle_samples)
+            bottom_band = self._band_verdict(bottom_samples)
+            decision["bands"]["subtitle"].update(subtitle)
+            decision["bands"]["bottom"].update(bottom_band)
+
+            decider = "subtitle"
+            if bottom_band["busy"] and not subtitle["busy"]:
+                decider = "bottom"
+            elif bottom_band["busy"] and subtitle["busy"]:
+                decider = (
+                    "bottom"
+                    if (bottom_band["score"] or 0) > (subtitle["score"] or 0)
+                    else "subtitle"
+                )
+            elif (bottom_band["score"] or 0) > (subtitle["score"] or 0):
+                decider = "bottom"
+
+            winner = subtitle if decider == "subtitle" else bottom_band
+            decision["busy"] = bool(subtitle["busy"] or bottom_band["busy"])
+            decision["score"] = winner["score"]
+            decision["samples"] = winner["samples"]
+            decision["decided_by"] = decider
             decision["reason"] = (
-                f"median edge density {score:.4f} "
-                f"{'>' if decision['busy'] else '<='} {CHYRON_BUSY_THRESHOLD}"
+                f"{decider} band p{int(CHYRON_SCORE_QUANTILE * 100)} edge density "
+                f"{winner['score']} "
+                f"{'>' if decision['busy'] else '<='} {CHYRON_BUSY_THRESHOLD} "
+                f"({winner['busy_samples']} of {len(times)} samples individually busy; "
+                f"subtitle band {subtitle['score']}, bottom strip {bottom_band['score']})"
             )
             return decision
         except Exception as exc:  # noqa: BLE001 - detection may never fail a render

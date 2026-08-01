@@ -403,13 +403,26 @@ class TestDetectLowerThird:
         assert out["busy"] is False
         assert out["score"] == 0.0
 
-    def test_median_survives_two_black_frames(self):
-        """The dark-scene defence: two fades among five must not veto a real chyron."""
-        service = self._stub([0.0, 0.5, 0.5, 0.0, 0.5])
+    def test_the_score_survives_two_black_frames(self):
+        """The dark-scene defence: fades among the samples must not veto a real chyron."""
+        service = self._stub([0.0, 0.5, 0.5, 0.0, 0.5, 0.5, 0.5])
         assert service.detect_lower_third("v.mp4", self.layout)["busy"] is True
 
-    def test_median_ignores_two_bright_flashes_on_a_clean_clip(self):
-        service = self._stub([0.5, 0.0, 0.0, 0.5, 0.0])
+    def test_a_minority_of_busy_frames_now_fires(self):
+        """DELIBERATE REVERSAL of the old median rule, and the reason for R3.
+
+        A graphic that is only on screen for part of the video — a broadcast super, an
+        intermittent breaking-news bar — leaves a MINORITY of samples busy, and a median
+        is by definition blind to a minority. Measured: a corpus clip with 2 of 5 samples
+        at 0.0556/0.0589 scored a median of 0.0073 and was called clear.
+        """
+        service = self._stub([0.5, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0])
+        out = service.detect_lower_third("v.mp4", self.layout)
+        assert out["busy"] is True
+        assert out["bands"]["subtitle"]["busy_samples"] == 2
+
+    def test_one_busy_frame_among_seven_is_not_enough(self):
+        service = self._stub([0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         assert service.detect_lower_third("v.mp4", self.layout)["busy"] is False
 
     def test_too_few_decodable_frames_makes_no_decision(self):
@@ -441,8 +454,15 @@ class TestDetectLowerThird:
         second = self._stub([0.5] * 5).detect_lower_third("v.mp4", self.layout)
         assert first["score"] == second["score"] and first["busy"] == second["busy"]
 
-    def test_sample_positions_are_fixed_and_skip_the_edges(self):
-        assert CHYRON_SAMPLE_POSITIONS == (0.1, 0.3, 0.5, 0.7, 0.9)
+    def test_sample_positions_are_fixed_and_include_the_opening(self):
+        """The first 10% is sampled now: broadcast supers live there and nowhere else."""
+        assert CHYRON_SAMPLE_POSITIONS == (0.03, 0.07, 0.1, 0.3, 0.5, 0.7, 0.9)
+        assert sum(1 for p in CHYRON_SAMPLE_POSITIONS if p <= 0.1) >= 3
+
+    def test_sample_timestamps_are_recorded(self):
+        """Only the scores were archived, so a disputed verdict could not be re-checked."""
+        out = self._stub([0.0] * 7, duration=100.0).detect_lower_third("v.mp4", self.layout)
+        assert out["sample_times"] == [3.0, 7.0, 10.0, 30.0, 50.0, 70.0, 90.0]
 
     def test_band_is_where_the_subtitle_box_would_be(self):
         service = self._stub([0.0] * 5)
@@ -453,10 +473,91 @@ class TestDetectLowerThird:
         assert band["w"] == 1280 - 2 * self.layout["margin_h"]
 
     def test_result_always_has_every_key(self):
-        for scores in ([0.5] * 5, [None] * 5, [0.0] * 5):
+        for scores in ([0.5] * 7, [None] * 7, [0.0] * 7):
             out = self._stub(scores).detect_lower_third("v.mp4", self.layout)
-            for key in ("busy", "score", "threshold", "samples", "band", "reason"):
+            for key in (
+                "busy", "score", "threshold", "samples", "sample_times", "band",
+                "bands", "reason",
+            ):
                 assert key in out
+
+
+@pytest.mark.unit
+class TestTwoBandDetection:
+    """R3: the band that mattered was the one the detector could not see.
+
+    The sampled rectangle stops at ``height - margin_v``, so a chyron living in the
+    bottom margin was invisible to it. Measured on a real BREAKING NEWS clip: the
+    sampled band scored 0.0093 (verdict "clear") while the bar 12px lower scored 0.1146.
+    """
+
+    def setup_method(self):
+        self.service = SubtitleService()
+        self.layout = layout_params(1280, 720)
+
+    def _stub_split(self, subtitle_score, bottom_score, duration=60.0):
+        """A frame whose TOP half (the subtitle band) and BOTTOM strip differ."""
+        service = self.service
+        service._probe_duration = lambda _p: duration
+
+        def fill(band, target):
+            if target > 0:
+                step = max(2, int(round(1.0 / target)))
+                band[:, ::step] = 255
+
+        def grab(_path, _at, _x, _y, w, h):
+            band = np.zeros((h, w), dtype=np.uint8)
+            split = int(round(self.layout["font_px"] * self.layout["max_lines"] * 1.35))
+            split = min(split, h - 1)
+            fill(band[:split], subtitle_score)
+            fill(band[split:], bottom_score)
+            return band
+
+        service._grab_band = grab
+        return service
+
+    def test_a_busy_bottom_strip_alone_raises_the_box(self):
+        out = self._stub_split(0.0, 0.5).detect_lower_third("v.mp4", self.layout)
+        assert out["busy"] is True
+        assert out["decided_by"] == "bottom"
+        assert out["bands"]["subtitle"]["busy"] is False
+        assert out["bands"]["bottom"]["busy"] is True
+
+    def test_a_busy_subtitle_band_alone_still_raises_the_box(self):
+        out = self._stub_split(0.5, 0.0).detect_lower_third("v.mp4", self.layout)
+        assert out["busy"] is True
+        assert out["decided_by"] == "subtitle"
+
+    def test_both_clear_stays_quiet(self):
+        assert self._stub_split(0.0, 0.0).detect_lower_third("v.mp4", self.layout)["busy"] is False
+
+    def test_the_bands_are_scored_separately_not_averaged(self):
+        """Merging them dilutes a 0.1146 bar to 0.0450 and reproduces the original miss."""
+        out = self._stub_split(0.0, 0.5).detect_lower_third("v.mp4", self.layout)
+        subtitle = out["bands"]["subtitle"]["score"]
+        bottom = out["bands"]["bottom"]["score"]
+        assert subtitle < CHYRON_BUSY_THRESHOLD < bottom
+        assert out["score"] == bottom
+
+    def test_the_two_bands_tile_the_strip_with_no_gap_and_no_overlap(self):
+        out = self._stub_split(0.0, 0.0).detect_lower_third("v.mp4", self.layout)
+        subtitle, bottom = out["bands"]["subtitle"], out["bands"]["bottom"]
+        assert subtitle["y"] + subtitle["h"] == bottom["y"]
+        assert bottom["y"] + bottom["h"] == 720, "the bottom strip must reach the frame edge"
+        assert subtitle["x"] == bottom["x"] and subtitle["w"] == bottom["w"]
+
+    def test_one_decode_serves_both_bands(self):
+        decodes = []
+        service = self._stub_split(0.0, 0.5)
+        original = service._grab_band
+
+        def counting(*args, **kwargs):
+            decodes.append(args[1])
+            return original(*args, **kwargs)
+
+        service._grab_band = counting
+        service.detect_lower_third("v.mp4", self.layout)
+        assert len(decodes) == len(CHYRON_SAMPLE_POSITIONS)
 
 
 @pytest.mark.unit
