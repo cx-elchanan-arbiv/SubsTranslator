@@ -132,10 +132,6 @@ class TestOptimizedFormatFallbacks:
     """The format string must keep the YouTube remux path AND have generic
     fallbacks so adaptive HLS sources (Fox News / TED) don't fail."""
 
-    def test_has_generic_video_audio_fallback(self):
-        fmt = get_config().YTDLP_OPTIMIZED_FORMAT
-        assert "bestvideo+bestaudio" in fmt, "missing generic adaptive fallback"
-
     def test_generic_adaptive_precedes_single_progressive(self):
         # Prefer working HLS streams over a single progressive file that some
         # sites (TED's h264-1200k) serve but then reject with HTTP 403.

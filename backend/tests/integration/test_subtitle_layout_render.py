@@ -345,6 +345,9 @@ class TestLandscapeRender:
 # ======================================================================================
 # P6 — lower-third avoidance, verified on real footage
 # ======================================================================================
+#: The original calibration clip. NOT in the repo and never was — it is a one-off phone
+#: capture that lived in the author's uploads folder. The five tests below that name it
+#: are gated on it individually; the rest of the class runs off the committed corpus.
 FOX_CLIP = "/app/uploads/IMG_2870.MP4"
 CLEAN_CLIP = "/app/uploads/corpus/clean_speech.mp4"
 #: The clip that proved the detector was structurally blind: its BREAKING NEWS bar sits
@@ -353,10 +356,19 @@ BOTTOM_BAR_CLIP = "/app/uploads/corpus/eng_chyron.mp4"
 #: Must stay quiet: a 1920x1080 rally clip with no lower third at all.
 QUIET_HD_CLIP = "/app/uploads/corpus/טראמפ בדיקה 3.mp4"
 
+#: Gate for the tests that specifically need the uncommitted calibration clip. This used
+#: to gate the WHOLE class, so a file that is not in the repo silently suppressed the six
+#: tests that only ever needed the committed corpus — including the entire two-band
+#: regression set, which is the part most worth running.
+needs_fox_clip = pytest.mark.skipif(
+    not os.path.exists(FOX_CLIP),
+    reason="IMG_2870.MP4 is an uncommitted calibration clip, absent from the corpus",
+)
+
 
 @pytest.mark.integration
 @pytest.mark.skipif(
-    not os.path.exists(FOX_CLIP) or not os.path.exists(CLEAN_CLIP),
+    not os.path.exists(CLEAN_CLIP) or not os.path.exists(BOTTOM_BAR_CLIP),
     reason="needs the corpus clips inside the container",
 )
 class TestLowerThirdAvoidance:
@@ -375,6 +387,7 @@ class TestLowerThirdAvoidance:
         layout = layout_params(width, height)
         return subtitle_service.detect_lower_third(path, layout), layout
 
+    @needs_fox_clip
     def test_fox_chyron_is_detected(self):
         decision, _ = self._decide(FOX_CLIP)
         assert decision["busy"] is True, decision
@@ -385,22 +398,26 @@ class TestLowerThirdAvoidance:
         assert decision["busy"] is False, decision
         assert decision["score"] <= decision["threshold"]
 
+    @needs_fox_clip
     def test_detection_is_well_inside_the_two_second_budget(self):
         decision, _ = self._decide(FOX_CLIP)
         assert decision["elapsed_s"] < 2.0, decision
 
+    @needs_fox_clip
     def test_detection_is_deterministic_across_runs(self):
         first, _ = self._decide(FOX_CLIP)
         second, _ = self._decide(FOX_CLIP)
         assert first["samples"] == second["samples"]
         assert first["score"] == second["score"]
 
+    @needs_fox_clip
     def test_threshold_keeps_a_real_margin_on_both_sides(self):
         """Neither clip may sit on the fence — a threshold with no headroom is noise."""
         busy, _ = self._decide(FOX_CLIP)
         clear, _ = self._decide(CLEAN_CLIP)
         assert busy["score"] > clear["score"] * 2
 
+    @needs_fox_clip
     def test_render_moves_the_box_up_on_the_chyron_clip(self, tmp_path):
         from services.subtitle_service import subtitle_service
 

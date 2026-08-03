@@ -187,17 +187,13 @@ from api.editing_routes import editing_bp
 from api.health_routes import _is_valid_openai_key, health_bp  # noqa: F401
 from api.stats_routes import stats_bp
 from api.summary_routes import summary_bp
-
-# Register API v1 routes (new versioned API)
-from api.v1 import v1_bp
 from api.video_routes import video_bp
 
 app.register_blueprint(health_bp)
-app.register_blueprint(video_bp)  # Legacy routes (backwards compatibility)
+app.register_blueprint(video_bp)
 app.register_blueprint(stats_bp)
 app.register_blueprint(editing_bp)
 app.register_blueprint(summary_bp)
-app.register_blueprint(v1_bp, url_prefix="/api/v1")  # Versioned API
 
 # Apply limiter exemptions to blueprint routes
 limiter.exempt(health_bp)
@@ -207,8 +203,7 @@ limiter.exempt(health_bp)
 @limiter.request_filter
 def exempt_status_endpoint():
     """Exempt /status/<task_id> from rate limiting for polling"""
-    # Support both legacy and v1 status endpoints
-    return request.endpoint in ("video.get_task_status", "v1.status.get_task_status")
+    return request.endpoint == "video.get_task_status"
 
 
 # Initialize download token service

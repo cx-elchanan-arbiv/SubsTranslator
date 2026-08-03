@@ -9,22 +9,18 @@ from contextvars import ContextVar
 
 import structlog
 
-# Context variables for request/task correlation
+# Context variables for task correlation, populated by TaskContext.
 task_id_var: ContextVar[str | None] = ContextVar("task_id", default=None)
-request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 user_id_var: ContextVar[str | None] = ContextVar("user_id", default=None)
 
 
 def add_correlation_ids(logger, method_name, event_dict):
     """Add correlation IDs to log entries."""
     task_id = task_id_var.get()
-    request_id = request_id_var.get()
     user_id = user_id_var.get()
 
     if task_id:
         event_dict["task_id"] = task_id
-    if request_id:
-        event_dict["request_id"] = request_id
     if user_id:
         event_dict["user_id"] = user_id
 
@@ -92,11 +88,15 @@ class TaskContext:
         self.task_type = task_type
         self.user_id = user_id
         self.token = None
+        self.user_token = None
 
     def __enter__(self):
         self.token = task_id_var.set(self.task_id)
         if self.user_id:
-            user_id_var.set(self.user_id)
+            # Keep the reset token. Setting this without one used to leak the user_id
+            # into every LATER task handled by the same worker context, so one user's
+            # id got stamped onto another user's log lines.
+            self.user_token = user_id_var.set(self.user_id)
 
         # Also bind to structlog context
         structlog.contextvars.bind_contextvars(
@@ -107,31 +107,8 @@ class TaskContext:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.token:
             task_id_var.reset(self.token)
-        structlog.contextvars.clear_contextvars()
-
-
-class RequestContext:
-    """Context manager for request correlation."""
-
-    def __init__(self, request_id: str, endpoint: str = None, user_id: str = None):
-        self.request_id = request_id
-        self.endpoint = endpoint
-        self.user_id = user_id
-        self.token = None
-
-    def __enter__(self):
-        self.token = request_id_var.set(self.request_id)
-        if self.user_id:
-            user_id_var.set(self.user_id)
-
-        structlog.contextvars.bind_contextvars(
-            request_id=self.request_id, endpoint=self.endpoint
-        )
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.token:
-            request_id_var.reset(self.token)
+        if self.user_token:
+            user_id_var.reset(self.user_token)
         structlog.contextvars.clear_contextvars()
 
 
@@ -165,27 +142,6 @@ def log_task_error(
     )
 
 
-def log_api_request(logger: structlog.BoundLogger, method: str, path: str, **kwargs):
-    """Log API request with standard format."""
-    logger.info("API request", method=method, path=path, **kwargs)
-
-
-def log_api_response(
-    logger: structlog.BoundLogger,
-    method: str,
-    path: str,
-    status_code: int,
-    duration: float = None,
-    **kwargs,
-):
-    """Log API response with standard format."""
-    log_data = {"method": method, "path": path, "status_code": status_code, **kwargs}
-    if duration is not None:
-        log_data["duration_ms"] = round(duration * 1000, 2)
-
-    logger.info("API response", **log_data)
-
-
 def log_external_service_call(
     logger: structlog.BoundLogger,
     service: str,
@@ -206,20 +162,3 @@ def log_external_service_call(
 
     level = "info" if success else "warning"
     getattr(logger, level)("External service call", **log_data)
-
-
-def log_file_operation(
-    logger: structlog.BoundLogger,
-    operation: str,
-    file_path: str,
-    success: bool = True,
-    **kwargs,
-):
-    """Log file operations with standard format."""
-    logger.info(
-        "File operation",
-        operation=operation,
-        file_path=file_path,
-        success=success,
-        **kwargs,
-    )

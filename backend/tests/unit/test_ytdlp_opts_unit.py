@@ -1,16 +1,26 @@
-"""
-Unit tests for yt-dlp options in youtube_service.
-Tests that yt-dlp options are correctly built for video downloads.
+"""The yt-dlp option dicts both download paths hand to YoutubeDL.
+
+These options are the download's entire behaviour — format selection, timeouts, retries,
+the single-video guard. A value hardcoded back into the dict instead of read from config
+is invisible in review and only shows up as "why did we get 360p again".
+
+The file previously carried no ``unit`` mark, so CI never ran it, and ``last_opts`` was a
+class attribute shared across both tests — the second test could pass on the first one's
+leftovers.
 """
 
 import os
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 # Add backend to path
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
+
+pytestmark = pytest.mark.unit
 
 
 class DummyYDL:
@@ -48,38 +58,60 @@ class DummyYDL:
 
 
 def test_download_youtube_video_builds_opts(monkeypatch, tmp_path):
-    """Test that download_youtube_video builds correct yt-dlp options."""
+    """``download_youtube_video`` reads its options from config, not from literals."""
+    from config import get_config
     from services import youtube_service
 
-    # Create temp downloads folder
+    DummyYDL.last_opts = None
+
     downloads_folder = str(tmp_path)
     os.makedirs(downloads_folder, exist_ok=True)
 
-    # Patch DOWNLOADS_FOLDER and yt_dlp
     monkeypatch.setattr(youtube_service, "DOWNLOADS_FOLDER", downloads_folder)
     monkeypatch.setattr(youtube_service.yt_dlp, "YoutubeDL", DummyYDL)
 
-    # Create mock config
-    mock_config = MagicMock(USE_FAKE_YTDLP=False, DOWNLOADS_FOLDER=downloads_folder)
+    real_config = get_config()
+    mock_config = MagicMock(
+        USE_FAKE_YTDLP=False,
+        DOWNLOADS_FOLDER=downloads_folder,
+        FAST_WORK_DIR=downloads_folder,
+        YTDLP_OPTIMIZED_FORMAT=real_config.YTDLP_OPTIMIZED_FORMAT,
+        YTDLP_SOCKET_TIMEOUT=real_config.YTDLP_SOCKET_TIMEOUT,
+        YTDLP_FRAGMENT_RETRIES=real_config.YTDLP_FRAGMENT_RETRIES,
+        YTDLP_RETRIES=real_config.YTDLP_RETRIES,
+        YTDLP_EXTRACTOR_ARGS=real_config.YTDLP_EXTRACTOR_ARGS,
+        DEBUG=False,
+    )
     monkeypatch.setattr(youtube_service, "config", mock_config)
 
-    # Call
-    filename, meta = youtube_service.download_youtube_video(
-        "http://example.com/video", "high"
-    )
+    youtube_service.download_youtube_video("http://example.com/video", "high")
 
-    # Assert ydl options built
     opts = DummyYDL.last_opts
     assert opts is not None, "YoutubeDL was not called"
-    assert "format" in opts
-    assert "outtmpl" in opts
-    assert "merge_output_format" in opts
+
+    # Values, not just key presence — the old version passed with format="".
+    assert opts["format"] == real_config.YTDLP_OPTIMIZED_FORMAT
+    assert opts["socket_timeout"] == real_config.YTDLP_SOCKET_TIMEOUT
+    assert opts["fragment_retries"] == real_config.YTDLP_FRAGMENT_RETRIES
+    assert opts["retries"] == real_config.YTDLP_RETRIES
+    assert opts["merge_output_format"] == "mp4"
+
+    # A playlist URL must yield one video, never the whole playlist.
+    assert opts["noplaylist"] is True
+
+    # The android_vr client is what keeps YouTube from SABR-capping us to 360p.
+    assert opts["extractor_args"] == real_config.YTDLP_EXTRACTOR_ARGS
+
+    # Remux-only: faststart and nothing else, so no re-encode creeps back in.
+    assert opts["postprocessor_args"]["ffmpeg"] == ["-movflags", "+faststart"]
 
 
 def test_download_youtube_video_with_progress_builds_opts(monkeypatch, tmp_path):
     """Test that download_youtube_video_with_progress builds correct yt-dlp options."""
     from config import get_config
     from services import youtube_service
+
+    DummyYDL.last_opts = None
 
     # Create temp downloads folder
     downloads_folder = str(tmp_path)

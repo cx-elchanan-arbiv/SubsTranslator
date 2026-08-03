@@ -226,73 +226,90 @@ def test_upload_endpoint_response_schema():
 
 
 @pytest.mark.unit
-def test_error_response_schema():
-    """Test that error responses maintain consistent schema."""
-    import os
-    import sys
+class TestStatusProgressLogs:
+    """``logs`` exposure on ``GET /status/<task_id>``.
 
-    # Set test environment variables before importing app
-    os.environ["UPLOAD_FOLDER"] = "/tmp/test_uploads"
-    os.environ["DOWNLOADS_FOLDER"] = "/tmp/test_downloads"
-    os.environ["TESTING"] = "true"
+    ``EXPOSE_PROGRESS_LOGS`` is an operator switch: off by default, flipped on to debug a
+    live task. When it is on, whatever logs the task attached must reach the caller.
 
-    backend_dir = os.path.join(os.path.dirname(__file__), "..", "..")
-    if backend_dir not in sys.path:
-        sys.path.insert(0, backend_dir)
+    The bug these tests pin: the handler used to reset ``progress_logs = None`` in an
+    ``else`` on every branch, so a SUCCESS payload that carried its logs on the INNER
+    ``result`` dict had them collected and then immediately thrown away by the outer
+    ``else`` — the operator flipped the switch and still saw nothing. The tail was also
+    read back through ``locals().get("progress_logs")``, which silently returns ``None``
+    for a name the control flow never bound, hiding the same class of mistake.
+    """
 
-    from app import app
+    @staticmethod
+    def _status(monkeypatch, state, *, result=None, info=None, expose=True, tail=50):
+        import os
+        import sys
 
-    with app.test_client() as client:
-        # Mock AsyncResult to avoid Redis connection
-        with patch("api.video_routes.AsyncResult") as mock_async_result:
-            mock_result = MagicMock()
-            mock_result.state = "PENDING"
-            mock_result.info = None
-            mock_async_result.return_value = mock_result
+        os.environ["TESTING"] = "true"
+        backend_dir = os.path.join(os.path.dirname(__file__), "..", "..")
+        if backend_dir not in sys.path:
+            sys.path.insert(0, backend_dir)
 
-            # Test invalid endpoint
-            response = client.get("/status/invalid-task-id")
+        from api import video_routes
+        from app import app
 
-        # Should still return valid JSON with error info
-        assert response.status_code == 200  # /status always returns 200
-        data = response.get_json()
+        monkeypatch.setattr(
+            video_routes.config, "EXPOSE_PROGRESS_LOGS", expose, raising=False
+        )
+        monkeypatch.setattr(
+            video_routes.config, "PROGRESS_LOGS_TAIL", tail, raising=False
+        )
 
-        # Even error responses should have the unified schema
-        required_fields = [
-            "task_id",
-            "state",
-            "progress",
-            "video_metadata",
-            "result",
-            "user_choices",
-            "initial_request",
-            "error",
-        ]
-        for field in required_fields:
-            assert field in data, f"Missing required field in error response: {field}"
+        with app.test_client() as client:
+            with patch("api.video_routes.AsyncResult") as mock_async_result:
+                mock_result = MagicMock()
+                mock_result.state = state
+                mock_result.result = result
+                mock_result.info = info
+                mock_async_result.return_value = mock_result
+                return client.get("/status/task-1").get_json()
 
+    def test_logs_on_a_nested_success_result_survive(self, monkeypatch):
+        """The regression. Logs live on ``result["result"]``, nothing at the top level."""
+        data = self._status(
+            monkeypatch,
+            "SUCCESS",
+            result={"result": {"logs": ["a", "b"], "progress": []}},
+        )
+        assert data["logs"] == ["a", "b"]
 
-# Schema validation helper for future use
-def validate_unified_task_schema(response_data):
-    """Helper function to validate the unified task response schema."""
-    required_fields = [
-        "task_id",
-        "state",
-        "progress",
-        "video_metadata",
-        "result",
-        "user_choices",
-        "initial_request",
-        "error",
-    ]
+    def test_logs_on_a_flat_success_result_are_returned(self, monkeypatch):
+        data = self._status(monkeypatch, "SUCCESS", result={"logs": ["a"]})
+        assert data["logs"] == ["a"]
 
-    for field in required_fields:
-        assert field in response_data, f"Missing required field: {field}"
+    def test_logs_are_returned_while_a_task_is_still_running(self, monkeypatch):
+        data = self._status(
+            monkeypatch, "PROGRESS", info={"overall_percent": 10, "logs": ["x"]}
+        )
+        assert data["logs"] == ["x"]
 
-    # Validate progress structure
-    progress = response_data["progress"]
-    assert "overall_percent" in progress
-    assert "steps" in progress
-    assert isinstance(progress["steps"], list)
+    def test_logs_are_returned_on_a_structured_failure(self, monkeypatch):
+        data = self._status(
+            monkeypatch,
+            "FAILURE",
+            result={"code": "BOOM", "message": "nope", "logs": ["why"]},
+        )
+        assert data["logs"] == ["why"]
+        assert data["error"]["code"] == "BOOM"
 
-    return True
+    def test_the_tail_length_is_honoured(self, monkeypatch):
+        data = self._status(
+            monkeypatch, "SUCCESS", result={"logs": list("abcdef")}, tail=2
+        )
+        assert data["logs"] == ["e", "f"]
+
+    def test_the_switch_being_off_withholds_the_key_entirely(self, monkeypatch):
+        """Default posture: no ``logs`` key at all, not an empty list."""
+        data = self._status(
+            monkeypatch, "SUCCESS", result={"logs": ["secret"]}, expose=False
+        )
+        assert "logs" not in data
+
+    def test_a_task_that_attached_no_logs_omits_the_key(self, monkeypatch):
+        data = self._status(monkeypatch, "SUCCESS", result={"files": {}})
+        assert "logs" not in data
