@@ -5,9 +5,8 @@ Provides server-side translation support with Accept-Language header detection
 
 import json
 import os
-from functools import wraps
 
-from flask import g, jsonify, request
+from flask import g, request
 
 # Import shared configuration
 from shared_config import (
@@ -201,41 +200,3 @@ def is_rtl_language() -> bool:
 
 
 # Decorator for API endpoints that need localized responses
-def localized_response(func):
-    """Decorator to add localization context to API responses"""
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        resp = func(*args, **kwargs)
-
-        # Parse response to handle different Flask return formats
-        data, status, headers = None, None, None
-        if isinstance(resp, tuple):
-            if len(resp) == 3:
-                data, status, headers = resp
-            elif len(resp) == 2:
-                data, status = resp
-            else:
-                data = resp
-        else:
-            data = resp
-
-        # Add language metadata to dict responses
-        if isinstance(data, dict):
-            data.setdefault("_meta", {})
-            data["_meta"].update(
-                {
-                    "language": get_current_language(),
-                    "rtl": is_rtl_language(),
-                    "supported_languages": list(SUPPORTED_LANGUAGES.keys()),
-                }
-            )
-
-        # Reconstruct response
-        response = jsonify(data) if isinstance(data, dict) else data
-        if headers:
-            for k, v in headers.items():
-                response.headers[k] = v
-        return (response, status) if status else response
-
-    return wrapper
