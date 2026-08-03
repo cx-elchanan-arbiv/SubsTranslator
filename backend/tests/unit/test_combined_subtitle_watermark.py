@@ -12,6 +12,7 @@ import pytest
 from services.subtitle_service import SubtitleService
 
 
+@pytest.mark.unit
 class TestCombinedSubtitleWatermark:
     """Test the combined subtitle and watermark function."""
 
@@ -171,6 +172,7 @@ Test subtitle
             assert "Noto Sans Hebrew" in filter_complex or "Hebrew" in filter_complex
 
 
+@pytest.mark.unit
 class TestFaststartAndMissingWatermarkParity:
     """Cross-path guarantees: all three renderers must agree on these two behaviours.
 

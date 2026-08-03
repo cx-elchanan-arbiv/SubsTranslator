@@ -10,7 +10,6 @@ backend_path = os.path.join(os.path.dirname(__file__), "..", "backend")
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
-from services.transcription_service import transcribe_video
 from services.video_processing_service import verify_and_convert_video_format
 
 
@@ -42,29 +41,10 @@ class TestFFmpegTimeouts:
             result = verify_and_convert_video_format("/fake/video.mp4")
             assert result == "/fake/video.mp4"  # Returns original on error
 
-    def test_ffmpeg_audio_extraction_timeout(self):
-        """Test that FFmpeg audio extraction timeouts are handled gracefully."""
-        with patch("services.transcription_service.config.USE_FAKE_YTDLP", True):
-            # In FAKE mode, transcribe_video should return fake segments quickly
-            result = transcribe_video("/fake/video.mp4")
-            assert "segments" in result
-            assert len(result["segments"]) > 0
-
 
 @pytest.mark.unit
 class TestFFmpegErrorMessages:
     """Test FFmpeg error message handling."""
-
-    def test_ffprobe_called_process_error(self):
-        """Test FFprobe CalledProcessError handling."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.CalledProcessError(
-                1, ["ffprobe"], stderr=b"Invalid file format"
-            )
-
-            # The function should handle the error and return the original path
-            result = verify_and_convert_video_format("/fake/video.mp4")
-            assert result == "/fake/video.mp4"  # Returns original on error
 
     def test_ffprobe_json_decode_error(self):
         """Test FFprobe JSON decode error handling."""

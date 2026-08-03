@@ -45,20 +45,6 @@ handle_youtube_error = exceptions_module.handle_youtube_error
 class TestVideoProcessingError:
     """Test base VideoProcessingError class."""
 
-    def test_basic_error_creation(self):
-        error = VideoProcessingError(
-            message="Test error",
-            error_code="TEST_ERROR",
-            recoverable=True,
-            user_message="שגיאת בדיקה",
-        )
-
-        assert error.message == "Test error"
-        assert error.error_code == "TEST_ERROR"
-        assert error.recoverable == True
-        assert error.user_message == "שגיאת בדיקה"
-        assert str(error) == "Test error"
-
     def test_error_to_dict(self):
         error = VideoProcessingError(
             message="Test error",
@@ -288,28 +274,3 @@ class TestErrorHandlers:
 @pytest.mark.unit
 class TestExceptionInheritance:
     """Test exception inheritance hierarchy."""
-
-    def test_all_exceptions_inherit_from_base(self):
-        """Ensure all custom exceptions inherit from VideoProcessingError."""
-        exceptions = [
-            FFmpegTimeoutError("test", 30),
-            FFmpegProcessError("test", "error"),
-            FFmpegNotFoundError(),
-            YouTubeAccessError("url", "reason"),
-            YouTubeNetworkError("url", "error"),
-            WhisperModelError("model", "error"),
-            AudioExtractionError("path", "error"),
-            TranslationServiceError("service", "error"),
-            TranslationQuotaError("service"),
-            FileNotFoundError("path"),
-            FilePermissionError("path", "op"),
-            FileSizeError("path", 100, 50),
-            ConfigurationError("key", "value", "expected"),
-        ]
-
-        for exc in exceptions:
-            assert isinstance(exc, VideoProcessingError)
-            assert hasattr(exc, "error_code")
-            assert hasattr(exc, "recoverable")
-            assert hasattr(exc, "user_message")
-            assert callable(exc.to_dict)

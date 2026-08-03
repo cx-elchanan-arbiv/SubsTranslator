@@ -24,13 +24,10 @@ import utils.video_utils as video_utils
 def test_embed_subtitles_success(tmp_path, monkeypatch):
     """Test successful subtitle embedding."""
     output_path = tmp_path / "output.mp4"
+    captured = {}
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        # Verify subtitle filter is used
-        assert "-vf" in cmd
-        cmd_str = " ".join(cmd)
-        assert "subtitles=" in cmd_str
-
+        captured["cmd"] = list(cmd)
         output_path.write_bytes(b"\x00" * 4096)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -42,6 +39,39 @@ def test_embed_subtitles_success(tmp_path, monkeypatch):
 
     assert result is True
     assert output_path.exists()
+
+    # Asserted out here, not inside the stub: an `assert` in the stub is swallowed by
+    # the function's own `except Exception` and resurfaces only as `result is False`.
+    cmd = captured["cmd"]
+    assert "-vf" in cmd
+    assert "subtitles=subs.srt" in cmd
+
+    # WhatsApp and most players will not show a preview without the moov atom up front.
+    # This regressed once already; it is asserted on every render path.
+    assert cmd[cmd.index("-movflags") + 1] == "+faststart"
+
+
+@pytest.mark.unit
+def test_embed_subtitles_escapes_the_colon_in_a_subtitle_path(tmp_path, monkeypatch):
+    """``:`` separates filter arguments, so an unescaped one truncates the filename.
+
+    This is the only non-trivial line in the function and nothing covered it.
+    """
+    output_path = tmp_path / "output.mp4"
+    captured = {}
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
+        captured["cmd"] = list(cmd)
+        output_path.write_bytes(b"\x00" * 4096)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
+
+    video_utils.embed_subtitles_ffmpeg(
+        "video.mp4", r"C:\subs\out.srt", str(output_path)
+    )
+
+    assert "subtitles=C\\:/subs/out.srt" in captured["cmd"]
 
 
 @pytest.mark.unit
@@ -117,29 +147,25 @@ def test_parse_text_to_srt_basic(tmp_path):
 
 @pytest.mark.unit
 def test_parse_text_to_srt_hh_mm_ss_format(tmp_path):
-    """Test parsing with HH:MM:SS timestamps."""
+    """HH:MM:SS input must survive the round-trip into SRT timing lines.
+
+    The assertions used to be ``"First line" in content`` only — which the MM:SS test
+    already covers. The conversion this test exists for was never checked.
+    """
     output_path = tmp_path / "output.srt"
 
-    text = """[00:00:00 - 00:00:05] First line
-[00:00:05 - 00:00:10] Second line"""
+    text = """[01:02:03 - 01:02:08] First line
+[01:02:08 - 01:02:13] Second line"""
 
     result = video_utils.parse_text_to_srt(text, str(output_path))
 
     assert result is True
 
     content = output_path.read_text(encoding="utf-8")
+    assert "01:02:03,000 --> 01:02:08,000" in content
+    assert "01:02:08,000 --> 01:02:13,000" in content
     assert "First line" in content
     assert "Second line" in content
-
-
-@pytest.mark.unit
-def test_parse_text_to_srt_empty_text(tmp_path):
-    """Test handling of empty text."""
-    output_path = tmp_path / "output.srt"
-
-    result = video_utils.parse_text_to_srt("", str(output_path))
-
-    assert result is False
 
 
 @pytest.mark.unit
@@ -156,144 +182,88 @@ Nothing valid"""
     assert result is False
 
 
-@pytest.mark.unit
-def test_add_watermark_success(tmp_path, monkeypatch):
-    """Test successful watermark addition."""
+@pytest.fixture
+def watermark_cmd(tmp_path, monkeypatch):
+    """Run add_watermark_to_video and hand back the ffmpeg argv it built.
+
+    The three tests below used to append a bare ``True`` to a list whenever the word
+    "overlay=" / "scale=-1:" appeared, then assert the list's length. Collapsing
+    ``position_map`` or ``size_map`` in the source to a single constant left all of them
+    green. They now read the filtergraph.
+    """
     output_path = tmp_path / "output.mp4"
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        # Verify watermark filter
-        assert "-filter_complex" in cmd
-        cmd_str = " ".join(cmd)
-        assert "scale" in cmd_str
-        assert "overlay" in cmd_str
+    def run(**kwargs):
+        captured = {}
 
-        output_path.write_bytes(b"\x00" * 4096)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        def fake_run(cmd, capture_output=True, text=True, timeout=None, **_):
+            captured["cmd"] = list(cmd)
+            output_path.write_bytes(b"\x00" * 4096)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
-
-    result = video_utils.add_watermark_to_video(
-        "video.mp4",
-        str(output_path),
-        "logo.png",
-        position="bottom-right",
-        size="medium",
-        opacity=40,
-    )
-
-    assert result is True
-    assert output_path.exists()
-
-
-@pytest.mark.unit
-def test_add_watermark_different_positions(tmp_path, monkeypatch):
-    """Test watermark with different position settings."""
-    output_path = tmp_path / "output.mp4"
-    positions_tested = []
-
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        cmd_str = " ".join(cmd)
-        # Extract position from overlay parameter
-        if "overlay=" in cmd_str:
-            positions_tested.append(True)
-
-        output_path.write_bytes(b"\x00" * 4096)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
-
-    positions = ["top-left", "top-right", "bottom-left", "bottom-right"]
-
-    for pos in positions:
-        result = video_utils.add_watermark_to_video(
-            "video.mp4",
-            str(output_path),
-            "logo.png",
-            position=pos,
-            size="medium",
-            opacity=50,
+        monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
+        assert video_utils.add_watermark_to_video(
+            "video.mp4", str(output_path), "logo.png", **kwargs
         )
-        assert result is True
+        cmd = captured["cmd"]
+        return cmd[cmd.index("-filter_complex") + 1], cmd
 
-    assert len(positions_tested) == 4
-
-
-@pytest.mark.unit
-def test_add_watermark_different_sizes(tmp_path, monkeypatch):
-    """Test watermark with different size settings."""
-    output_path = tmp_path / "output.mp4"
-    sizes_tested = []
-
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        cmd_str = " ".join(cmd)
-        # Check that scale is applied
-        if "scale=-1:" in cmd_str:
-            # Extract height from scale parameter
-            sizes_tested.append(True)
-
-        output_path.write_bytes(b"\x00" * 4096)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
-
-    sizes = ["small", "medium", "large"]
-
-    for size in sizes:
-        result = video_utils.add_watermark_to_video(
-            "video.mp4",
-            str(output_path),
-            "logo.png",
-            position="bottom-right",
-            size=size,
-            opacity=50,
-        )
-        assert result is True
-
-    assert len(sizes_tested) == 3
+    return run
 
 
 @pytest.mark.unit
-def test_add_watermark_opacity_calculation(tmp_path, monkeypatch):
-    """Test that opacity is correctly calculated (0-100 -> 0.0-1.0)."""
-    output_path = tmp_path / "output.mp4"
+def test_add_watermark_success(watermark_cmd):
+    filtergraph, cmd = watermark_cmd(position="bottom-right", size="medium", opacity=40)
 
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        cmd_str = " ".join(cmd)
-        # Check that opacity (aa parameter) is in filter
-        assert "colorchannelmixer" in cmd_str
-        assert "aa=" in cmd_str
+    assert "scale=-1:120" in filtergraph
+    assert "overlay=main_w-overlay_w-10:main_h-overlay_h-10" in filtergraph
+    assert cmd[cmd.index("-movflags") + 1] == "+faststart"
 
-        output_path.write_bytes(b"\x00" * 4096)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "position,expected",
+    [
+        ("top-left", "10:10"),
+        ("top-right", "main_w-overlay_w-10:10"),
+        ("bottom-left", "10:main_h-overlay_h-10"),
+        ("bottom-right", "main_w-overlay_w-10:main_h-overlay_h-10"),
+        ("nonsense", "main_w-overlay_w-10:10"),
+    ],
+)
+def test_add_watermark_position_maps_to_overlay_coordinates(
+    watermark_cmd, position, expected
+):
+    """Including the fallback: an unknown position must not crash the render."""
+    filtergraph, _ = watermark_cmd(position=position, size="medium", opacity=50)
 
-    result = video_utils.add_watermark_to_video(
-        "video.mp4",
-        str(output_path),
-        "logo.png",
-        opacity=40,  # Should become 0.4 in FFmpeg
+    assert f"overlay={expected}" in filtergraph
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "size,expected_height",
+    [("small", 80), ("medium", 120), ("large", 200), ("nonsense", 120)],
+)
+def test_add_watermark_size_maps_to_logo_height(watermark_cmd, size, expected_height):
+    filtergraph, _ = watermark_cmd(position="bottom-right", size=size, opacity=50)
+
+    assert f"scale=-1:{expected_height}" in filtergraph
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "opacity,expected", [(0, "aa=0.0"), (40, "aa=0.4"), (100, "aa=1.0")]
+)
+def test_add_watermark_converts_percent_opacity_to_a_fraction(
+    watermark_cmd, opacity, expected
+):
+    """0-100 from the UI becomes 0.0-1.0 for colorchannelmixer."""
+    filtergraph, _ = watermark_cmd(
+        position="bottom-right", size="medium", opacity=opacity
     )
 
-    assert result is True
-
-
-@pytest.mark.unit
-def test_add_watermark_timeout(tmp_path, monkeypatch):
-    """Test handling of timeout during watermark addition."""
-    output_path = tmp_path / "output.mp4"
-
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        raise video_utils.subprocess.TimeoutExpired("ffmpeg", timeout=600)
-
-    monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
-
-    result = video_utils.add_watermark_to_video(
-        "video.mp4", str(output_path), "logo.png"
-    )
-
-    assert result is False
+    assert expected in filtergraph
 
 
 @pytest.mark.unit

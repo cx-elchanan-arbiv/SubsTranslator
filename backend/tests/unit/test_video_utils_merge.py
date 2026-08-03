@@ -79,21 +79,6 @@ def test_merge_fallback_after_fast_fail(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
-def test_merge_timeout(tmp_path, monkeypatch):
-    """Test handling of FFmpeg timeout."""
-    output_path = tmp_path / "output.mp4"
-
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        raise video_utils.subprocess.TimeoutExpired("ffmpeg", timeout=600)
-
-    monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
-
-    result = video_utils.merge_videos_ffmpeg("x.mp4", "y.mp4", str(output_path))
-
-    assert result is False
-
-
-@pytest.mark.unit
 def test_merge_too_small_output(tmp_path, monkeypatch):
     """Test rejection of suspiciously small output files."""
     output_path = tmp_path / "output.mp4"

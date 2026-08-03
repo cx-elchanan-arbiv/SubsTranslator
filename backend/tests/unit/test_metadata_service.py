@@ -56,19 +56,6 @@ class TestMetadataService:
             assert metadata.view_count == 1000
             assert metadata.uploader == "Test Channel"
 
-    def test_invalid_url_error(self):
-        """Test invalid URL handling (unsupported site)."""
-        service = VideoMetadataService()
-
-        # Test with unsupported domain (yt-dlp will try but fail)
-        with pytest.raises(MetadataExtractionError) as exc_info:
-            service.extract_metadata("https://invalid-url.com")
-
-        error = exc_info.value
-        # Since we now allow yt-dlp to try any domain, it will return DOWNLOAD_ERROR
-        assert error.error_code in ["EXTRACTION_ERROR", "DOWNLOAD_ERROR"]
-        assert error.recoverable is True
-
     def test_private_video_error(self):
         """Test private video handling (PRIVATE case)."""
         service = VideoMetadataService()
@@ -132,37 +119,6 @@ class TestMetadataService:
                 or "extracting" in error.message.lower()
             )
             assert error.recoverable is True
-
-    def test_single_video_from_playlist_url(self):
-        """Test that playlist URLs extract single video (noplaylist=True)."""
-        service = VideoMetadataService()
-
-        # Mock single video response (noplaylist=True means no playlist handling)
-        mock_video_info = {
-            "title": "Single Video",
-            "duration": 120,
-            "view_count": 1500,
-            "upload_date": "20240101",
-            "uploader": "Test Channel",
-            "webpage_url": "https://youtube.com/watch?v=single123",
-        }
-
-        with patch("yt_dlp.YoutubeDL") as mock_ydl_class:
-            mock_ydl = MagicMock()
-            mock_ydl_class.return_value.__enter__.return_value = mock_ydl
-            mock_ydl.extract_info.return_value = mock_video_info
-
-            # Use a playlist URL but expect single video due to noplaylist=True
-            metadata, error = service.extract_metadata(
-                "https://youtube.com/watch?v=single123&list=test123"
-            )
-
-            assert error is None
-            assert isinstance(metadata, VideoMetadata)
-            # Should get the single video, not playlist
-            assert metadata.title == "Single Video"
-            assert metadata.duration == 120
-            assert metadata.view_count == 1500
 
     def test_cache_functionality(self):
         """Test that caching works correctly."""

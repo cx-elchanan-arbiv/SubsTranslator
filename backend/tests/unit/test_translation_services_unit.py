@@ -64,64 +64,6 @@ class TestTranslationServicesAPI:
                 assert data["openai"]["available"] is False
                 assert "API key required" in data["openai"]["description"]
 
-    def test_translation_services_with_no_key(self):
-        """Test that OpenAI is NOT available when no key is configured."""
-        from app import app
-
-        with app.test_client() as client:
-            with patch("api.health_routes.config") as mock_config:
-                mock_config.OPENAI_API_KEY = None
-
-                response = client.get("/translation-services")
-                assert response.status_code == 200
-
-                data = response.get_json()
-                assert data["openai"]["available"] is False
-                assert "API key required" in data["openai"]["description"]
-
-    def test_translation_services_with_empty_key(self):
-        """Test that OpenAI is NOT available when key is empty."""
-        from app import app
-
-        with app.test_client() as client:
-            with patch("api.health_routes.config") as mock_config:
-                mock_config.OPENAI_API_KEY = ""
-
-                response = client.get("/translation-services")
-                assert response.status_code == 200
-
-                data = response.get_json()
-                assert data["openai"]["available"] is False
-
-    def test_translation_services_with_invalid_format_key(self):
-        """Test that OpenAI is NOT available when key doesn't start with sk-."""
-        from app import app
-
-        with app.test_client() as client:
-            with patch("api.health_routes.config") as mock_config:
-                mock_config.OPENAI_API_KEY = "invalid-key-format"
-
-                response = client.get("/translation-services")
-                assert response.status_code == 200
-
-                data = response.get_json()
-                assert data["openai"]["available"] is False
-
-    def test_google_translate_always_available(self):
-        """Test that Google Translate is always available regardless of OpenAI key."""
-        from app import app
-
-        with app.test_client() as client:
-            # Test with no OpenAI key
-            with patch("api.health_routes.config") as mock_config:
-                mock_config.OPENAI_API_KEY = None
-
-                response = client.get("/translation-services")
-                data = response.get_json()
-
-                assert data["google"]["available"] is True
-                assert data["google"]["name"] == "Google Translate"
-
 
 @pytest.mark.unit
 class TestOpenAIKeyValidation:

@@ -1,6 +1,8 @@
-"""
-Comprehensive tests for the summary endpoint
-Tests the complete flow of summary generation with proper result structure mocking
+"""The ``POST /api/summaries`` endpoint.
+
+Carried no ``unit`` mark until now, so CI never ran any of it — including the one test
+that pins the nested-result read (``result["result"]["files"]``, not ``result["files"]``)
+that this endpoint was once broken on.
 """
 
 import os
@@ -9,6 +11,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 from celery.result import AsyncResult
+
+from shared_config import TARGET_LANGUAGES
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
@@ -145,61 +151,39 @@ def test_summary_endpoint_with_nested_result_structure(
                     assert data["summary_lang"] == "he"
 
 
+@pytest.mark.parametrize("lang", TARGET_LANGUAGES)
 def test_summary_endpoint_language_routing(
-    app_client, mock_celery_result_success, mock_translated_srt_file
+    app_client, mock_celery_result_success, mock_translated_srt_file, lang
 ):
-    """
-    Test that summaries are generated in the correct language
-    Tests all 13 supported languages
-    """
-    supported_languages = [
-        "he",
-        "en",
-        "es",
-        "ar",
-        "fr",
-        "de",
-        "it",
-        "pt",
-        "ru",
-        "ja",
-        "ko",
-        "zh",
-        "tr",
-    ]
+    """The requested language reaches the generator.
 
-    for lang in supported_languages:
-        with patch(
+    Parametrized off ``TARGET_LANGUAGES`` rather than a hardcoded 13-entry list, so a
+    newly supported language is covered the moment it is added instead of silently
+    skipped. Each language is now its own test id, so a failure names the language.
+    """
+    with (
+        patch(
             "api.summary_routes.AsyncResult", return_value=mock_celery_result_success
-        ):
-            with patch(
-                "api.summary_routes.config.DOWNLOADS_FOLDER",
-                os.path.dirname(mock_translated_srt_file),
-            ):
-                with patch(
-                    "api.summary_routes._is_valid_openai_key", return_value=True
-                ):
-                    with patch(
-                        "api.summary_routes._generate_summary_with_openai"
-                    ) as mock_generate:
-                        mock_generate.return_value = f"## Summary in {lang}"
+        ),
+        patch(
+            "api.summary_routes.config.DOWNLOADS_FOLDER",
+            os.path.dirname(mock_translated_srt_file),
+        ),
+        patch("api.summary_routes._is_valid_openai_key", return_value=True),
+        patch("api.summary_routes._generate_summary_with_openai") as mock_generate,
+    ):
+        mock_generate.return_value = f"## Summary in {lang}"
 
-                        response = app_client.post(
-                            "/api/summaries",
-                            json={"task_id": f"test-task-{lang}", "summary_lang": lang},
-                            content_type="application/json",
-                        )
+        response = app_client.post(
+            "/api/summaries",
+            json={"task_id": f"test-task-{lang}", "summary_lang": lang},
+            content_type="application/json",
+        )
 
-                        assert (
-                            response.status_code == 200
-                        ), f"Failed for language {lang}"
-
-                        # Verify that _generate_summary_with_openai was called with correct language
-                        mock_generate.assert_called_once()
-                        args, kwargs = mock_generate.call_args
-                        assert kwargs.get("lang") == lang or (
-                            len(args) > 1 and args[1] == lang
-                        ), f"Expected lang={lang} in call"
+        assert response.status_code == 200
+        mock_generate.assert_called_once()
+        _, kwargs = mock_generate.call_args
+        assert kwargs["lang"] == lang
 
 
 def test_summary_endpoint_missing_task_id(app_client):
@@ -287,38 +271,30 @@ def test_summary_endpoint_no_translated_file(app_client):
             assert "No translated subtitles found" in data["error"]
 
 
-def test_summary_prompts_structure():
-    """Test that all language prompts are properly structured"""
+def test_summary_prompts_cover_every_language_the_endpoint_accepts():
+    """The prompt table must not be narrower than the accept-list.
+
+    ``create_summary`` validates the request against ``TARGET_LANGUAGES`` and then indexes
+    ``SUMMARY_PROMPTS`` with it, so any language in the first and not the second is an
+    accepted request that dies with a KeyError. Asserting against TARGET_LANGUAGES rather
+    than a hardcoded list is what makes this hold when a language is added.
+    """
+    from api.summary_routes import SUMMARY_PROMPTS
+    from shared_config import TARGET_LANGUAGES
+
+    missing = set(TARGET_LANGUAGES) - set(SUMMARY_PROMPTS)
+    assert not missing, f"accepted languages with no prompt: {sorted(missing)}"
+
+
+def test_every_summary_prompt_is_usable():
+    """A user_template without ``{text}`` throws away the transcript at .format() time."""
     from api.summary_routes import SUMMARY_PROMPTS
 
-    expected_languages = [
-        "he",
-        "en",
-        "es",
-        "ar",
-        "fr",
-        "de",
-        "it",
-        "pt",
-        "ru",
-        "ja",
-        "ko",
-        "zh",
-        "tr",
-    ]
-
-    # All languages should be present
-    assert set(SUMMARY_PROMPTS.keys()) == set(
-        expected_languages
-    ), f"Expected {expected_languages}, got {list(SUMMARY_PROMPTS.keys())}"
-
-    # Each language should have system and user_template
     for lang, prompts in SUMMARY_PROMPTS.items():
-        assert "system" in prompts, f"Language {lang} missing 'system' prompt"
-        assert "user_template" in prompts, f"Language {lang} missing 'user_template'"
-        assert (
-            "{text}" in prompts["user_template"]
-        ), f"Language {lang} user_template missing {{text}} placeholder"
+        assert prompts.get("system"), f"{lang} has no system prompt"
+        assert "{text}" in prompts.get(
+            "user_template", ""
+        ), f"{lang} user_template is missing the {{text}} placeholder"
 
 
 def test_srt_text_extraction():
@@ -349,9 +325,6 @@ Second subtitle line
         assert "Second subtitle line" in extracted_text
         assert "00:00:00" not in extracted_text
         assert "-->" not in extracted_text
-        assert "1" not in extracted_text or extracted_text.count(
-            "1"
-        ) < srt_content.count("1")
 
     finally:
         os.remove(temp_path)

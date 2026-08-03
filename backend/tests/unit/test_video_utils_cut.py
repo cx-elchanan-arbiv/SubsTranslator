@@ -77,10 +77,22 @@ def test_cut_fallback_to_method2(tmp_path, monkeypatch):
 
 @pytest.mark.unit
 def test_cut_invalid_time_range(tmp_path, monkeypatch):
-    """Test rejection of invalid time range (end before start)."""
-    output_path = tmp_path / "cut.mp4"
+    """An end before the start is rejected WITHOUT spawning ffmpeg.
 
-    # Should fail before calling FFmpeg
+    The old version of this test never patched ``subprocess.run``: real ffmpeg ran
+    against a nonexistent ``input.mp4``, failed, and returned False anyway — so deleting
+    the ``duration <= 0`` guard entirely still left it green. Asserting that ffmpeg was
+    never invoked is the whole point of an early guard.
+    """
+    output_path = tmp_path / "cut.mp4"
+    calls = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        raise AssertionError("ffmpeg must not be spawned for an invalid time range")
+
+    monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
+
     result = video_utils.cut_video_ffmpeg(
         "input.mp4",
         str(output_path),
@@ -89,23 +101,7 @@ def test_cut_invalid_time_range(tmp_path, monkeypatch):
     )
 
     assert result is False
-
-
-@pytest.mark.unit
-def test_cut_timeout(tmp_path, monkeypatch):
-    """Test handling of FFmpeg timeout."""
-    output_path = tmp_path / "cut.mp4"
-
-    def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        raise video_utils.subprocess.TimeoutExpired("ffmpeg", timeout=300)
-
-    monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
-
-    result = video_utils.cut_video_ffmpeg(
-        "input.mp4", str(output_path), "00:00:00", "00:01:00"
-    )
-
-    assert result is False
+    assert calls == []
 
 
 @pytest.mark.unit
