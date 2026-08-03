@@ -13,7 +13,6 @@ import type {
   SubtitleQualityFlags,
   Step,
 } from '../types';
-// Leaf module, not the ../types barrel — the barrel would drag zod into the bundle.
 import { DEFAULT_SUBTITLE_QUALITY_FLAGS } from '../types/api';
 
 export type {
