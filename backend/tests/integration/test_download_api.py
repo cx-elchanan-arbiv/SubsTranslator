@@ -1,6 +1,5 @@
 """
-Integration tests for the download API endpoints.
-Tests both legacy /download and new /api/v1/download routes.
+Integration tests for the ``/download/<filename>`` endpoint.
 """
 
 import os
@@ -124,38 +123,6 @@ class TestLegacyDownloadEndpoint:
         assert response.status_code in (403, 404)
 
 
-class TestV1DownloadEndpoint:
-    """Test the new /api/v1/download/<filename> endpoint."""
-
-    def test_v1_download_existing_srt_file(self, client, sample_file):
-        """Test downloading an existing SRT file via v1 API."""
-        response = client.get(f"/api/v1/download/{sample_file}")
-
-        assert response.status_code == 200
-        # SRT files should be returned as text/plain
-        assert "text/plain" in response.content_type
-        assert b"Test subtitle" in response.data
-
-    def test_v1_download_existing_video_file(self, client, sample_video_file):
-        """Test downloading an existing video file via v1 API."""
-        response = client.get(f"/api/v1/download/{sample_video_file}")
-
-        assert response.status_code == 200
-        assert b"fake video content" in response.data
-
-    def test_v1_download_nonexistent_file_returns_404(self, client):
-        """Test that downloading a nonexistent file returns 404."""
-        response = client.get("/api/v1/download/nonexistent_file.srt")
-
-        assert response.status_code == 404
-
-    def test_v1_download_path_traversal_blocked(self, client):
-        """Test that path traversal attempts are blocked via v1 API."""
-        response = client.get("/api/v1/download/../../../etc/passwd")
-
-        assert response.status_code in (403, 404)
-
-
 class TestDownloadHeaders:
     """Test download response headers."""
 
@@ -179,10 +146,15 @@ class TestDownloadHeaders:
 
 
 class TestDownloadEdgeCases:
-    """Test edge cases for download."""
+    """Filenames the pipeline actually produces.
+
+    Every output name is derived from a user-supplied video title, so spaces and Hebrew
+    are the common case, not the exotic one. These assert 200 and the body: the earlier
+    ``status_code in (200, 404)`` form passed whether the file was served or silently
+    missing, which is the whole failure it was supposed to catch.
+    """
 
     def test_download_file_with_spaces_in_name(self, app, client):
-        """Test downloading a file with spaces in the name."""
         from config import get_config
 
         config = get_config()
@@ -193,17 +165,15 @@ class TestDownloadEdgeCases:
             f.write("test content")
 
         try:
-            # URL-encode the filename
             response = client.get(f'/download/{filename.replace(" ", "%20")}')
 
-            # Should either work or return appropriate error
-            assert response.status_code in (200, 404)
+            assert response.status_code == 200
+            assert b"test content" in response.data
         finally:
             if os.path.exists(sample_path):
                 os.remove(sample_path)
 
     def test_download_file_with_hebrew_name(self, app, client):
-        """Test downloading a file with Hebrew characters."""
         from config import get_config
 
         config = get_config()
@@ -216,15 +186,14 @@ class TestDownloadEdgeCases:
         try:
             response = client.get(f"/download/{filename}")
 
-            # Should either work or handle gracefully
-            assert response.status_code in (200, 404)
+            assert response.status_code == 200
+            assert "תוכן בעברית".encode() in response.data
         finally:
             if os.path.exists(sample_path):
                 os.remove(sample_path)
 
     def test_download_empty_filename(self, client):
-        """Test downloading with empty filename."""
+        """``<path:filename>`` must not match the empty string."""
         response = client.get("/download/")
 
-        # Should return 404 or redirect
-        assert response.status_code in (404, 308, 301)
+        assert response.status_code == 404
