@@ -462,6 +462,11 @@ def get_task_status(task_id):
     video_metadata = None
     user_choices = {}
     initial_request = {}
+    # Bind once, up front. Each branch below only ASSIGNS when the payload actually
+    # carries logs — no branch clears it. A SUCCESS payload keeps its logs on the inner
+    # `result` dict, and the outer success branch used to reset this to None right after
+    # collecting them, so the operator flipped EXPOSE_PROGRESS_LOGS and still saw nothing.
+    progress_logs = None
 
     if status == "SUCCESS":
         result = task_result.result
@@ -480,8 +485,6 @@ def get_task_status(task_id):
                     # Optional progress logs exposure
                     if config.EXPOSE_PROGRESS_LOGS and "logs" in inner_result:
                         progress_logs = inner_result.get("logs", [])
-                    else:
-                        progress_logs = None
 
             # Check if the task actually failed despite SUCCESS state
             if result.get("status") == "DOWNLOAD_FAILED":
@@ -512,8 +515,6 @@ def get_task_status(task_id):
                 # Optional progress logs exposure
                 if config.EXPOSE_PROGRESS_LOGS and "logs" in result:
                     progress_logs = result.get("logs", [])
-                else:
-                    progress_logs = None
 
     elif status == "FAILURE":
         logger.info(
@@ -543,8 +544,6 @@ def get_task_status(task_id):
             # Optional progress logs exposure
             if config.EXPOSE_PROGRESS_LOGS and "logs" in result_dict:
                 progress_logs = result_dict.get("logs", [])
-            else:
-                progress_logs = None
         else:
             error_message = f"Task failed: {str(task_result.result)}"
             error_info = {
@@ -569,18 +568,12 @@ def get_task_status(task_id):
             # Optional progress logs exposure
             if config.EXPOSE_PROGRESS_LOGS and "logs" in task_result.info:
                 progress_logs = task_result.info.get("logs", [])
-            else:
-                progress_logs = None
 
     # Tail logs if exposed
-    if config.EXPOSE_PROGRESS_LOGS:
-        if isinstance(locals().get("progress_logs"), list):
-            tail_n = max(0, int(config.PROGRESS_LOGS_TAIL))
-            logs_tail = locals().get("progress_logs")[-tail_n:]
-        else:
-            logs_tail = None
-    else:
-        logs_tail = None
+    logs_tail = None
+    if config.EXPOSE_PROGRESS_LOGS and isinstance(progress_logs, list):
+        tail_n = max(0, int(config.PROGRESS_LOGS_TAIL))
+        logs_tail = progress_logs[-tail_n:]
 
     response = {
         "task_id": task_id,
