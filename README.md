@@ -2,7 +2,7 @@
 
 > AI-powered video subtitle generation, translation, and burn-in tool with professional RTL support
 
-**subtitles-ai** is an advanced AI-powered video subtitle generation and translation system. Built with `faster-whisper` for lightning-fast transcription and OpenAI GPT-4 for accurate multilingual translation, it features a sophisticated React frontend and robust Flask backend with async processing.
+**SubsTranslator** is an advanced AI-powered video subtitle generation and translation system. Built with `faster-whisper` for lightning-fast transcription and OpenAI GPT-4o for accurate multilingual translation, it features a sophisticated React frontend and robust Flask backend with async processing.
 
 The entire application is containerized using Docker with professional-grade Hebrew/RTL text support and intelligent model selection.
 
@@ -97,7 +97,7 @@ The entire application is containerized using Docker with professional-grade Heb
 
 3.  **Start the application:**
     ```bash
-    ./start.sh
+    docker-compose up -d
     ```
     This will start all services:
     -   `frontend`: React app on `http://localhost`
@@ -137,8 +137,8 @@ docker-compose logs backend
 docker-compose logs worker
 
 # Force stop and restart:
-./stop.sh
-./start.sh
+docker-compose down
+docker-compose up -d --build
 ```
 
 ## 📚 Documentation
@@ -238,8 +238,7 @@ subtitles-ai/
 │   └── public/                  # Static assets
 │
 ├── 🛠️ Scripts & Utilities
-│   ├── start.sh                 # Quick start script
-│   ├── stop.sh                  # Clean shutdown script
+│   ├── scripts/                 # Docker data utilities
 │   └── e2e_subtitle_test.py     # End-to-end testing
 │
 └── 📚 Documentation
@@ -266,15 +265,15 @@ subtitles-ai/
 - **Celery 5.3+** - Distributed task queue
 - **Redis 6.0+** - Message broker & caching
 - **faster-whisper** - AI transcription (OpenAI Whisper optimized)
-- **OpenAI GPT-4** - Translation & summarization
+- **OpenAI GPT-4o / GPT-4o-mini** - Translation & summarization
 - **Google Gemini** - Alternative transcription provider
 - **FFmpeg** - Video processing & subtitle burn-in
 - **yt-dlp** - YouTube video download
 
 ### Frontend
-- **React 18** - UI framework
+- **React 19** - UI framework
 - **TypeScript 5** - Type safety
-- **Vite** - Build tool
+- **Create React App** (react-scripts 5) - Build tool
 - **Tailwind CSS** - Styling
 - **Firebase** - Authentication & user management
 - **i18next** - Internationalization (Hebrew/English)
@@ -350,7 +349,7 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 - [Celery](https://docs.celeryq.dev/) - Task queue
 
 **Special Thanks:**
-- OpenAI for GPT-4 and Whisper models
+- OpenAI for GPT-4o and Whisper models
 - Google for Gemini API
 - All contributors and users of this project
 
