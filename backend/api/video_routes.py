@@ -22,6 +22,7 @@ from utils.file_probe import probe_file_safe
 from utils.file_utils import safe_int
 from logging_config import get_logger
 from i18n.translations import t
+from services.subtitle_pipeline import parse_subtitle_flags
 from services.token_service import use_download_token
 from services.url_resolver_service import resolve_video_url
 
@@ -70,6 +71,11 @@ def upload_file_async():
         )
         whisper_model = request.form.get("whisper_model", config.DEFAULT_WHISPER_MODEL)
         translation_service = request.form.get("translation_service", "google")
+
+        # Opt-in subtitle-quality toggles. Multipart form fields are always strings, so
+        # parsing goes through parse_subtitle_flags rather than a bare truthiness check
+        # (the string "false" is truthy).
+        subtitle_flags = parse_subtitle_flags(request.form)
 
         # Handle watermark configuration
         watermark_enabled = (
@@ -132,7 +138,10 @@ def upload_file_async():
                 "code": probe_error
             }), 400
 
-        # Prepare processing_info with user choices and file metadata
+        # Prepare processing_info with user choices and file metadata.
+        # The four subtitle-quality toggles are user choices like any other: without
+        # them in this dict, a completed job cannot be attributed to the settings that
+        # produced it, which is the whole point of the experiment.
         processing_info = {
             "file_metadata": file_metadata,
             "user_choices": {
@@ -141,6 +150,7 @@ def upload_file_async():
                 "auto_create_video": auto_create_video,
                 "whisper_model": whisper_model,
                 "translation_service": translation_service,
+                **subtitle_flags,
             },
         }
 
@@ -156,6 +166,7 @@ def upload_file_async():
                 None,  # initial_timing_summary (not applicable for uploads)
                 processing_info,  # Include metadata and user choices
             ],
+            kwargs=subtitle_flags,
             queue="processing",
         )
 
@@ -171,6 +182,7 @@ def upload_file_async():
                         "auto_create_video": auto_create_video,
                         "whisper_model": whisper_model,
                         "translation_service": translation_service,
+                        **subtitle_flags,
                     },
                     "initial_request": {"filename": filename, "type": "upload"},
                     "file_metadata": file_metadata,
@@ -238,6 +250,10 @@ def process_youtube_async():
         whisper_model = data.get("whisper_model", config.DEFAULT_WHISPER_MODEL)
         translation_service = data.get("translation_service", "google")
 
+        # Opt-in subtitle-quality toggles. `data` is a JSON dict (real booleans) OR a
+        # FormData dict (strings); parse_subtitle_flags accepts both.
+        subtitle_flags = parse_subtitle_flags(data)
+
         # Handle watermark configuration
         watermark_enabled = data.get("watermark_enabled", False)
         watermark_config, watermark_error = _build_watermark_config_from_data(watermark_enabled, data, request)
@@ -280,6 +296,7 @@ def process_youtube_async():
                 translation_service,
                 watermark_config,
             ],
+            kwargs=subtitle_flags,
             queue="processing",
         )
 
@@ -296,6 +313,7 @@ def process_youtube_async():
                         "whisper_model": whisper_model,
                         "translation_service": translation_service,
                         "url": url,
+                        **subtitle_flags,
                     },
                     "initial_request": {},
                     "video_metadata": None,

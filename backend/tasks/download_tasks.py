@@ -15,6 +15,7 @@ from services.youtube_service import (
     download_youtube_video,
     download_youtube_video_with_progress,
 )
+from services.subtitle_pipeline import resolve_flags
 from services.video_processing_service import verify_and_convert_video_format
 from utils.file_utils import clean_filename
 
@@ -40,6 +41,10 @@ def download_and_process_youtube_task(
     watermark_config=None,
     start_time=None,
     end_time=None,
+    spotting_v2=False,
+    translation_v2=False,
+    translation_style="clean",
+    render_v2=False,
 ):
     """
     Downloads a video from YouTube and then triggers the main processing task.
@@ -47,7 +52,22 @@ def download_and_process_youtube_task(
     Args:
         start_time: Optional start time for partial video processing (format: HH:MM:SS, MM:SS, or SS)
         end_time: Optional end time for partial video processing (format: HH:MM:SS, MM:SS, or SS)
+        spotting_v2, translation_v2, translation_style, render_v2: the user-facing
+            subtitle-quality toggles. This task only forwards them to
+            ``process_video_task`` — it never acts on them itself. They must be forwarded
+            explicitly: a flag dropped here would silently give the user the legacy
+            pipeline for every YouTube job. See :mod:`services.subtitle_pipeline`.
     """
+    # One resolved copy of the four toggles: forwarded to process_video_task AND
+    # reported back as user choices, so a YouTube job can be attributed to the
+    # settings that produced it exactly like an upload can.
+    subtitle_flags = resolve_flags(
+        spotting_v2=spotting_v2,
+        translation_v2=translation_v2,
+        translation_style=translation_style,
+        render_v2=render_v2,
+    )
+
     steps_config = [
         {"label": "Downloading", "weight": 0.1},
         {"label": "Audio Processing", "weight": 0.1},
@@ -125,6 +145,7 @@ def download_and_process_youtube_task(
                         "whisper_model": whisper_model,
                         "url": url,
                         "translation_service": translation_service,
+                        **subtitle_flags,
                     },
                 )
 
@@ -178,6 +199,7 @@ def download_and_process_youtube_task(
                 "whisper_model": whisper_model,
                 "url": url,
                 "translation_service": translation_service,
+                **subtitle_flags,
                 **({"start_time": start_time, "end_time": end_time} if start_time and end_time else {}),
             },
         }
@@ -196,6 +218,7 @@ def download_and_process_youtube_task(
                 initial_timing,
                 processing_info,
             ],
+            kwargs=dict(subtitle_flags),
             queue="processing",
         )
 

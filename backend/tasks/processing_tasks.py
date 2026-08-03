@@ -14,13 +14,32 @@ from logging_config import (
     log_task_error,
     log_task_start,
 )
+from services.research_recorder import start_run
+from services.subtitle_engine import (
+    absorb_dropped_time,
+    drop_hallucinated_cues,
+    layout_params,
+    reflow_dangling_connectors,
+    words_to_cues,
+)
+from services.subtitle_pipeline import (
+    any_enabled,
+    flags_summary,
+    normalize_cues,
+    parse_glossary,
+    resolve_flags,
+)
 from services.subtitle_service import subtitle_service
 from services.stats_service import save_video_stats
 from services.transcription_service import (
     transcribe_and_translate_streamed,
     transcribe_video,
+    transcribe_with_words,
+    translate_segments,
 )
+from services.translation_v2 import cps_report, enforce_cps, translate_cues
 from utils.file_utils import clean_filename
+from utils.video_utils import get_video_duration, relative_energy_probe
 
 from .progress_manager import ProgressManager
 
@@ -29,6 +48,20 @@ config = get_config()
 logger = get_logger(__name__)
 
 DOWNLOADS_FOLDER = config.DOWNLOADS_FOLDER
+
+
+class TranslationFailedWithSalvage(Exception):
+    """Translation failed, but the source-language SRT was already written to disk.
+
+    The job still FAILS — substituting the untranslated source for a translation and
+    calling it a success is the one thing this pipeline must never do. This exception
+    only carries the name of the file that survived, so the failure payload can offer
+    it instead of leaving the user with nothing after a long transcription.
+    """
+
+    def __init__(self, message: str, original_srt: str):
+        super().__init__(message)
+        self.original_srt = original_srt
 
 
 @celery_app.task(bind=True)
@@ -43,9 +76,29 @@ def process_video_task(
     watermark_config=None,
     initial_timing_summary=None,
     processing_info=None,
+    spotting_v2=False,
+    translation_v2=False,
+    translation_style="clean",
+    render_v2=False,
 ):
     """
     Celery task to process a video file, with detailed, user-facing progress updates.
+
+    The last four arguments are the independent, user-facing subtitle-quality toggles
+    (see :mod:`services.subtitle_pipeline`). All four default to OFF, in which case this
+    task takes exactly the legacy path it always did:
+
+        spotting_v2       re-spot cues from Whisper WORD timestamps
+                          (``subtitle_engine.words_to_cues``) instead of using Whisper's
+                          own speech segments.
+        translation_v2    translate with whole-scene context + a reading-speed pass
+                          (``translation_v2``) instead of the legacy batch translator.
+                          Implies transcribe-then-translate rather than the legacy
+                          overlapped streaming.
+        translation_style ``"clean"`` drops spoken filler, ``"faithful"`` keeps it. Only
+                          meaningful while ``translation_v2`` is on.
+        render_v2         burn in from a generated ``.ass`` file via FFmpeg's ``ass``
+                          filter instead of SRT + the ``subtitles`` filter.
     """
     steps_config = [
         {
@@ -90,11 +143,24 @@ def process_video_task(
         },
     ]
     progress_manager = ProgressManager(self, steps_config)
+    start_time = time.time()
+    task_id = self.request.id
+
+    # Full-run archive for corpus analysis. `start_run` never raises and always returns
+    # a usable object (an inert stand-in when recording is off or the directory could
+    # not be made), so nothing below has to branch on it. See services/research_recorder.
+    recorder = start_run(task_id)
+    recorder.update_meta(
+        whisper_model=whisper_model,
+        translation_service=translation_service,
+        source_lang=source_lang,
+        target_lang=target_lang,
+        auto_create_video=bool(auto_create_video),
+        watermark_enabled=bool((watermark_config or {}).get("enabled", False)),
+    )
+    recorder.record_source_video(video_path)
 
     try:
-        start_time = time.time()
-        task_id = self.request.id
-
         # Structured logging for task start
         log_task_start(
             logger,
@@ -136,8 +202,308 @@ def process_video_task(
                 2, int(overall_progress), message=f"AI processing: {step_status}"
             )
 
+        # === Resolved subtitle-quality flags for this job (all OFF => legacy path) ===
+        flags = resolve_flags(
+            spotting_v2=spotting_v2,
+            translation_v2=translation_v2,
+            translation_style=translation_style,
+            render_v2=render_v2,
+        )
+        logger.info(f"Subtitle quality flags [task={task_id}]: {flags_summary(flags)}")
+        recorder.update_meta(**flags)
+
+        # Experiment read-outs. Only the translation_v2 path can fill these in.
+        #
+        # `cps_over_budget` starts as None, NOT 0, and that distinction is the whole
+        # point: 0 means "measured, and nothing was over budget" — a perfect score. A
+        # legacy run never measures reading speed at all, and recording its silence as a
+        # perfect score made every legacy row in the corpus index read as a win over the
+        # v2 rows that honestly reported their misses. Absent and zero are different
+        # claims and the archive has to be able to tell them apart.
+        translation_usage_totals = {"tokens": 0, "cost_usd": 0.0}
+        cps_over_budget = None
+        translation_mode = None
+
+        wants_translation = bool(target_lang and target_lang != "auto")
+
+        # Optional terminology glossary. No UI surfaces it yet, so it is empty on every
+        # job today and the prompt is byte-identical to before — the plumbing exists so
+        # the UI can be wired without touching the pipeline again, and so a researcher
+        # can drive it from an enqueued task right now.
+        glossary = parse_glossary(
+            (processing_info or {}).get("user_choices", {}).get("glossary")
+        )
+        if glossary:
+            recorder.update_meta(glossary=glossary)
+
+        # Gemini transcription returns no word timestamps, so spotting cannot run on it.
+        if flags["spotting_v2"] and whisper_model == "gemini":
+            logger.warning(
+                "spotting_v2 is not available with the gemini model (no word timestamps) "
+                "- falling back to legacy segmentation for this job"
+            )
+            flags["spotting_v2"] = False
+
+        # The v2 stages need transcription and translation to be separate steps; the
+        # legacy path deliberately overlaps them.
+        use_v2_transcription = flags["spotting_v2"] or (
+            flags["translation_v2"] and wants_translation
+        )
+
+        # Layout is derived once per job and threaded through every stage below. It is
+        # None on the legacy path, where the renderer derives its own.
+        layout = None
+
+        if use_v2_transcription:
+            # === v2: transcribe fully, then re-spot and/or translate with full context ===
+            logger.info(f"Using v2 subtitle pipeline ({flags_summary(flags)})")
+
+            # The frame's DIMENSIONS decide the character budget, so they have to be
+            # known before a single cue is spotted or a single translation token is
+            # spent — not at render time, which is where they used to be read. On a
+            # 720x1280 portrait clip the budget is 66 characters per cue, not 84;
+            # asking the model for 84 there buys text the frame cannot draw, and
+            # `WrapStyle: 2` renders the surplus off the edge of the picture rather
+            # than wrapping it. Probing never raises: it falls back to 1920x1080, i.e.
+            # to the landscape numbers that predate this.
+            video_w, video_h = subtitle_service.probe_video_dimensions(video_path)
+            layout = layout_params(video_w, video_h)
+            # The end of the picture. Every timing rule below is bounded by it: a cue
+            # that ends after the video does is time that does not exist.
+            video_duration = get_video_duration(video_path) or 0.0
+            logger.info(
+                f"Subtitle layout [task={task_id}]: {video_w}x{video_h} -> "
+                f"font {layout['font_px']}px, {layout['max_line_chars']} chars/line, "
+                f"{layout['max_chars_per_cue']} chars/cue"
+            )
+            recorder.update_meta(layout=layout, video_duration_probe=video_duration)
+
+            youtube_url = (
+                processing_info.get("user_choices", {}).get("url")
+                if processing_info
+                else None
+            )
+
+            transcription_result = transcribe_with_words(
+                video_path,
+                source_lang=source_lang,
+                model_preference=whisper_model,
+                progress_callback=transcription_progress_callback,
+                model_callback=model_loading_callback,
+                youtube_url=youtube_url,
+                collect_words=flags["spotting_v2"],
+            )
+            detected_language = transcription_result["language"]
+            transcribe_duration = time.time() - transcribe_start
+            timing_summary["transcribe_v2"] = f"{transcribe_duration:.1f}"
+            progress_manager.complete_step(2)
+
+            whisper_segments = transcription_result.get("segments") or []
+            words = transcription_result.get("words") or []
+            asr_primed = bool(transcription_result.get("asr_primed"))
+            recorder.update_meta(
+                detected_language=detected_language,
+                pipeline="v2",
+                asr_primed=asr_primed,
+            )
+            recorder.add_timing("transcribe", transcribe_duration)
+            recorder.save_segments(whisper_segments)
+            recorder.save_words(words)
+            if flags["spotting_v2"] and words:
+                cues = words_to_cues(
+                    words,
+                    max_line=layout["max_line_chars"],
+                    max_lines=layout["max_lines"],
+                    asr_primed=asr_primed,
+                    video_duration=video_duration or None,
+                )
+                logger.info(
+                    f"spotting_v2: {len(words)} words -> {len(cues)} cues "
+                    f"(Whisper produced {len(whisper_segments)} segments)"
+                )
+            else:
+                if flags["spotting_v2"]:
+                    logger.warning(
+                        "spotting_v2: no word timestamps returned - using Whisper segments"
+                    )
+                cues = whisper_segments
+            segments = normalize_cues(cues)
+
+            # Hallucination gate. Whisper occasionally invents a whole sentence and
+            # stamps it onto a fraction of a second of near-silence; until now those
+            # were translated at full price and burned into the picture, where a
+            # fluent Hebrew fabrication is far harder to spot than an English one.
+            # Runs on the SOURCE, before translation: the CPS signature only means
+            # something in the language that was spoken, dropping early costs no
+            # tokens, and neighbouring cues never receive a fabricated sentence as
+            # scene context.
+            # The audio itself gets a vote. Whisper mis-TIMES real speech constantly
+            # (cross-talk compresses its word timestamps), and the only thing that
+            # separates "spoken too fast to be plausible" from "never spoken at all" is
+            # whether anyone was making a noise at that moment. Built lazily: the
+            # baseline measurement is not taken unless a cue is actually in question.
+            segments, dropped_cues = drop_hallucinated_cues(
+                segments, energy_probe=relative_energy_probe(video_path)
+            )
+            if dropped_cues:
+                logger.warning(
+                    f"hallucination gate [task={task_id}]: dropped "
+                    f"{len(dropped_cues)} source cue(s) as probable ASR hallucination "
+                    f"before translation"
+                )
+                recorder.save_dropped_cues(dropped_cues, reason="hallucination_gate_v2")
+                # No holes: the previous cue holds the screen over the freed time
+                # instead of the picture going bare.
+                segments = absorb_dropped_time(segments, dropped_cues)
+
+            recorder.save_cues("pre_translation", segments)
+
+            # Salvage anchor: the SOURCE subtitles are on disk before a single
+            # translation token is spent. Translation failing is still a visible job
+            # failure (never a silent English substitution), but the user gets back a
+            # usable transcript instead of nothing after a long transcription.
+            progress_manager.log("Writing source subtitles...", step_index=3)
+            original_srt_path = subtitle_service.create_srt_file(
+                segments,
+                os.path.join(DOWNLOADS_FOLDER, f"{base_name}_original.srt"),
+                use_translation=False,
+            )
+            logger.info(
+                f"v2: source SRT written before translation: "
+                f"{os.path.basename(original_srt_path)}"
+            )
+
+            progress_manager.set_step_status(3, "in_progress")
+            if wants_translation:
+                translate_start = time.time()
+                if flags["translation_v2"]:
+                    progress_manager.log(
+                        f"Translating with whole-scene context "
+                        f"(style={flags['translation_style']})...",
+                        step_index=3,
+                    )
+
+                    def translation_progress(done, total, message):
+                        percent = int(done * 100 / total) if total else 0
+                        progress_manager.set_step_progress(3, percent, message=message)
+                        progress_manager.log(message, step_index=3)
+
+                    # Text the gate refused to SHIP is still text the model should
+                    # READ: a dropped cue vanishing from the prompt entirely is how a
+                    # translator loses the antecedent of the next line's pronoun. These
+                    # ride along marked [CONTEXT-ONLY] and are filtered back out below.
+                    context_carriers = [
+                        dict(cue, context_only=True)
+                        for cue in dropped_cues
+                        if cue.get("context_only")
+                    ]
+                    translate_input = segments
+                    if context_carriers:
+                        translate_input = sorted(
+                            list(segments) + context_carriers,
+                            key=lambda cue: float(cue.get("start") or 0),
+                        )
+                        logger.info(
+                            f"translation_v2: {len(context_carriers)} dropped cue(s) "
+                            f"handed to the model as [CONTEXT-ONLY]"
+                        )
+                    try:
+                        translated = translate_cues(
+                            translate_input,
+                            target_lang,
+                            style=flags["translation_style"],
+                            max_chars_per_cue=layout["max_chars_per_cue"],
+                            glossary=glossary,
+                            progress_callback=translation_progress,
+                            recorder=recorder,
+                            source_lang=detected_language,
+                        )
+                        translation_mode = getattr(translated, "mode", "translate")
+                        translation_usage = translated.usage
+                        logger.info(
+                            f"translation_v2 usage ({translation_mode}): "
+                            f"{translation_usage.as_dict()}"
+                        )
+                        condensed = enforce_cps(
+                            translated,
+                            max_chars_per_cue=layout["max_chars_per_cue"],
+                            progress_callback=translation_progress,
+                            recorder=recorder,
+                            video_duration=video_duration or None,
+                        )
+                        logger.info(
+                            f"translation_v2 enforce_cps usage: {condensed.usage.as_dict()}"
+                        )
+                        translation_usage_totals = {
+                            "tokens": translation_usage.total_tokens
+                            + condensed.usage.total_tokens,
+                            "cost_usd": translation_usage.cost_usd
+                            + condensed.usage.cost_usd,
+                        }
+                        segments = [
+                            cue
+                            for cue in normalize_cues(condensed)
+                            if not cue.get("context_only")
+                        ]
+                        recorder.save_cues("post_translation", segments)
+                        segments = reflow_dangling_connectors(
+                            segments, max_chars=layout["max_chars_per_cue"]
+                        )
+                        recorder.save_cues("post_reflow", segments)
+                        recorder.update_meta(
+                            translation_mode=translation_mode,
+                            context_only_cues=len(context_carriers),
+                            translation_tokens=translation_usage_totals["tokens"],
+                            translation_cost_usd=round(
+                                translation_usage_totals["cost_usd"], 6
+                            ),
+                            translation_usage={
+                                "translate_cues": translation_usage.as_dict(),
+                                "enforce_cps": condensed.usage.as_dict(),
+                            },
+                        )
+                    except Exception as exc:
+                        # FAIL VISIBLY — but tell the caller which file survived.
+                        logger.error(
+                            f"translation_v2 failed after the source SRT was written: {exc}"
+                        )
+                        raise TranslationFailedWithSalvage(
+                            str(exc), os.path.basename(original_srt_path)
+                        ) from exc
+
+                    over_budget = [
+                        c
+                        for c in cps_report(
+                            segments, max_chars_per_cue=layout["max_chars_per_cue"]
+                        )
+                        if not c["ok"]
+                    ]
+                    cps_over_budget = len(over_budget)
+                    logger.info(
+                        f"translation_v2 reading speed: {cps_over_budget}/"
+                        f"{len(segments)} cues still over 17 CPS / "
+                        f"{layout['max_chars_per_cue']} chars"
+                    )
+                else:
+                    progress_manager.log("Translating cues...", step_index=3)
+                    segments = normalize_cues(
+                        translate_segments(
+                            segments, target_lang, service=translation_service
+                        )
+                    )
+                    recorder.save_cues("post_translation", segments)
+                timing_summary["translate_v2"] = f"{time.time() - translate_start:.1f}"
+                recorder.add_timing("translate", time.time() - translate_start)
+            else:
+                progress_manager.log("Skipping translation.", step_index=3)
+            progress_manager.complete_step(3)
+
+            logger.info(
+                f"v2 pipeline complete: {len(segments)} cues | {transcribe_duration:.1f}s "
+                f"transcription | {detected_language} -> {target_lang or detected_language}"
+            )
         # P1: Use pipeline overlap if translation is needed, otherwise use standard transcription
-        if target_lang and target_lang != "auto":
+        elif wants_translation:
             # === P1 Pipeline Overlap: Transcribe + Translate Simultaneously ===
             logger.info("Using P1 pipeline overlap (transcribe + translate simultaneously)")
 
@@ -160,6 +526,13 @@ def process_video_task(
             detected_language = transcription_result["language"]
             transcribe_duration = time.time() - transcribe_start
             timing_summary["transcribe_and_translate"] = f"{transcribe_duration:.1f}"
+
+            # The corpus needs legacy runs too — a v1-vs-v2 comparison is exactly what
+            # it is for. The legacy path overlaps transcription and translation, so
+            # there is one combined timing and no separate pre-translation cue list.
+            recorder.update_meta(detected_language=detected_language, pipeline="legacy_p1")
+            recorder.add_timing("transcribe_and_translate", transcribe_duration)
+            recorder.save_segments(segments)
 
             # Both steps completed together
             progress_manager.complete_step(2)
@@ -187,6 +560,12 @@ def process_video_task(
             timing_summary["transcribe_video"] = f"{transcribe_duration:.1f}"
             progress_manager.complete_step(2)
 
+            recorder.update_meta(
+                detected_language=detected_language, pipeline="legacy_transcribe_only"
+            )
+            recorder.add_timing("transcribe", transcribe_duration)
+            recorder.save_segments(segments)
+
             logger.info(
                 f"Transcription completed: {len(segments)} segments | {transcribe_duration:.1f}s | {detected_language} detected"
             )
@@ -198,6 +577,9 @@ def process_video_task(
 
         progress_manager.set_step_status(4, "in_progress")
         progress_manager.log("Creating subtitle files...", step_index=4)
+        # Rewritten unconditionally: the v2 branch already wrote this file before
+        # translation as a salvage anchor, and `segments` may have been reflowed
+        # since. Same path, same content for the source text.
         original_srt_path = subtitle_service.create_srt_file(
             segments,
             os.path.join(DOWNLOADS_FOLDER, f"{base_name}_original.srt"),
@@ -210,9 +592,16 @@ def process_video_task(
             language=target_lang or detected_language,
         )
         progress_manager.complete_step(4)
+        recorder.copy_output(original_srt_path)
+        recorder.copy_output(translated_srt_path)
 
         final_video_path = None
         progress_manager.set_step_status(5, "in_progress")
+        progress_manager.log(
+            f"Rendering {len(segments)} cues into the video "
+            f"({'ASS/render_v2' if flags['render_v2'] else 'SRT/legacy'})...",
+            step_index=5,
+        )
         if auto_create_video:
             video_creation_start = time.time()
             video_with_subtitles_path = os.path.join(
@@ -256,24 +645,44 @@ def process_video_task(
                 # Convert opacity from 0-100 to 0.0-1.0 for FFmpeg
                 opacity_float = watermark_config.get("opacity", 40) / 100.0
 
-                progress_manager.log("Creating video with subtitles and watermark (combined)...", step_index=5)
-
                 # Use combined function for better performance
                 final_video_path_output = os.path.join(
                     DOWNLOADS_FOLDER, f"{base_name}_final.mp4"
                 )
 
-                video_creation_success = subtitle_service.create_video_with_subtitles_and_watermark(
-                    video_path,
-                    translated_srt_path,
-                    final_video_path_output,
-                    watermark_path,
-                    target_lang or detected_language,
-                    watermark_position=position,
-                    watermark_size_height=size_height,
-                    watermark_opacity=opacity_float,
-                    progress_callback=video_progress_callback,
-                )
+                if flags["render_v2"]:
+                    progress_manager.log(
+                        "Creating video with ASS subtitles and watermark (render_v2)...",
+                        step_index=5,
+                    )
+                    video_creation_success = subtitle_service.create_video_with_ass(
+                        video_path,
+                        segments,
+                        final_video_path_output,
+                        target_language=target_lang or detected_language,
+                        use_translation=wants_translation,
+                        watermark_path=watermark_path,
+                        watermark_position=position,
+                        watermark_size_height=size_height,
+                        watermark_opacity=opacity_float,
+                        progress_callback=video_progress_callback,
+                        layout=layout,
+                        recorder=recorder,
+                    )
+                else:
+                    progress_manager.log("Creating video with subtitles and watermark (combined)...", step_index=5)
+
+                    video_creation_success = subtitle_service.create_video_with_subtitles_and_watermark(
+                        video_path,
+                        translated_srt_path,
+                        final_video_path_output,
+                        watermark_path,
+                        target_lang or detected_language,
+                        watermark_position=position,
+                        watermark_size_height=size_height,
+                        watermark_opacity=opacity_float,
+                        progress_callback=video_progress_callback,
+                    )
 
                 final_video_path = final_video_path_output if video_creation_success else None
 
@@ -286,14 +695,30 @@ def process_video_task(
                 progress_manager.complete_step(6)
 
             else:
-                # No watermark - use original function
-                video_creation_success = subtitle_service.create_video_with_subtitles(
-                    video_path,
-                    translated_srt_path,
-                    video_with_subtitles_path,
-                    target_lang or detected_language,
-                    progress_callback=video_progress_callback,
-                )
+                # No watermark
+                if flags["render_v2"]:
+                    progress_manager.log(
+                        "Creating video with ASS subtitles (render_v2)...", step_index=5
+                    )
+                    video_creation_success = subtitle_service.create_video_with_ass(
+                        video_path,
+                        segments,
+                        video_with_subtitles_path,
+                        target_language=target_lang or detected_language,
+                        use_translation=wants_translation,
+                        progress_callback=video_progress_callback,
+                        layout=layout,
+                        recorder=recorder,
+                    )
+                else:
+                    # use original function
+                    video_creation_success = subtitle_service.create_video_with_subtitles(
+                        video_path,
+                        translated_srt_path,
+                        video_with_subtitles_path,
+                        target_lang or detected_language,
+                        progress_callback=video_progress_callback,
+                    )
 
                 progress_manager.log("Finalizing video...", step_index=5)
                 progress_manager.set_step_progress(5, 99)
@@ -343,6 +768,13 @@ def process_video_task(
             progress_manager.complete_step(5)
             progress_manager.complete_step(6)
 
+        # Archive the produced artefacts. The .ass sits next to the rendered MP4 and is
+        # the only record of the exact geometry the frame was drawn with, so it is worth
+        # more to the corpus than the video itself.
+        if final_video_path:
+            recorder.copy_output(os.path.splitext(final_video_path)[0] + ".ass")
+            recorder.copy_output(final_video_path)
+
         files_result = {
             "original_srt": os.path.basename(original_srt_path),
             "translated_srt": os.path.basename(translated_srt_path),
@@ -363,6 +795,13 @@ def process_video_task(
             # Support both video_metadata (YouTube) and file_metadata (uploads)
             final_result["video_metadata"] = processing_info.get("video_metadata") or processing_info.get("file_metadata", {})
             final_result["user_choices"] = processing_info.get("user_choices", {})
+
+        # The four subtitle-quality toggles are part of what the user chose, and the
+        # experiment they belong to is only measurable if each result says which
+        # settings produced it. Reported from the RESOLVED flags, not the raw kwargs,
+        # so e.g. the gemini/spotting_v2 fallback is visible here too.
+        final_result.setdefault("user_choices", {})
+        final_result["user_choices"] = {**final_result["user_choices"], **flags}
 
         # Structured logging for task completion
         duration = time.time() - start_time
@@ -419,12 +858,25 @@ def process_video_task(
                 "transcription_speed_ratio": round(transcription_speed_ratio, 2),
                 "translation_service": translation_service,
                 "translation_duration": round(translation_duration, 2),
-                "translation_tokens": 0,  # Not tracked yet
-                "translation_cost_usd": 0.0,  # Not tracked yet
+                # Real numbers on the translation_v2 path (TokenUsage is accumulated
+                # across translate_cues + enforce_cps). The legacy translators do not
+                # report usage at all, so those runs still record zero rather than a
+                # made-up figure.
+                "translation_tokens": translation_usage_totals["tokens"],
+                "translation_cost_usd": round(translation_usage_totals["cost_usd"], 6),
                 "embedding_duration": round(embedding_duration, 2),
                 "total_duration": round(duration, 2),
                 "status": "success",
                 "error_message": None,
+                # The experiment's independent variables + one quality read-out, so a
+                # run can be attributed to the settings that produced it.
+                "spotting_v2": flags["spotting_v2"],
+                "translation_v2": flags["translation_v2"],
+                "translation_style": flags["translation_style"],
+                "render_v2": flags["render_v2"],
+                "subtitle_pipeline_v2": any_enabled(flags),
+                "cues": len(segments),
+                "cps_over_budget": cps_over_budget,
             }
 
             # Save to Redis
@@ -433,6 +885,15 @@ def process_video_task(
         except Exception as e:
             logger.warning(f"Failed to save stats (non-critical): {e}")
             # Don't fail the task if stats saving fails
+
+        recorder.update_meta(
+            cues=len(segments),
+            cps_over_budget=cps_over_budget,
+            timing_summary=timing_summary,
+            files=files_result,
+        )
+        recorder.add_timing("total", duration)
+        recorder.finish(success=True)
 
         return {"status": "SUCCESS", "result": final_result}
     except Exception as e:
@@ -448,7 +909,21 @@ def process_video_task(
             if step["status"] == "in_progress":
                 progress_manager.set_step_error(i, str(e))
                 break
-        return {"status": "FAILURE", "error": str(e)}
+
+        failure = {"status": "FAILURE", "error": str(e)}
+        if isinstance(e, TranslationFailedWithSalvage):
+            # Still a failure — but the transcription was expensive and its output
+            # is already on disk, so hand it over instead of throwing it away.
+            failure["files"] = {"original_srt": e.original_srt}
+            failure["salvaged"] = True
+            logger.info(
+                f"Translation failed; offering salvaged source SRT {e.original_srt}"
+            )
+
+        # A failed run is archived too — with its prompts, its partial cue lists and
+        # the exception. Those are the most informative rows in the corpus.
+        recorder.finish(success=False, error=f"{type(e).__name__}: {e}")
+        return failure
 
 
 @celery_app.task(bind=True)

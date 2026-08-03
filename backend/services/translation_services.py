@@ -481,6 +481,7 @@ Example: [{{"id": 1, "translation": "..."}}, {{"id": 2, "translation": "..."}}]"
                         )
 
                         # Try to recover missing translations
+                        retry_translations = {}  # id -> translation (must exist before use)
                         try:
                             retry_input = json.dumps(missing_segments, ensure_ascii=False, indent=0)
                             retry_prompt = f"Translate these {missing_count} segments:\n{retry_input}"

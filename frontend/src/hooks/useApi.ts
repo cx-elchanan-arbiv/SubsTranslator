@@ -10,8 +10,11 @@ import type {
   WatermarkConfig,
   WhisperModel,
   TranslationService,
+  SubtitleQualityFlags,
   Step,
 } from '../types';
+// Leaf module, not the ../types barrel — the barrel would drag zod into the bundle.
+import { DEFAULT_SUBTITLE_QUALITY_FLAGS } from '../types/api';
 
 export type {
   VideoMetadata,
@@ -24,6 +27,21 @@ export type {
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8081';
 const POLLING_INTERVAL = parseInt(process.env.REACT_APP_POLLING_INTERVAL || '3000');
+
+/**
+ * Send the four subtitle-quality toggles with a multipart request.
+ *
+ * They are always sent, including when off: the field names are the same snake_case
+ * names the backend task takes, so an explicit "false" documents the request instead of
+ * relying on a missing key.
+ */
+const appendSubtitleFlags = (formData: FormData, flags?: SubtitleQualityFlags) => {
+  const resolved = flags || DEFAULT_SUBTITLE_QUALITY_FLAGS;
+  formData.append('spotting_v2', String(resolved.spotting_v2));
+  formData.append('translation_v2', String(resolved.translation_v2));
+  formData.append('translation_style', resolved.translation_style);
+  formData.append('render_v2', String(resolved.render_v2));
+};
 
 export const useApi = () => {
   const [isProcessing, setIsProcessing] = useState(false);
@@ -539,7 +557,8 @@ export const useApi = () => {
     autoCreateVideo: boolean,
     whisperModel: WhisperModel,
     translationService: TranslationService,
-    watermarkConfig?: WatermarkConfig
+    watermarkConfig?: WatermarkConfig,
+    subtitleFlags?: SubtitleQualityFlags
   ) => {
     const formData = new FormData();
     formData.append('file', file);
@@ -548,7 +567,8 @@ export const useApi = () => {
     formData.append('auto_create_video', String(autoCreateVideo));
     formData.append('whisper_model', whisperModel);
     formData.append('translation_service', translationService);
-    
+    appendSubtitleFlags(formData, subtitleFlags);
+
     // Add watermark configuration
     if (watermarkConfig) {
       formData.append('watermark_enabled', String(watermarkConfig.enabled));
@@ -591,7 +611,8 @@ export const useApi = () => {
     translationService: TranslationService,
     watermarkConfig?: WatermarkConfig,
     startTime?: string,
-    endTime?: string
+    endTime?: string,
+    subtitleFlags?: SubtitleQualityFlags
   ) => {
     // Check if we have a custom logo (either file or saved URL) - if so, use FormData
     const hasCustomLogo = watermarkConfig?.enabled && (watermarkConfig?.logoFile || watermarkConfig?.logoUrl);
@@ -605,6 +626,7 @@ export const useApi = () => {
       formData.append('auto_create_video', String(autoCreateVideo));
       formData.append('whisper_model', whisperModel);
       formData.append('translation_service', translationService);
+      appendSubtitleFlags(formData, subtitleFlags);
 
       // Add time range if provided
       if (startTime && endTime) {
@@ -648,6 +670,7 @@ export const useApi = () => {
         auto_create_video: autoCreateVideo,
         whisper_model: whisperModel,
         translation_service: translationService,
+        ...(subtitleFlags || DEFAULT_SUBTITLE_QUALITY_FLAGS),
       };
 
       // Add time range if provided

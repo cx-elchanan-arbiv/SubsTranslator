@@ -9,25 +9,31 @@ import importlib
 import subprocess
 from pathlib import Path
 
+# Resolved relative to this file, not the CWD: the suite runs from /app in the
+# container but from the repo root on CI, and a bare Path("requirements.txt")
+# only exists in one of them.
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+REQUIREMENTS = BACKEND_DIR / "requirements.txt"
+
 
 @pytest.mark.unit
 class TestRequirements:
     """Test requirements.txt file and dependencies."""
-    
+
     def test_requirements_file_exists(self):
         """Test that requirements.txt exists."""
-        req_file = Path("requirements.txt")
+        req_file = REQUIREMENTS
         assert req_file.exists(), "requirements.txt not found"
 
     def test_requirements_file_not_empty(self):
         """Test that requirements.txt is not empty."""
-        req_file = Path("requirements.txt")
+        req_file = REQUIREMENTS
         content = req_file.read_text()
         assert content.strip(), "requirements.txt is empty"
 
     def test_requirements_format(self):
         """Test that requirements.txt has proper format."""
-        req_file = Path("requirements.txt")
+        req_file = REQUIREMENTS
         lines = req_file.read_text().splitlines()
         
         for line_num, line in enumerate(lines, 1):
@@ -48,7 +54,7 @@ class TestRequirements:
     
     def test_critical_packages_present(self):
         """Test that critical packages are in requirements.txt."""
-        req_file = Path("requirements.txt")
+        req_file = REQUIREMENTS
         content = req_file.read_text().lower()
         
         critical_packages = [
@@ -68,7 +74,7 @@ class TestRequirements:
     
     def test_no_duplicate_packages(self):
         """Test that no packages are duplicated in requirements.txt."""
-        req_file = Path("requirements.txt")
+        req_file = REQUIREMENTS
         lines = req_file.read_text().splitlines()
         
         packages = []
@@ -245,7 +251,7 @@ class TestRequirementsInstallation:
         # This would require safety or similar tool
         # For now, just check that we're not using obviously old versions
 
-        req_file = Path("requirements.txt")
+        req_file = REQUIREMENTS
         content = req_file.read_text()
         
         # Check for some known vulnerable patterns (adjust as needed)

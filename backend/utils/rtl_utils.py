@@ -76,12 +76,28 @@ def fix_mixed_content(text):
     return text
 
 
+#: Punctuation that should stick to the Hebrew word in front of it.
+#:
+#: U+05F0-U+05F4 — the Hebrew ligatures and, critically, GERESH ׳ (U+05F3) and GERSHAYIM
+#: ״ (U+05F4) — are deliberately EXCLUDED, and that exclusion is a bug fix, not a
+#: preference. Those two are not sentence punctuation at all: they are word-INTERNAL
+#: marks carrying a phoneme (ג׳ = j, צ׳ = ch) or marking an acronym (צה״ל, מפכ״ל).
+#: :func:`fix_rtl_punctuation` inserts U+200F RIGHT-TO-LEFT MARK between the preceding
+#: letter and the mark, so listing them here wedged an invisible control character INSIDE
+#: a word: the name ג׳וני shipped as 'ג‏׳וני'. Invisible on screen, and it breaks
+#: search, copy-paste, and every downstream string comparison in the pipeline.
+RTL_STICKY_PUNCTUATION = ".!?:;,"
+
+
 def fix_rtl_punctuation(text):
-    """Fix punctuation placement in RTL text"""
+    """Fix punctuation placement in RTL text.
+
+    Note the deliberate omission of geresh and gershayim — see
+    :data:`RTL_STICKY_PUNCTUATION`.
+    """
     RLM = "\u200f"  # Right-to-Left Mark
 
-    # Common punctuation that should stick to RTL text
-    rtl_punctuation = ".!?:;,״׳"
+    rtl_punctuation = RTL_STICKY_PUNCTUATION
 
     for punct in rtl_punctuation:
         # Add RLM before punctuation to ensure proper positioning

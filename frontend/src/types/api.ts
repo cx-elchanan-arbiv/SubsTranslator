@@ -45,6 +45,37 @@ export interface UserChoices {
 
 export type WhisperModel = 'tiny' | 'base' | 'small' | 'medium' | 'large' | 'gemini';
 export type TranslationService = 'openai' | 'google';
+
+/**
+ * "clean" removes spoken filler ("uh", "you know") — subtitles are read, not heard.
+ * "faithful" keeps it, for testimony/comedy timing/verbatim reporting.
+ */
+export type TranslationStyle = 'clean' | 'faithful';
+
+/**
+ * The four independent, experimental subtitle-quality toggles.
+ *
+ * Field names are snake_case because they are sent to the API verbatim and travel
+ * unchanged all the way into the Celery task kwargs. All four default to off, in which
+ * case the backend runs its legacy pipeline untouched.
+ */
+export interface SubtitleQualityFlags {
+  /** Re-spot cues from Whisper word timestamps instead of its speech segments. */
+  spotting_v2: boolean;
+  /** Translate with whole-scene context + reading-speed enforcement. */
+  translation_v2: boolean;
+  /** Filler handling; only meaningful while translation_v2 is on. */
+  translation_style: TranslationStyle;
+  /** Burn in via a generated .ass file (correct Hebrew shaping) instead of SRT. */
+  render_v2: boolean;
+}
+
+export const DEFAULT_SUBTITLE_QUALITY_FLAGS: SubtitleQualityFlags = {
+  spotting_v2: false,
+  translation_v2: false,
+  translation_style: 'clean',
+  render_v2: false,
+};
 export type WatermarkPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 export type WatermarkSize = 'small' | 'medium' | 'large';
 
