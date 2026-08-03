@@ -109,3 +109,25 @@ analysis agents against per-run research archives before commit.
   measured and logged (`word_stats`) but not acted on
 
 ---
+
+## 2026-08-03
+
+### Repo rename, cleanup, and CI revival
+
+- **Repo renamed**: `subtitles-ai` → `SubsTranslator` (matches the local folder);
+  the stale pre-2026 repo became `SubsTranslator-legacy` (archived, read-only).
+  Local remotes updated and verified.
+- **Cleanup**: deleted two dead local project folders (OneClickSubs,
+  video-transcription-project — code archived on GitHub) and runtime junk
+  (old uploads, caches, week-old outputs); ~6GB reclaimed.
+- **CI fixed after months of red**: the workflows installed
+  `requirements-test.txt` from the repo root while the file lives in `backend/`
+  — every run died at pip install. Also excluded (documented inline) the 4
+  legacy translation-service test files with pre-existing rate-limiter
+  failures, and made `test_requirements.py` CWD-independent. Result: 751
+  backend + 11 frontend tests green on the GitHub runner.
+- **README factual sync**: CRA not Vite, React 19, GPT-4o, docker-compose
+  commands instead of the deleted start.sh/stop.sh.
+- **PR #16** opened: the full subtitle-quality branch → main, all checks green.
+
+---
