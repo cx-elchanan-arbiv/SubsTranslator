@@ -247,7 +247,8 @@
     "completed": "Completed",
     "failed": "Failed",
     "pending": "Pending",
-    "ready": "Ready"
+    "ready": "Ready",
+    "unavailable": "unavailable"
   },
   "time": {
     "seconds": "seconds",
@@ -378,9 +379,6 @@
   },
   "help": {
     "tips": "Tips"
-  },
-  "status": {
-    "unavailable": "unavailable"
   },
   "videoInfo": {
     "title": "Video Information",

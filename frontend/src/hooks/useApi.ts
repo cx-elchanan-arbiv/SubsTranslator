@@ -208,11 +208,24 @@ export const useApi = () => {
             // Task already completed - restore result without polling
             const currentResult = data.result?.result || data.result;
 
-            const enrichedResult = currentResult ? {
+            if (!currentResult) {
+              // Stale task: completed long ago and its result payload is gone
+              // (e.g. output files cleaned up). Resuming it would strand the UI
+              // on a finished-but-empty progress card — treat it like an
+              // invalid task and return to the home screen instead.
+              activeTaskIdRef.current = null;
+              localStorage.removeItem('active_task_id');
+              const staleUrl = new URL(window.location.href);
+              staleUrl.searchParams.delete('task');
+              window.history.replaceState({}, '', staleUrl.toString());
+              return;
+            }
+
+            const enrichedResult = {
               ...currentResult,
               task_id: canonicalTaskId,
               user_choices: data.user_choices || currentResult.user_choices
-            } : null;
+            };
 
             safeSetResult(enrichedResult);
             setIsProcessing(false);

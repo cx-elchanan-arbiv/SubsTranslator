@@ -247,7 +247,8 @@
     "completed": "הושלם",
     "failed": "נכשל",
     "pending": "ממתין",
-    "ready": "מוכן"
+    "ready": "מוכן",
+    "unavailable": "לא זמין"
   },
   "time": {
     "seconds": "שניות",
@@ -378,9 +379,6 @@
   },
   "help": {
     "tips": "טיפים"
-  },
-  "status": {
-    "unavailable": "לא זמין"
   },
   "videoInfo": {
     "title": "מידע על הסרטון",
