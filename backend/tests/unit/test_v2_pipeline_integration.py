@@ -31,6 +31,7 @@ output is read back off disk and asserted on. Assertions are therefore in two la
 
 No network, no Celery broker, no ffmpeg.
 """
+
 import os
 import sys
 from unittest.mock import MagicMock, patch
@@ -230,7 +231,9 @@ def pipeline(tmp_path):
         return {"language": "en", "segments": [dict(s) for s in WHISPER_SEGMENTS]}
 
     # --- translation --------------------------------------------------------------
-    def fake_translate_cues(cues, target_lang, style=None, progress_callback=None, **kw):
+    def fake_translate_cues(
+        cues, target_lang, style=None, progress_callback=None, **kw
+    ):
         spy.record(
             "translate_cues",
             target_lang=target_lang,
@@ -248,9 +251,7 @@ def pipeline(tmp_path):
         )
 
     def fake_enforce_cps(cues, progress_callback=None, **kwargs):
-        spy.record(
-            "enforce_cps", has_progress_callback=progress_callback is not None
-        )
+        spy.record("enforce_cps", has_progress_callback=progress_callback is not None)
         if progress_callback:
             progress_callback(0, len(cues), "Condensing over-long cues")
         usage = TokenUsage()
@@ -314,8 +315,8 @@ def pipeline(tmp_path):
         ``patch.multiple`` below rebinds ``translate_cues`` itself, so an outer patch of
         the same name is silently overwritten.
         """
-        from tasks import processing_tasks
         from services import subtitle_service as subtitle_service_module
+        from tasks import processing_tasks
 
         run_counter["n"] += 1
         downloads = tmp_path / f"downloads_{run_counter['n']}"
@@ -328,32 +329,39 @@ def pipeline(tmp_path):
             return spy.recorder
 
         watermark_config = (
-            {"enabled": True, "custom_logo_path": str(logo_path), "position": "bottom-right"}
+            {
+                "enabled": True,
+                "custom_logo_path": str(logo_path),
+                "position": "bottom-right",
+            }
             if watermark
             else None
         )
 
-        with patch.multiple(
-            processing_tasks,
-            DOWNLOADS_FOLDER=str(downloads),
-            transcribe_with_words=fake_transcribe_with_words,
-            transcribe_and_translate_streamed=fake_transcribe_and_translate_streamed,
-            transcribe_video=fake_transcribe_video,
-            translate_cues=translate_cues_impl or fake_translate_cues,
-            enforce_cps=fake_enforce_cps,
-            translate_segments=fake_translate_segments,
-            save_video_stats=lambda payload: saved_stats.append(payload),
-            start_run=fake_start_run,
-        ), patch.object(
-            processing_tasks.time, "sleep", lambda *_a, **_k: None
-        ), patch.object(
-            service, "create_video_with_ass", fake_create_video_with_ass
-        ), patch.object(
-            service, "create_video_with_subtitles", fake_create_video_with_subtitles
-        ), patch.object(
-            service, "create_video_with_subtitles_and_watermark", fake_combined
-        ), patch.object(
-            processing_tasks.process_video_task, "update_state", MagicMock()
+        with (
+            patch.multiple(
+                processing_tasks,
+                DOWNLOADS_FOLDER=str(downloads),
+                transcribe_with_words=fake_transcribe_with_words,
+                transcribe_and_translate_streamed=fake_transcribe_and_translate_streamed,
+                transcribe_video=fake_transcribe_video,
+                translate_cues=translate_cues_impl or fake_translate_cues,
+                enforce_cps=fake_enforce_cps,
+                translate_segments=fake_translate_segments,
+                save_video_stats=lambda payload: saved_stats.append(payload),
+                start_run=fake_start_run,
+            ),
+            patch.object(processing_tasks.time, "sleep", lambda *_a, **_k: None),
+            patch.object(service, "create_video_with_ass", fake_create_video_with_ass),
+            patch.object(
+                service, "create_video_with_subtitles", fake_create_video_with_subtitles
+            ),
+            patch.object(
+                service, "create_video_with_subtitles_and_watermark", fake_combined
+            ),
+            patch.object(
+                processing_tasks.process_video_task, "update_state", MagicMock()
+            ),
         ):
             # A real request id: the task slices it for a log line, and None would make
             # the stats block die in a way that masks genuine failures.
@@ -387,15 +395,17 @@ def payload(result):
     works and a flat ``{"status": "FAILURE", "error": ...}`` when it does not, so the
     two shapes have to be told apart before anything is read out of them.
     """
-    assert result.get("status") == "SUCCESS", (
-        f"job failed: {result.get('error', result)}"
-    )
+    assert (
+        result.get("status") == "SUCCESS"
+    ), f"job failed: {result.get('error', result)}"
     return result["result"]
 
 
 def read_srt(downloads, name):
     path = os.path.join(downloads, name)
-    assert os.path.exists(path), f"{name} was never written (in {os.listdir(downloads)})"
+    assert os.path.exists(
+        path
+    ), f"{name} was never written (in {os.listdir(downloads)})"
     with open(path, encoding="utf-8") as handle:
         return handle.read()
 
@@ -429,9 +439,7 @@ COMBOS = [
     for translation in (False, True)
     for render in (False, True)
 ]
-COMBO_IDS = [
-    f"spot={int(s)}_trans={int(t)}_render={int(r)}" for s, t, r in COMBOS
-]
+COMBO_IDS = [f"spot={int(s)}_trans={int(t)}_render={int(r)}" for s, t, r in COMBOS]
 
 
 # ==================================================================================
@@ -462,9 +470,9 @@ class TestAllFlagCombinations:
 
         # The translated file must actually differ from the source one; the defect this
         # suite exists for produced a file that was *present*, *well-formed* and empty.
-        assert srt_cue_texts(original) != srt_cue_texts(translated), (
-            "translated SRT is identical to the source — no translation was applied"
-        )
+        assert srt_cue_texts(original) != srt_cue_texts(
+            translated
+        ), "translated SRT is identical to the source — no translation was applied"
 
     @pytest.mark.parametrize("spotting,translation,render", COMBOS, ids=COMBO_IDS)
     def test_the_expected_stages_ran_and_the_others_did_not(
@@ -479,13 +487,13 @@ class TestAllFlagCombinations:
         if spotting or translation:
             assert spy.ran("transcribe_with_words"), "v2 needs a separate transcription"
             assert not spy.ran("transcribe_and_translate_streamed")
-            assert spy.calls["transcribe_with_words"][0]["collect_words"] is spotting, (
-                "words are only collected when spotting_v2 asks for them"
-            )
+            assert (
+                spy.calls["transcribe_with_words"][0]["collect_words"] is spotting
+            ), "words are only collected when spotting_v2 asks for them"
         else:
-            assert spy.ran("transcribe_and_translate_streamed"), (
-                "with both v2 stages off the legacy overlapped path must be used"
-            )
+            assert spy.ran(
+                "transcribe_and_translate_streamed"
+            ), "with both v2 stages off the legacy overlapped path must be used"
             assert not spy.ran("transcribe_with_words")
 
         # --- translation ----------------------------------------------------------
@@ -508,7 +516,9 @@ class TestAllFlagCombinations:
             assert spy.ran("create_video_with_subtitles")
             assert not spy.ran("create_video_with_ass")
 
-    @pytest.mark.parametrize("render", [False, True], ids=["legacy_render", "render_v2"])
+    @pytest.mark.parametrize(
+        "render", [False, True], ids=["legacy_render", "render_v2"]
+    )
     def test_watermark_selects_the_combined_renderer(self, pipeline, render):
         """A watermark must not silently fall back to the subtitles-only renderer."""
         _result, spy, _downloads, _stats = pipeline(render_v2=render, watermark=True)
@@ -535,9 +545,9 @@ class TestAllFlagCombinations:
         )
         # Same words, different cue boundaries — the merge/lead-out passes did something.
         assert respotted != legacy, "spotting_v2 produced Whisper's own segmentation"
-        assert " ".join(respotted).split() == " ".join(legacy).split(), (
-            "re-spotting changed the WORDS, not just the boundaries"
-        )
+        assert (
+            " ".join(respotted).split() == " ".join(legacy).split()
+        ), "re-spotting changed the WORDS, not just the boundaries"
 
 
 # ==================================================================================
@@ -551,13 +561,17 @@ class TestSubtitleFileContent:
         The hand-off between them is ``normalize_cues``. If it ever stops mapping the
         two spellings, this is where it shows up.
         """
-        result, _spy, downloads, _stats = pipeline(spotting_v2=True, translation_v2=True)
+        result, _spy, downloads, _stats = pipeline(
+            spotting_v2=True, translation_v2=True
+        )
         translated = read_srt(downloads, payload(result)["files"]["translated_srt"])
         assert "לסבך" in translated, f"the Hebrew never made it to disk:\n{translated}"
         assert "complicate" not in translated, "source text leaked into the translation"
 
     def test_source_srt_keeps_the_source_language(self, pipeline):
-        result, _spy, downloads, _stats = pipeline(spotting_v2=True, translation_v2=True)
+        result, _spy, downloads, _stats = pipeline(
+            spotting_v2=True, translation_v2=True
+        )
         original = read_srt(downloads, payload(result)["files"]["original_srt"])
         assert "complicate" in original
         assert "לסבך" not in original
@@ -569,16 +583,16 @@ class TestSubtitleFileContent:
         from ``normalize_cues`` carrying ``translated_text``, and if that value is falsy
         rather than absent the SRT writer must fall back to the source text.
         """
-        result, _spy, downloads, _stats = pipeline(spotting_v2=True, translation_v2=False)
+        result, _spy, downloads, _stats = pipeline(
+            spotting_v2=True, translation_v2=False
+        )
         translated = read_srt(downloads, payload(result)["files"]["translated_srt"])
         assert_no_blank_cues(translated, "translated_srt")
         assert "complicate" in translated or "legacy-he" in translated
 
     def test_no_translation_requested_writes_the_source_into_both_files(self, pipeline):
         """``target_lang='auto'`` means no translation — not an empty translated file."""
-        result, _spy, downloads, _stats = pipeline(
-            spotting_v2=True, target_lang="auto"
-        )
+        result, _spy, downloads, _stats = pipeline(spotting_v2=True, target_lang="auto")
         translated = read_srt(downloads, payload(result)["files"]["translated_srt"])
         assert_no_blank_cues(translated, "translated_srt")
         assert "complicate" in translated
@@ -586,7 +600,9 @@ class TestSubtitleFileContent:
     def test_srt_timings_are_well_formed_and_monotonic(self, pipeline):
         import re
 
-        result, _spy, downloads, _stats = pipeline(spotting_v2=True, translation_v2=True)
+        result, _spy, downloads, _stats = pipeline(
+            spotting_v2=True, translation_v2=True
+        )
         content = read_srt(downloads, payload(result)["files"]["translated_srt"])
         stamps = re.findall(
             r"(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})", content
@@ -630,7 +646,9 @@ class TestResultAndStatsReporting:
         assert choices["render_v2"] is render
         assert choices["translation_style"] == STYLE_CLEAN
 
-    def test_route_supplied_user_choices_are_preserved_alongside_the_flags(self, pipeline):
+    def test_route_supplied_user_choices_are_preserved_alongside_the_flags(
+        self, pipeline
+    ):
         result, _spy, _downloads, _stats = pipeline(
             spotting_v2=True,
             processing_info={"user_choices": {"whisper_model": "tiny", "url": "u"}},
@@ -661,7 +679,9 @@ class TestResultAndStatsReporting:
         assert row["subtitle_pipeline_v2"] is True
         assert row["cues"] > 0
 
-    def test_legacy_translation_records_zero_rather_than_an_invented_number(self, pipeline):
+    def test_legacy_translation_records_zero_rather_than_an_invented_number(
+        self, pipeline
+    ):
         """The legacy translators report no usage at all. Zero is the honest answer."""
         _result, _spy, _downloads, stats = pipeline(translation_v2=False)
         row = stats[-1]
@@ -717,13 +737,15 @@ class TestTranslationFailureSalvage:
         assert_no_blank_cues(content, "salvaged original_srt")
         assert "complicate" in content, "the salvaged file is not the transcription"
 
-    def test_no_translated_srt_is_left_behind_pretending_to_be_a_translation(self, failed_run):
+    def test_no_translated_srt_is_left_behind_pretending_to_be_a_translation(
+        self, failed_run
+    ):
         """Source text under the translated filename is the failure mode to avoid."""
         result, downloads = failed_run
         assert "translated_srt" not in result.get("files", {})
-        assert not os.path.exists(os.path.join(downloads, "clip_translated.srt")), (
-            "a source-language file was written under the translated name"
-        )
+        assert not os.path.exists(
+            os.path.join(downloads, "clip_translated.srt")
+        ), "a source-language file was written under the translated name"
 
 
 # ==================================================================================
@@ -739,7 +761,9 @@ class TestTheContentAssertionsActuallyCatchTheRegression:
     """
 
     @staticmethod
-    def _pre_fix_create_srt_file(segments, output_path, use_translation=False, language="en"):
+    def _pre_fix_create_srt_file(
+        segments, output_path, use_translation=False, language="en"
+    ):
         """``create_srt_file`` as it was before the fix, reduced to the deciding line."""
         from services.subtitle_service import format_timestamp
 
@@ -781,7 +805,8 @@ class TestTheContentAssertionsActuallyCatchTheRegression:
             spotting_v2=True, translation_v2=False, target_lang="auto"
         )
         assert_no_blank_cues(
-            read_srt(downloads, payload(result)["files"]["translated_srt"]), "translated_srt"
+            read_srt(downloads, payload(result)["files"]["translated_srt"]),
+            "translated_srt",
         )
 
     def test_the_blank_cue_detector_is_not_vacuous(self):
@@ -789,9 +814,7 @@ class TestTheContentAssertionsActuallyCatchTheRegression:
         blank = "1\n00:00:00,000 --> 00:00:01,000\n\n\n2\n00:00:01,000 --> 00:00:02,000\n\n\n"
         with pytest.raises(AssertionError):
             assert_no_blank_cues(blank, "synthetic")
-        assert_no_blank_cues(
-            "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n", "synthetic"
-        )
+        assert_no_blank_cues("1\n00:00:00,000 --> 00:00:01,000\nhello\n\n", "synthetic")
 
 
 # ==========================================================================================
@@ -828,14 +851,20 @@ class TestResearchRecorderPlumbing:
         # the transcript and every intermediate cue list
         assert recorder.segments, "whisper segments were not archived"
         assert recorder.words, "word timestamps were not archived"
-        assert set(recorder.cues) == {"pre_translation", "post_translation", "post_reflow"}
+        assert set(recorder.cues) == {
+            "pre_translation",
+            "post_translation",
+            "post_reflow",
+        }
         assert recorder.cues["post_translation"][0]["translated_text"]
 
         # timings, cost and the outputs
         assert "transcribe" in recorder.timings and "translate" in recorder.timings
         assert recorder.meta["translation_tokens"] == 1800  # 1500 translate + 300 cps
         assert recorder.meta["translation_cost_usd"] > 0
-        assert recorder.meta["layout"]["max_chars_per_cue"] == 84  # unprobeable stub => 1080p
+        assert (
+            recorder.meta["layout"]["max_chars_per_cue"] == 84
+        )  # unprobeable stub => 1080p
         assert any(name.endswith("_original.srt") for name in recorder.outputs)
         assert any(name.endswith("_translated.srt") for name in recorder.outputs)
         assert any(name.endswith("_final.mp4") for name in recorder.outputs)
@@ -919,9 +948,10 @@ class TestResearchRecorderPlumbing:
             result, _spy, downloads, _stats = pipeline(
                 spotting_v2=True, translation_v2=True, render_v2=True
             )
-        assert result["status"] == "SUCCESS", (
-            f"a broken research recorder took the job down: {result.get('error')}"
-        )
+        assert (
+            result["status"] == "SUCCESS"
+        ), f"a broken research recorder took the job down: {result.get('error')}"
         assert_no_blank_cues(
-            read_srt(downloads, payload(result)["files"]["translated_srt"]), "translated_srt"
+            read_srt(downloads, payload(result)["files"]["translated_srt"]),
+            "translated_srt",
         )

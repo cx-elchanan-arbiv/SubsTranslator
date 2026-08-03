@@ -16,11 +16,11 @@ Example:
     python3 test_stats_jsonl.py "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 """
 
+import json
 import sys
 import time
-import json
+
 import requests
-import os
 
 # Configuration
 API_URL = "http://localhost:8081"
@@ -29,9 +29,9 @@ STATS_FILE = "/app/stats/video_stats.jsonl"  # Inside container
 
 def print_header(text):
     """Print fancy header."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print(f"  {text}")
-    print("="*60)
+    print("=" * 60)
 
 
 def get_stats_count():
@@ -51,7 +51,7 @@ def download_stats_file():
     try:
         response = requests.get(f"{API_URL}/api/stats/download")
         if response.status_code == 200:
-            with open("test_stats.jsonl", 'wb') as f:
+            with open("test_stats.jsonl", "wb") as f:
                 f.write(response.content)
             return True
         return False
@@ -63,7 +63,7 @@ def download_stats_file():
 def get_latest_stat():
     """Get the latest (last) stat from JSONL."""
     try:
-        with open("test_stats.jsonl", 'r') as f:
+        with open("test_stats.jsonl") as f:
             lines = f.readlines()
             if lines:
                 return json.loads(lines[-1].strip())
@@ -83,20 +83,16 @@ def submit_video(url):
         "target_lang": "he",
         "auto_create_video": False,  # Faster - skip video creation
         "whisper_model": "base",
-        "translation_service": "google"
+        "translation_service": "google",
     }
 
     print(f"URL: {url}")
-    print(f"Model: base (fastest)")
-    print(f"Translation: Google (not OpenAI)")
-    print(f"Auto-create video: False (faster)")
+    print("Model: base (fastest)")
+    print("Translation: Google (not OpenAI)")
+    print("Auto-create video: False (faster)")
 
     try:
-        response = requests.post(
-            f"{API_URL}/youtube",
-            json=payload,
-            timeout=600
-        )
+        response = requests.post(f"{API_URL}/youtube", json=payload, timeout=600)
 
         if response.status_code != 200:
             print(f"❌ Error: {response.status_code}")
@@ -177,7 +173,7 @@ def verify_stats(task_id, expected_model, expected_service):
         print("❌ No stats found")
         return False
 
-    print(f"\n📊 Latest stat entry:")
+    print("\n📊 Latest stat entry:")
     print(json.dumps(latest, indent=2, ensure_ascii=False))
 
     # Verify fields
@@ -197,7 +193,9 @@ def verify_stats(task_id, expected_model, expected_service):
         print(f"✅ Model: {expected_model}")
         checks.append(True)
     else:
-        print(f"❌ Model mismatch: {latest.get('transcription_model')} != {expected_model}")
+        print(
+            f"❌ Model mismatch: {latest.get('transcription_model')} != {expected_model}"
+        )
         checks.append(False)
 
     # Service check
@@ -205,7 +203,9 @@ def verify_stats(task_id, expected_model, expected_service):
         print(f"✅ Translation service: {expected_service}")
         checks.append(True)
     else:
-        print(f"❌ Service mismatch: {latest.get('translation_service')} != {expected_service}")
+        print(
+            f"❌ Service mismatch: {latest.get('translation_service')} != {expected_service}"
+        )
         checks.append(False)
 
     # Status check
@@ -222,7 +222,7 @@ def verify_stats(task_id, expected_model, expected_service):
         "transcription_duration",
         "translation_duration",
         "embedding_duration",
-        "total_duration"
+        "total_duration",
     ]
 
     print("\n📏 Timing data:")
@@ -260,7 +260,9 @@ def main():
         print("\nUsage:")
         print("  python3 test_stats_jsonl.py <youtube_url>")
         print("\nExample (short video ~5 seconds):")
-        print('  python3 test_stats_jsonl.py "https://www.youtube.com/watch?v=jNQXAC9IVRw"')
+        print(
+            '  python3 test_stats_jsonl.py "https://www.youtube.com/watch?v=jNQXAC9IVRw"'
+        )
         sys.exit(1)
 
     url = sys.argv[1]
@@ -292,13 +294,11 @@ def main():
     if final_count > initial_count:
         print(f"✅ New entry added! ({final_count - initial_count} new entries)")
     else:
-        print(f"⚠️ Warning: No new entries detected")
+        print("⚠️ Warning: No new entries detected")
 
     # Verify stats content
     success = verify_stats(
-        task_id=task_id,
-        expected_model="base",
-        expected_service="google"
+        task_id=task_id, expected_model="base", expected_service="google"
     )
 
     # Final result

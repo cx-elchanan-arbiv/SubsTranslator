@@ -1,10 +1,12 @@
 """
 Unit tests for combined subtitle and watermark functionality
 """
+
 import os
-import tempfile
 import shutil
-from unittest.mock import Mock, patch, MagicMock, call
+import tempfile
+from unittest.mock import MagicMock, Mock, patch
+
 import pytest
 
 from services.subtitle_service import SubtitleService
@@ -12,23 +14,23 @@ from services.subtitle_service import SubtitleService
 
 class TestCombinedSubtitleWatermark:
     """Test the combined subtitle and watermark function."""
-    
+
     def setup_method(self):
         """Setup test environment."""
         self.service = SubtitleService()
         self.temp_dir = tempfile.mkdtemp()
-        
+
         # Create test files
         self.video_path = os.path.join(self.temp_dir, "test_video.mp4")
         self.srt_path = os.path.join(self.temp_dir, "test.srt")
         self.watermark_path = os.path.join(self.temp_dir, "watermark.png")
         self.output_path = os.path.join(self.temp_dir, "output.mp4")
-        
+
         # Create dummy files
-        with open(self.video_path, 'wb') as f:
-            f.write(b'dummy video content')
-        
-        with open(self.srt_path, 'w', encoding='utf-8') as f:
+        with open(self.video_path, "wb") as f:
+            f.write(b"dummy video content")
+
+        with open(self.srt_path, "w", encoding="utf-8") as f:
             f.write("""1
 00:00:01,000 --> 00:00:03,000
 Hello World
@@ -37,32 +39,31 @@ Hello World
 00:00:04,000 --> 00:00:06,000
 Test subtitle
 """)
-        
-        with open(self.watermark_path, 'wb') as f:
-            f.write(b'dummy image content')
-    
+
+        with open(self.watermark_path, "wb") as f:
+            f.write(b"dummy image content")
+
     def teardown_method(self):
         """Clean up test environment."""
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
-    
-    @patch('services.subtitle_service.SubtitleService._run_ffmpeg_simple')
+
+    @patch("services.subtitle_service.SubtitleService._run_ffmpeg_simple")
     def test_combined_function_single_ffmpeg_call(self, mock_run_ffmpeg):
         """Test that combined function uses single FFmpeg call."""
         # Setup mock to return success
         mock_run_ffmpeg.return_value = True
-        
+
         # Create output file to simulate success
-        with open(self.output_path, 'wb') as f:
-            f.write(b'output video')
-        
+        with open(self.output_path, "wb") as f:
+            f.write(b"output video")
+
         # Mock subprocess.run for ffprobe
-        with patch('subprocess.run') as mock_run:
+        with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                stdout='{"format": {"duration": "60.0"}}',
-                returncode=0
+                stdout='{"format": {"duration": "60.0"}}', returncode=0
             )
-            
+
             # Call the combined function
             result = self.service.create_video_with_subtitles_and_watermark(
                 self.video_path,
@@ -72,47 +73,47 @@ Test subtitle
                 target_language="en",
                 watermark_position=("right", "bottom"),
                 watermark_opacity=0.4,
-                watermark_size_height=80
+                watermark_size_height=80,
             )
-        
+
         # Verify success
         assert result is True
-        
+
         # Verify FFmpeg was called only once
         assert mock_run_ffmpeg.call_count == 1
-        
+
         # Get the command that was passed to _run_ffmpeg_simple
         ffmpeg_cmd = mock_run_ffmpeg.call_args[0][0]
         assert "ffmpeg" in ffmpeg_cmd
         assert "-filter_complex" in ffmpeg_cmd
-        
+
         # Find filter_complex argument
         filter_idx = ffmpeg_cmd.index("-filter_complex") + 1
         filter_complex = ffmpeg_cmd[filter_idx]
-        
+
         # Verify both subtitles and overlay are in the filter
         assert "subtitles=" in filter_complex
         assert "overlay=" in filter_complex
         assert "[vout]" in filter_complex
-    
-    @patch('services.subtitle_service.SubtitleService.create_video_with_subtitles')
+
+    @patch("services.subtitle_service.SubtitleService.create_video_with_subtitles")
     def test_fallback_when_watermark_missing(self, mock_create_video):
         """Test fallback to regular subtitle function when watermark is missing."""
         # Remove watermark file
         os.remove(self.watermark_path)
-        
+
         # Setup mock
         mock_create_video.return_value = True
-        
+
         # Call combined function
         result = self.service.create_video_with_subtitles_and_watermark(
             self.video_path,
             self.srt_path,
             self.output_path,
             self.watermark_path,
-            target_language="en"
+            target_language="en",
         )
-        
+
         # Verify it fell back to regular function
         assert result is True
         mock_create_video.assert_called_once_with(
@@ -120,15 +121,15 @@ Test subtitle
             self.srt_path,
             self.output_path,
             "en",
-            None  # progress_callback
+            None,  # progress_callback
         )
-    
-    @patch('services.subtitle_service.SubtitleService._run_ffmpeg_simple')
+
+    @patch("services.subtitle_service.SubtitleService._run_ffmpeg_simple")
     def test_rtl_language_support(self, mock_run_ffmpeg):
         """Test that RTL languages are handled properly."""
         # Create Hebrew SRT
         hebrew_srt = os.path.join(self.temp_dir, "hebrew.srt")
-        with open(hebrew_srt, 'w', encoding='utf-8') as f:
+        with open(hebrew_srt, "w", encoding="utf-8") as f:
             f.write("""1
 00:00:01,000 --> 00:00:03,000
 שלום עולם
@@ -137,36 +138,35 @@ Test subtitle
 00:00:04,000 --> 00:00:06,000
 בדיקה בעברית
 """)
-        
+
         # Setup mock
         mock_run_ffmpeg.return_value = True
-        
-        with patch('subprocess.run') as mock_run:
+
+        with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                stdout='{"format": {"duration": "60.0"}}',
-                returncode=0
+                stdout='{"format": {"duration": "60.0"}}', returncode=0
             )
-            
+
             # Create output file
-            with open(self.output_path, 'wb') as f:
-                f.write(b'output')
-            
+            with open(self.output_path, "wb") as f:
+                f.write(b"output")
+
             # Call with Hebrew
             result = self.service.create_video_with_subtitles_and_watermark(
                 self.video_path,
                 hebrew_srt,
                 self.output_path,
                 self.watermark_path,
-                target_language="he"
+                target_language="he",
             )
-            
+
             assert result is True
-            
+
             # Verify RTL styling was applied
             ffmpeg_cmd = mock_run_ffmpeg.call_args[0][0]
             filter_idx = ffmpeg_cmd.index("-filter_complex") + 1
             filter_complex = ffmpeg_cmd[filter_idx]
-            
+
             # Check for RTL-specific font settings
             assert "Noto Sans Hebrew" in filter_complex or "Hebrew" in filter_complex
 
@@ -195,7 +195,9 @@ class TestFaststartAndMissingWatermarkParity:
         with open(self.watermark_path, "wb") as handle:
             handle.write(b"dummy png")
 
-        self.cues = [{"start": 1.0, "end": 3.0, "text": "Hello", "translated_text": "שלום"}]
+        self.cues = [
+            {"start": 1.0, "end": 3.0, "text": "Hello", "translated_text": "שלום"}
+        ]
 
     def teardown_method(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -211,12 +213,14 @@ class TestFaststartAndMissingWatermarkParity:
                 handle.write(b"out")
             return True
 
-        with patch.object(self.service, "_run_ffmpeg_simple", capture), patch.object(
-            self.service, "_run_ffmpeg_with_progress", capture
-        ), patch("subprocess.run") as mock_run:
+        with (
+            patch.object(self.service, "_run_ffmpeg_simple", capture),
+            patch.object(self.service, "_run_ffmpeg_with_progress", capture),
+            patch("subprocess.run") as mock_run,
+        ):
             mock_run.return_value = MagicMock(
                 stdout='{"format": {"duration": "60.0"}, "streams": '
-                       '[{"width": 1280, "height": 720}]}',
+                '[{"width": 1280, "height": 720}]}',
                 returncode=0,
             )
             if path == "srt":
@@ -225,13 +229,17 @@ class TestFaststartAndMissingWatermarkParity:
                 )
             elif path == "srt+watermark":
                 result = self.service.create_video_with_subtitles_and_watermark(
-                    self.video_path, self.srt_path, self.output_path,
+                    self.video_path,
+                    self.srt_path,
+                    self.output_path,
                     watermark if watermark is not None else self.watermark_path,
                     target_language="he",
                 )
             elif path == "ass":
                 result = self.service.create_video_with_ass(
-                    self.video_path, self.cues, self.output_path,
+                    self.video_path,
+                    self.cues,
+                    self.output_path,
                     target_language="he",
                     watermark_path=watermark,
                 )
@@ -251,9 +259,9 @@ class TestFaststartAndMissingWatermarkParity:
         _result, cmd = self._invoke(path)
         assert cmd is not None, f"{path}: ffmpeg was never invoked"
         assert "-movflags" in cmd, f"{path}: no -movflags in {cmd}"
-        assert cmd[cmd.index("-movflags") + 1] == "+faststart", (
-            f"{path}: -movflags is set to something other than +faststart"
-        )
+        assert (
+            cmd[cmd.index("-movflags") + 1] == "+faststart"
+        ), f"{path}: -movflags is set to something other than +faststart"
 
     @pytest.mark.parametrize("path", ["srt", "srt+watermark", "ass"])
     def test_faststart_precedes_the_output_path(self, path):
@@ -269,8 +277,11 @@ class TestFaststartAndMissingWatermarkParity:
             self.service, "create_video_with_subtitles", return_value=True
         ) as fallback:
             result = self.service.create_video_with_subtitles_and_watermark(
-                self.video_path, self.srt_path, self.output_path,
-                self.watermark_path, target_language="he",
+                self.video_path,
+                self.srt_path,
+                self.output_path,
+                self.watermark_path,
+                target_language="he",
             )
         assert result is True, "a missing logo failed the render"
         assert fallback.called, "it did not fall back to the subtitles-only renderer"
@@ -285,8 +296,11 @@ class TestFaststartAndMissingWatermarkParity:
             self.service, "create_video_with_subtitles", return_value=True
         ) as fallback:
             result = self.service.create_video_with_subtitles_and_watermark(
-                self.video_path, self.srt_path, self.output_path,
-                None, target_language="he",
+                self.video_path,
+                self.srt_path,
+                self.output_path,
+                None,
+                target_language="he",
             )
         assert result is True
         assert fallback.called
@@ -296,7 +310,9 @@ class TestFaststartAndMissingWatermarkParity:
         os.remove(self.watermark_path)
         result, cmd = self._invoke("ass", watermark=self.watermark_path)
         assert result is True
-        assert "overlay" not in " ".join(cmd), "a missing logo still reached the filtergraph"
+        assert "overlay" not in " ".join(
+            cmd
+        ), "a missing logo still reached the filtergraph"
 
     def test_ass_path_still_overlays_a_watermark_that_exists(self):
         """The negative tests above would pass on a renderer that ignored watermarks."""
@@ -461,7 +477,9 @@ class TestDetectLowerThird:
 
     def test_sample_timestamps_are_recorded(self):
         """Only the scores were archived, so a disputed verdict could not be re-checked."""
-        out = self._stub([0.0] * 7, duration=100.0).detect_lower_third("v.mp4", self.layout)
+        out = self._stub([0.0] * 7, duration=100.0).detect_lower_third(
+            "v.mp4", self.layout
+        )
         assert out["sample_times"] == [3.0, 7.0, 10.0, 30.0, 50.0, 70.0, 90.0]
 
     def test_band_is_where_the_subtitle_box_would_be(self):
@@ -476,8 +494,14 @@ class TestDetectLowerThird:
         for scores in ([0.5] * 7, [None] * 7, [0.0] * 7):
             out = self._stub(scores).detect_lower_third("v.mp4", self.layout)
             for key in (
-                "busy", "score", "threshold", "samples", "sample_times", "band",
-                "bands", "reason",
+                "busy",
+                "score",
+                "threshold",
+                "samples",
+                "sample_times",
+                "band",
+                "bands",
+                "reason",
             ):
                 assert key in out
 
@@ -529,7 +553,10 @@ class TestTwoBandDetection:
         assert out["decided_by"] == "subtitle"
 
     def test_both_clear_stays_quiet(self):
-        assert self._stub_split(0.0, 0.0).detect_lower_third("v.mp4", self.layout)["busy"] is False
+        assert (
+            self._stub_split(0.0, 0.0).detect_lower_third("v.mp4", self.layout)["busy"]
+            is False
+        )
 
     def test_the_bands_are_scored_separately_not_averaged(self):
         """Merging them dilutes a 0.1146 bar to 0.0450 and reproduces the original miss."""
@@ -543,7 +570,9 @@ class TestTwoBandDetection:
         out = self._stub_split(0.0, 0.0).detect_lower_third("v.mp4", self.layout)
         subtitle, bottom = out["bands"]["subtitle"], out["bands"]["bottom"]
         assert subtitle["y"] + subtitle["h"] == bottom["y"]
-        assert bottom["y"] + bottom["h"] == 720, "the bottom strip must reach the frame edge"
+        assert (
+            bottom["y"] + bottom["h"] == 720
+        ), "the bottom strip must reach the frame edge"
         assert subtitle["x"] == bottom["x"] and subtitle["w"] == bottom["w"]
 
     def test_one_decode_serves_both_bands(self):
@@ -570,7 +599,9 @@ class TestChyronRaisesTheBoxInTheRenderPath:
         with open(self.video, "wb") as f:
             f.write(b"x")
         self.out = os.path.join(self.temp_dir, "out.mp4")
-        self.cues = [{"start": 0.0, "end": 3.0, "text": "שלום", "translated_text": "שלום"}]
+        self.cues = [
+            {"start": 0.0, "end": 3.0, "text": "שלום", "translated_text": "שלום"}
+        ]
 
     def teardown_method(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -580,13 +611,19 @@ class TestChyronRaisesTheBoxInTheRenderPath:
         service.config.USE_FAKE_YTDLP = False
         layout = layout_params(1280, 720)
         decision = {
-            "busy": busy, "score": 0.09 if busy else 0.01,
-            "threshold": CHYRON_BUSY_THRESHOLD, "samples": [], "band": None,
+            "busy": busy,
+            "score": 0.09 if busy else 0.01,
+            "threshold": CHYRON_BUSY_THRESHOLD,
+            "samples": [],
+            "band": None,
             "reason": "stub",
         }
         service.detect_lower_third = lambda *_a, **_k: decision
-        with patch("subprocess.Popen") as popen, patch("os.path.exists", return_value=True), \
-             patch("os.path.getsize", return_value=1024):
+        with (
+            patch("subprocess.Popen") as popen,
+            patch("os.path.exists", return_value=True),
+            patch("os.path.getsize", return_value=1024),
+        ):
             proc = MagicMock()
             proc.stdout.readline.side_effect = [""]
             proc.poll.return_value = 0
@@ -594,8 +631,12 @@ class TestChyronRaisesTheBoxInTheRenderPath:
             proc.communicate.return_value = ("", "")
             popen.return_value = proc
             service.create_video_with_ass(
-                self.video, self.cues, self.out, target_language="he",
-                layout=layout, **kwargs,
+                self.video,
+                self.cues,
+                self.out,
+                target_language="he",
+                layout=layout,
+                **kwargs,
             )
         ass_path = os.path.splitext(self.out)[0] + ".ass"
         with open(ass_path, encoding="utf-8") as f:
@@ -613,9 +654,9 @@ class TestChyronRaisesTheBoxInTheRenderPath:
         """margin_v is the only thing that moves; font and line budget are width-derived."""
         _, clean = self._render(False)
         _, raised = self._render(True)
-        assert raised[2] == clean[2]            # Fontsize
-        assert raised[19] == clean[19]          # MarginL
-        assert raised[20] == clean[20]          # MarginR
+        assert raised[2] == clean[2]  # Fontsize
+        assert raised[19] == clean[19]  # MarginL
+        assert raised[20] == clean[20]  # MarginR
 
     def test_detection_can_be_switched_off_for_deterministic_tests(self):
         _, default = self._render(False)

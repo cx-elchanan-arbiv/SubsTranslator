@@ -4,13 +4,16 @@ Test YouTube transcription against a deployed API.
 Set API_BASE environment variable to your production URL.
 Example: API_BASE=https://api.example.com python test_production_youtube.py
 """
-import os
-import requests
-import time
+
 import json
+import os
+import time
+
+import requests
 
 # Allow overriding via environment variable
 API_BASE = os.getenv("API_BASE", "http://localhost:8081")
+
 
 def test_youtube_transcription():
     """Test YouTube URL processing"""
@@ -26,12 +29,8 @@ def test_youtube_transcription():
     print("1️⃣  Submitting transcription request...")
     response = requests.post(
         f"{API_BASE}/youtube",
-        json={
-            "url": youtube_url,
-            "source_language": "en",
-            "whisper_model": "base"
-        },
-        timeout=30
+        json={"url": youtube_url, "source_language": "en", "whisper_model": "base"},
+        timeout=30,
     )
 
     print(f"   Status: {response.status_code}")
@@ -61,10 +60,7 @@ def test_youtube_transcription():
         attempt += 1
         time.sleep(5)
 
-        status_response = requests.get(
-            f"{API_BASE}/status/{task_id}",
-            timeout=10
-        )
+        status_response = requests.get(f"{API_BASE}/status/{task_id}", timeout=10)
 
         if status_response.status_code != 200:
             print(f"   ⚠️  Status check failed: {status_response.status_code}")
@@ -78,7 +74,7 @@ def test_youtube_transcription():
 
         if state == "SUCCESS":
             print()
-            print(f"✅ Task completed successfully!")
+            print("✅ Task completed successfully!")
             print(f"   Result: {json.dumps(status_data, indent=2)[:500]}")
             return True
 
@@ -99,6 +95,7 @@ def test_youtube_transcription():
     print()
     print(f"❌ Timeout after {max_attempts} attempts")
     return False
+
 
 if __name__ == "__main__":
     success = test_youtube_transcription()

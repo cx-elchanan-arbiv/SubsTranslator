@@ -4,19 +4,18 @@ Integration tests for /cut-video endpoint.
 Tests the full endpoint with real FFmpeg and dummy video files.
 Requires FFmpeg to be installed.
 """
+
 import io
 import os
 import shutil
-import pytest
-from .ffmpeg_helpers import make_video
 
+import pytest
+
+from .ffmpeg_helpers import make_video
 
 # Skip all tests if FFmpeg is not available
 ffmpeg_available = shutil.which("ffmpeg") is not None
-pytestmark = pytest.mark.skipif(
-    not ffmpeg_available,
-    reason="FFmpeg not installed"
-)
+pytestmark = pytest.mark.skipif(not ffmpeg_available, reason="FFmpeg not installed")
 
 
 # Use shared flask_test_client fixture from conftest.py
@@ -38,13 +37,11 @@ def test_cut_video_success(client, temp_dirs):
         data = {
             "video": (io.BytesIO(f.read()), "test.mp4"),
             "start_time": "00:00:01",
-            "end_time": "00:00:02"
+            "end_time": "00:00:02",
         }
 
         response = client.post(
-            "/cut-video",
-            data=data,
-            content_type="multipart/form-data"
+            "/cut-video", data=data, content_type="multipart/form-data"
         )
 
     assert response.status_code == 200
@@ -62,13 +59,11 @@ def test_cut_video_mm_ss_format(client, temp_dirs):
         data = {
             "video": (io.BytesIO(f.read()), "test.mp4"),
             "start_time": "00:00",
-            "end_time": "00:01"
+            "end_time": "00:01",
         }
 
         response = client.post(
-            "/cut-video",
-            data=data,
-            content_type="multipart/form-data"
+            "/cut-video", data=data, content_type="multipart/form-data"
         )
 
     assert response.status_code == 200
@@ -78,16 +73,9 @@ def test_cut_video_mm_ss_format(client, temp_dirs):
 @pytest.mark.integration
 def test_cut_video_missing_file_returns_400(client):
     """Test that missing video file returns 400."""
-    data = {
-        "start_time": "00:00:00",
-        "end_time": "00:00:10"
-    }
+    data = {"start_time": "00:00:00", "end_time": "00:00:10"}
 
-    response = client.post(
-        "/cut-video",
-        data=data,
-        content_type="multipart/form-data"
-    )
+    response = client.post("/cut-video", data=data, content_type="multipart/form-data")
 
     assert response.status_code == 400
     json_data = response.get_json()
@@ -104,13 +92,11 @@ def test_cut_video_invalid_time_range(client, temp_dirs):
         data = {
             "video": (io.BytesIO(f.read()), "test.mp4"),
             "start_time": "00:00:10",  # Start
-            "end_time": "00:00:05"     # End (before start - invalid!)
+            "end_time": "00:00:05",  # End (before start - invalid!)
         }
 
         response = client.post(
-            "/cut-video",
-            data=data,
-            content_type="multipart/form-data"
+            "/cut-video", data=data, content_type="multipart/form-data"
         )
 
     # Should return 500 because cutting will fail
@@ -130,9 +116,7 @@ def test_cut_video_default_times(client, temp_dirs):
         }
 
         response = client.post(
-            "/cut-video",
-            data=data,
-            content_type="multipart/form-data"
+            "/cut-video", data=data, content_type="multipart/form-data"
         )
 
     assert response.status_code == 200
@@ -142,10 +126,7 @@ def test_cut_video_default_times(client, temp_dirs):
 @pytest.mark.integration
 def test_cut_video_options_request(client):
     """Test CORS preflight OPTIONS request."""
-    response = client.options(
-        "/cut-video",
-        headers={"Origin": "http://localhost:3000"}
-    )
+    response = client.options("/cut-video", headers={"Origin": "http://localhost:3000"})
 
     assert response.status_code == 200
 
@@ -160,13 +141,11 @@ def test_cut_video_output_filename(client, temp_dirs):
         data = {
             "video": (io.BytesIO(f.read()), "my_video.mp4"),
             "start_time": "00:00:01",
-            "end_time": "00:00:02"
+            "end_time": "00:00:02",
         }
 
         response = client.post(
-            "/cut-video",
-            data=data,
-            content_type="multipart/form-data"
+            "/cut-video", data=data, content_type="multipart/form-data"
         )
 
     assert response.status_code == 200
@@ -186,13 +165,11 @@ def test_cut_video_preserves_audio(client, temp_dirs):
         data = {
             "video": (io.BytesIO(f.read()), "test.mp4"),
             "start_time": "00:00:00",
-            "end_time": "00:00:02"
+            "end_time": "00:00:02",
         }
 
         response = client.post(
-            "/cut-video",
-            data=data,
-            content_type="multipart/form-data"
+            "/cut-video", data=data, content_type="multipart/form-data"
         )
 
     assert response.status_code == 200

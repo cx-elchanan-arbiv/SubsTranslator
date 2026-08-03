@@ -4,15 +4,16 @@ Unit tests for video_utils.merge_videos_ffmpeg().
 Tests the merge logic without actually running FFmpeg.
 Uses monkeypatch to mock subprocess.run.
 """
-import os
-import pytest
-from types import SimpleNamespace
-from unittest.mock import MagicMock
 
+import os
 
 # Import video_utils
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
 backend_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(backend_dir))
 import utils.video_utils as video_utils
@@ -25,19 +26,15 @@ def test_merge_fast_concat_success(tmp_path, monkeypatch):
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
         # Verify fast concat method is being used
-        assert '-f' in cmd
-        assert 'concat' in cmd
-        assert '-c' in cmd
-        assert 'copy' in cmd
+        assert "-f" in cmd
+        assert "concat" in cmd
+        assert "-c" in cmd
+        assert "copy" in cmd
 
         # Create output file
-        output_path.write_bytes(b'\x00' * 2048)  # 2KB file
+        output_path.write_bytes(b"\x00" * 2048)  # 2KB file
 
-        return SimpleNamespace(
-            returncode=0,
-            stdout="ok",
-            stderr=""
-        )
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
@@ -59,26 +56,18 @@ def test_merge_fallback_after_fast_fail(tmp_path, monkeypatch):
 
         if call_count["n"] == 1:
             # First call (fast concat) fails
-            return SimpleNamespace(
-                returncode=1,
-                stdout="",
-                stderr="different codecs"
-            )
+            return SimpleNamespace(returncode=1, stdout="", stderr="different codecs")
         else:
             # Second call (re-encode fallback) succeeds
             # Verify re-encode method is being used
-            assert '-filter_complex' in cmd
-            assert 'scale' in ' '.join(cmd)
-            assert 'concat' in ' '.join(cmd)
+            assert "-filter_complex" in cmd
+            assert "scale" in " ".join(cmd)
+            assert "concat" in " ".join(cmd)
 
             # Create output file
-            output_path.write_bytes(b'\x00' * 4096)
+            output_path.write_bytes(b"\x00" * 4096)
 
-            return SimpleNamespace(
-                returncode=0,
-                stdout="ok",
-                stderr=""
-            )
+            return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
@@ -111,13 +100,9 @@ def test_merge_too_small_output(tmp_path, monkeypatch):
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
         # Create tiny file (less than 1KB)
-        output_path.write_bytes(b'tiny')
+        output_path.write_bytes(b"tiny")
 
-        return SimpleNamespace(
-            returncode=0,
-            stdout="",
-            stderr=""
-        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
@@ -133,11 +118,7 @@ def test_merge_output_not_created(tmp_path, monkeypatch):
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
         # Don't create output file
-        return SimpleNamespace(
-            returncode=0,
-            stdout="",
-            stderr=""
-        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
@@ -153,11 +134,7 @@ def test_merge_both_methods_fail(tmp_path, monkeypatch):
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
         # Both methods fail
-        return SimpleNamespace(
-            returncode=1,
-            stdout="",
-            stderr="error"
-        )
+        return SimpleNamespace(returncode=1, stdout="", stderr="error")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
@@ -173,7 +150,7 @@ def test_merge_concat_list_cleanup(tmp_path, monkeypatch):
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
         # Fast concat succeeds
-        output_path.write_bytes(b'\x00' * 2048)
+        output_path.write_bytes(b"\x00" * 2048)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
@@ -183,7 +160,7 @@ def test_merge_concat_list_cleanup(tmp_path, monkeypatch):
     assert result is True
 
     # Verify concat list file was cleaned up
-    concat_list = str(output_path) + '.concat.txt'
+    concat_list = str(output_path) + ".concat.txt"
     assert not os.path.exists(concat_list)
 
 

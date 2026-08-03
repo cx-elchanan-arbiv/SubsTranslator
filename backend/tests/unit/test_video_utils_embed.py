@@ -7,14 +7,14 @@ Tests:
 - convert_to_srt_time()
 - add_watermark_to_video()
 """
-import os
-import pytest
-from types import SimpleNamespace
-
 
 # Import video_utils
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
 backend_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(backend_dir))
 import utils.video_utils as video_utils
@@ -27,19 +27,17 @@ def test_embed_subtitles_success(tmp_path, monkeypatch):
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
         # Verify subtitle filter is used
-        assert '-vf' in cmd
-        cmd_str = ' '.join(cmd)
-        assert 'subtitles=' in cmd_str
+        assert "-vf" in cmd
+        cmd_str = " ".join(cmd)
+        assert "subtitles=" in cmd_str
 
-        output_path.write_bytes(b'\x00' * 4096)
+        output_path.write_bytes(b"\x00" * 4096)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
     result = video_utils.embed_subtitles_ffmpeg(
-        "video.mp4",
-        "subs.srt",
-        str(output_path)
+        "video.mp4", "subs.srt", str(output_path)
     )
 
     assert result is True
@@ -57,9 +55,7 @@ def test_embed_subtitles_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
     result = video_utils.embed_subtitles_ffmpeg(
-        "video.mp4",
-        "subs.srt",
-        str(output_path)
+        "video.mp4", "subs.srt", str(output_path)
     )
 
     assert result is False
@@ -71,15 +67,13 @@ def test_embed_subtitles_output_too_small(tmp_path, monkeypatch):
     output_path = tmp_path / "output.mp4"
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        output_path.write_bytes(b'tiny')
+        output_path.write_bytes(b"tiny")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
     result = video_utils.embed_subtitles_ffmpeg(
-        "video.mp4",
-        "subs.srt",
-        str(output_path)
+        "video.mp4", "subs.srt", str(output_path)
     )
 
     assert result is False
@@ -115,7 +109,7 @@ def test_parse_text_to_srt_basic(tmp_path):
     assert result is True
     assert output_path.exists()
 
-    content = output_path.read_text(encoding='utf-8')
+    content = output_path.read_text(encoding="utf-8")
     assert "Hello World" in content
     assert "00:00:00,000 --> 00:00:05,000" in content
     assert "This is a test" in content
@@ -133,7 +127,7 @@ def test_parse_text_to_srt_hh_mm_ss_format(tmp_path):
 
     assert result is True
 
-    content = output_path.read_text(encoding='utf-8')
+    content = output_path.read_text(encoding="utf-8")
     assert "First line" in content
     assert "Second line" in content
 
@@ -169,12 +163,12 @@ def test_add_watermark_success(tmp_path, monkeypatch):
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
         # Verify watermark filter
-        assert '-filter_complex' in cmd
-        cmd_str = ' '.join(cmd)
-        assert 'scale' in cmd_str
-        assert 'overlay' in cmd_str
+        assert "-filter_complex" in cmd
+        cmd_str = " ".join(cmd)
+        assert "scale" in cmd_str
+        assert "overlay" in cmd_str
 
-        output_path.write_bytes(b'\x00' * 4096)
+        output_path.write_bytes(b"\x00" * 4096)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
@@ -185,7 +179,7 @@ def test_add_watermark_success(tmp_path, monkeypatch):
         "logo.png",
         position="bottom-right",
         size="medium",
-        opacity=40
+        opacity=40,
     )
 
     assert result is True
@@ -199,17 +193,17 @@ def test_add_watermark_different_positions(tmp_path, monkeypatch):
     positions_tested = []
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        cmd_str = ' '.join(cmd)
+        cmd_str = " ".join(cmd)
         # Extract position from overlay parameter
-        if 'overlay=' in cmd_str:
+        if "overlay=" in cmd_str:
             positions_tested.append(True)
 
-        output_path.write_bytes(b'\x00' * 4096)
+        output_path.write_bytes(b"\x00" * 4096)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
-    positions = ['top-left', 'top-right', 'bottom-left', 'bottom-right']
+    positions = ["top-left", "top-right", "bottom-left", "bottom-right"]
 
     for pos in positions:
         result = video_utils.add_watermark_to_video(
@@ -218,7 +212,7 @@ def test_add_watermark_different_positions(tmp_path, monkeypatch):
             "logo.png",
             position=pos,
             size="medium",
-            opacity=50
+            opacity=50,
         )
         assert result is True
 
@@ -232,18 +226,18 @@ def test_add_watermark_different_sizes(tmp_path, monkeypatch):
     sizes_tested = []
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        cmd_str = ' '.join(cmd)
+        cmd_str = " ".join(cmd)
         # Check that scale is applied
-        if 'scale=-1:' in cmd_str:
+        if "scale=-1:" in cmd_str:
             # Extract height from scale parameter
             sizes_tested.append(True)
 
-        output_path.write_bytes(b'\x00' * 4096)
+        output_path.write_bytes(b"\x00" * 4096)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
-    sizes = ['small', 'medium', 'large']
+    sizes = ["small", "medium", "large"]
 
     for size in sizes:
         result = video_utils.add_watermark_to_video(
@@ -252,7 +246,7 @@ def test_add_watermark_different_sizes(tmp_path, monkeypatch):
             "logo.png",
             position="bottom-right",
             size=size,
-            opacity=50
+            opacity=50,
         )
         assert result is True
 
@@ -265,12 +259,12 @@ def test_add_watermark_opacity_calculation(tmp_path, monkeypatch):
     output_path = tmp_path / "output.mp4"
 
     def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
-        cmd_str = ' '.join(cmd)
+        cmd_str = " ".join(cmd)
         # Check that opacity (aa parameter) is in filter
-        assert 'colorchannelmixer' in cmd_str
-        assert 'aa=' in cmd_str
+        assert "colorchannelmixer" in cmd_str
+        assert "aa=" in cmd_str
 
-        output_path.write_bytes(b'\x00' * 4096)
+        output_path.write_bytes(b"\x00" * 4096)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
@@ -279,7 +273,7 @@ def test_add_watermark_opacity_calculation(tmp_path, monkeypatch):
         "video.mp4",
         str(output_path),
         "logo.png",
-        opacity=40  # Should become 0.4 in FFmpeg
+        opacity=40,  # Should become 0.4 in FFmpeg
     )
 
     assert result is True
@@ -296,9 +290,7 @@ def test_add_watermark_timeout(tmp_path, monkeypatch):
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
     result = video_utils.add_watermark_to_video(
-        "video.mp4",
-        str(output_path),
-        "logo.png"
+        "video.mp4", str(output_path), "logo.png"
     )
 
     assert result is False
@@ -315,9 +307,7 @@ def test_add_watermark_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(video_utils.subprocess, "run", fake_run)
 
     result = video_utils.add_watermark_to_video(
-        "video.mp4",
-        str(output_path),
-        "logo.png"
+        "video.mp4", str(output_path), "logo.png"
     )
 
     assert result is False

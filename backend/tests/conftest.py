@@ -1,11 +1,12 @@
 """
 Shared test fixtures for all test levels.
 """
-import os
-import tempfile
-import shutil
-import pytest
 
+import os
+import shutil
+import tempfile
+
+import pytest
 
 # Set environment variables at module import time (before app is imported)
 os.environ["TESTING"] = "1"
@@ -31,11 +32,7 @@ def temp_dirs():
     os.makedirs(uploads)
     os.makedirs(downloads)
 
-    yield {
-        "root": root,
-        "uploads": uploads,
-        "downloads": downloads
-    }
+    yield {"root": root, "uploads": uploads, "downloads": downloads}
 
     # Cleanup
     shutil.rmtree(root, ignore_errors=True)
@@ -48,21 +45,18 @@ def mock_subprocess_success(monkeypatch):
 
     Returns a function that can be customized per test.
     """
-    import subprocess
     from types import SimpleNamespace
 
     def _mock_run(returncode=0, stdout="", stderr="", create_output_file=None):
         def fake_run(cmd, capture_output=True, text=True, timeout=None, **kwargs):
             # If output file is specified in command, create it
-            if create_output_file and os.path.exists(os.path.dirname(create_output_file)):
-                with open(create_output_file, 'wb') as f:
-                    f.write(b'\x00' * 2048)  # Write 2KB of data
+            if create_output_file and os.path.exists(
+                os.path.dirname(create_output_file)
+            ):
+                with open(create_output_file, "wb") as f:
+                    f.write(b"\x00" * 2048)  # Write 2KB of data
 
-            return SimpleNamespace(
-                returncode=returncode,
-                stdout=stdout,
-                stderr=stderr
-            )
+            return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
         return fake_run
 
@@ -92,6 +86,7 @@ def flask_test_client(temp_dirs, monkeypatch):
 
     import sys
     from pathlib import Path
+
     backend_dir = Path(__file__).parent.parent
     sys.path.insert(0, str(backend_dir))
 

@@ -5,25 +5,26 @@ format fallback that lets non-YouTube HLS sources (Fox News, TED) download.
 Covers the logic added for "paste a webpage that contains video, not just a
 direct link" — see docs/URL_PAGE_EXTRACTION_POC.md.
 """
+
 import os
 import sys
 
 import pytest
 import yt_dlp
 
-backend_path = os.path.join(os.path.dirname(__file__), '..', 'backend')
+backend_path = os.path.join(os.path.dirname(__file__), "..", "backend")
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from services.url_resolver_service import resolve_video_url
 from config import get_config
+from services.url_resolver_service import resolve_video_url
 
 
 def _mock_ydl(monkeyless_return=None, side_effect=None):
     """Build a patched yt_dlp.YoutubeDL whose extract_info returns/raises."""
-    patcher = patch('yt_dlp.YoutubeDL')
+    patcher = patch("yt_dlp.YoutubeDL")
     mock_cls = patcher.start()
     mock_ydl = MagicMock()
     mock_cls.return_value.__enter__.return_value = mock_ydl
@@ -139,4 +140,6 @@ class TestOptimizedFormatFallbacks:
         # Prefer working HLS streams over a single progressive file that some
         # sites (TED's h264-1200k) serve but then reject with HTTP 403.
         fmt = get_config().YTDLP_OPTIMIZED_FORMAT
-        assert fmt.index("bestvideo[height<=1080]+bestaudio") < fmt.index("best[ext=mp4]")
+        assert fmt.index("bestvideo[height<=1080]+bestaudio") < fmt.index(
+            "best[ext=mp4]"
+        )

@@ -5,8 +5,9 @@ Tests the complete flow of summary generation with proper result structure mocki
 
 import os
 import tempfile
+from unittest.mock import Mock, patch
+
 import pytest
-from unittest.mock import Mock, patch, MagicMock
 from celery.result import AsyncResult
 
 
@@ -19,8 +20,8 @@ def app_client():
 
     from app import app
 
-    app.config['TESTING'] = True
-    app.config['SECRET_KEY'] = 'test-secret-key'
+    app.config["TESTING"] = True
+    app.config["SECRET_KEY"] = "test-secret-key"
 
     with app.test_client() as client:
         yield client
@@ -43,7 +44,9 @@ def mock_translated_srt_file():
 """
 
     # Create temporary file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.srt', delete=False, encoding='utf-8') as f:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".srt", delete=False, encoding="utf-8"
+    ) as f:
         f.write(srt_content)
         temp_path = f.name
 
@@ -80,26 +83,28 @@ def mock_celery_result_success(mock_translated_srt_file):
             "files": {
                 "original_srt": "test_original.srt",
                 "translated_srt": os.path.basename(mock_translated_srt_file),
-                "video_with_subtitles": "test_video.mp4"
+                "video_with_subtitles": "test_video.mp4",
             },
             "user_choices": {
                 "source_lang": "en",
                 "target_lang": "he",
                 "whisper_model": "medium",
-                "translation_service": "google"
+                "translation_service": "google",
             },
             "timing_summary": {
                 "download_video": "5.2s",
                 "transcription": "10.5s",
-                "translation": "3.8s"
-            }
-        }
+                "translation": "3.8s",
+            },
+        },
     }
 
     return mock_result
 
 
-def test_summary_endpoint_with_nested_result_structure(app_client, mock_celery_result_success, mock_translated_srt_file):
+def test_summary_endpoint_with_nested_result_structure(
+    app_client, mock_celery_result_success, mock_translated_srt_file
+):
     """
     Test that the summary endpoint correctly handles nested Celery result structure
 
@@ -108,106 +113,131 @@ def test_summary_endpoint_with_nested_result_structure(app_client, mock_celery_r
     2. Handles the {"status": "SUCCESS", "result": {...}} wrapper
     3. Successfully retrieves translated_srt filename
     """
-    with patch('api.summary_routes.AsyncResult', return_value=mock_celery_result_success):
+    with patch(
+        "api.summary_routes.AsyncResult", return_value=mock_celery_result_success
+    ):
         # Mock downloads folder to point to temp file directory
-        with patch('api.summary_routes.config.DOWNLOADS_FOLDER', os.path.dirname(mock_translated_srt_file)):
-            with patch('api.summary_routes._is_valid_openai_key', return_value=True):
-                with patch('api.summary_routes._generate_summary_with_openai', return_value="## סיכום\n\nטסט"):
+        with patch(
+            "api.summary_routes.config.DOWNLOADS_FOLDER",
+            os.path.dirname(mock_translated_srt_file),
+        ):
+            with patch("api.summary_routes._is_valid_openai_key", return_value=True):
+                with patch(
+                    "api.summary_routes._generate_summary_with_openai",
+                    return_value="## סיכום\n\nטסט",
+                ):
 
                     response = app_client.post(
-                        '/api/summaries',
-                        json={
-                            'task_id': 'test-task-123',
-                            'summary_lang': 'he'
-                        },
-                        content_type='application/json'
+                        "/api/summaries",
+                        json={"task_id": "test-task-123", "summary_lang": "he"},
+                        content_type="application/json",
                     )
 
                     # Should succeed now with the fix
-                    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.get_json()}"
+                    assert (
+                        response.status_code == 200
+                    ), f"Expected 200, got {response.status_code}: {response.get_json()}"
 
                     data = response.get_json()
-                    assert data['success'] is True
-                    assert 'summary' in data
-                    assert data['task_id'] == 'test-task-123'
-                    assert data['summary_lang'] == 'he'
+                    assert data["success"] is True
+                    assert "summary" in data
+                    assert data["task_id"] == "test-task-123"
+                    assert data["summary_lang"] == "he"
 
 
-def test_summary_endpoint_language_routing(app_client, mock_celery_result_success, mock_translated_srt_file):
+def test_summary_endpoint_language_routing(
+    app_client, mock_celery_result_success, mock_translated_srt_file
+):
     """
     Test that summaries are generated in the correct language
     Tests all 13 supported languages
     """
-    supported_languages = ['he', 'en', 'es', 'ar', 'fr', 'de', 'it', 'pt', 'ru', 'ja', 'ko', 'zh', 'tr']
+    supported_languages = [
+        "he",
+        "en",
+        "es",
+        "ar",
+        "fr",
+        "de",
+        "it",
+        "pt",
+        "ru",
+        "ja",
+        "ko",
+        "zh",
+        "tr",
+    ]
 
     for lang in supported_languages:
-        with patch('api.summary_routes.AsyncResult', return_value=mock_celery_result_success):
-            with patch('api.summary_routes.config.DOWNLOADS_FOLDER', os.path.dirname(mock_translated_srt_file)):
-                with patch('api.summary_routes._is_valid_openai_key', return_value=True):
-                    with patch('api.summary_routes._generate_summary_with_openai') as mock_generate:
+        with patch(
+            "api.summary_routes.AsyncResult", return_value=mock_celery_result_success
+        ):
+            with patch(
+                "api.summary_routes.config.DOWNLOADS_FOLDER",
+                os.path.dirname(mock_translated_srt_file),
+            ):
+                with patch(
+                    "api.summary_routes._is_valid_openai_key", return_value=True
+                ):
+                    with patch(
+                        "api.summary_routes._generate_summary_with_openai"
+                    ) as mock_generate:
                         mock_generate.return_value = f"## Summary in {lang}"
 
                         response = app_client.post(
-                            '/api/summaries',
-                            json={
-                                'task_id': f'test-task-{lang}',
-                                'summary_lang': lang
-                            },
-                            content_type='application/json'
+                            "/api/summaries",
+                            json={"task_id": f"test-task-{lang}", "summary_lang": lang},
+                            content_type="application/json",
                         )
 
-                        assert response.status_code == 200, f"Failed for language {lang}"
+                        assert (
+                            response.status_code == 200
+                        ), f"Failed for language {lang}"
 
                         # Verify that _generate_summary_with_openai was called with correct language
                         mock_generate.assert_called_once()
                         args, kwargs = mock_generate.call_args
-                        assert kwargs.get('lang') == lang or (len(args) > 1 and args[1] == lang), \
-                            f"Expected lang={lang} in call"
+                        assert kwargs.get("lang") == lang or (
+                            len(args) > 1 and args[1] == lang
+                        ), f"Expected lang={lang} in call"
 
 
 def test_summary_endpoint_missing_task_id(app_client):
     """Test error handling for missing task_id"""
     response = app_client.post(
-        '/api/summaries',
-        json={'summary_lang': 'he'},
-        content_type='application/json'
+        "/api/summaries", json={"summary_lang": "he"}, content_type="application/json"
     )
 
     assert response.status_code == 400
     data = response.get_json()
-    assert 'error' in data
-    assert 'task_id' in data['error'].lower()
+    assert "error" in data
+    assert "task_id" in data["error"].lower()
 
 
 def test_summary_endpoint_missing_summary_lang(app_client):
     """Test error handling for missing summary_lang"""
     response = app_client.post(
-        '/api/summaries',
-        json={'task_id': 'test-123'},
-        content_type='application/json'
+        "/api/summaries", json={"task_id": "test-123"}, content_type="application/json"
     )
 
     assert response.status_code == 400
     data = response.get_json()
-    assert 'error' in data
-    assert 'summary_lang' in data['error'].lower()
+    assert "error" in data
+    assert "summary_lang" in data["error"].lower()
 
 
 def test_summary_endpoint_invalid_language(app_client):
     """Test error handling for unsupported language"""
     response = app_client.post(
-        '/api/summaries',
-        json={
-            'task_id': 'test-123',
-            'summary_lang': 'invalid_lang'
-        },
-        content_type='application/json'
+        "/api/summaries",
+        json={"task_id": "test-123", "summary_lang": "invalid_lang"},
+        content_type="application/json",
     )
 
     assert response.status_code == 400
     data = response.get_json()
-    assert 'error' in data
-    assert 'Invalid summary_lang' in data['error']
+    assert "error" in data
+    assert "Invalid summary_lang" in data["error"]
 
 
 def test_summary_endpoint_task_not_complete(app_client):
@@ -215,20 +245,17 @@ def test_summary_endpoint_task_not_complete(app_client):
     mock_result = Mock(spec=AsyncResult)
     mock_result.state = "PROGRESS"
 
-    with patch('api.summary_routes.AsyncResult', return_value=mock_result):
-        with patch('api.summary_routes._is_valid_openai_key', return_value=True):
+    with patch("api.summary_routes.AsyncResult", return_value=mock_result):
+        with patch("api.summary_routes._is_valid_openai_key", return_value=True):
             response = app_client.post(
-                '/api/summaries',
-                json={
-                    'task_id': 'test-123',
-                    'summary_lang': 'he'
-                },
-                content_type='application/json'
+                "/api/summaries",
+                json={"task_id": "test-123", "summary_lang": "he"},
+                content_type="application/json",
             )
 
             assert response.status_code == 400
             data = response.get_json()
-            assert 'not completed yet' in data['error'].lower()
+            assert "not completed yet" in data["error"].lower()
 
 
 def test_summary_endpoint_no_translated_file(app_client):
@@ -244,40 +271,54 @@ def test_summary_endpoint_no_translated_file(app_client):
                 "original_srt": "test.srt"
                 # translated_srt is missing!
             }
-        }
+        },
     }
 
-    with patch('api.summary_routes.AsyncResult', return_value=mock_result):
-        with patch('api.summary_routes._is_valid_openai_key', return_value=True):
+    with patch("api.summary_routes.AsyncResult", return_value=mock_result):
+        with patch("api.summary_routes._is_valid_openai_key", return_value=True):
             response = app_client.post(
-                '/api/summaries',
-                json={
-                    'task_id': 'test-123',
-                    'summary_lang': 'he'
-                },
-                content_type='application/json'
+                "/api/summaries",
+                json={"task_id": "test-123", "summary_lang": "he"},
+                content_type="application/json",
             )
 
             assert response.status_code == 404
             data = response.get_json()
-            assert 'No translated subtitles found' in data['error']
+            assert "No translated subtitles found" in data["error"]
 
 
 def test_summary_prompts_structure():
     """Test that all language prompts are properly structured"""
     from api.summary_routes import SUMMARY_PROMPTS
 
-    expected_languages = ['he', 'en', 'es', 'ar', 'fr', 'de', 'it', 'pt', 'ru', 'ja', 'ko', 'zh', 'tr']
+    expected_languages = [
+        "he",
+        "en",
+        "es",
+        "ar",
+        "fr",
+        "de",
+        "it",
+        "pt",
+        "ru",
+        "ja",
+        "ko",
+        "zh",
+        "tr",
+    ]
 
     # All languages should be present
-    assert set(SUMMARY_PROMPTS.keys()) == set(expected_languages), \
-        f"Expected {expected_languages}, got {list(SUMMARY_PROMPTS.keys())}"
+    assert set(SUMMARY_PROMPTS.keys()) == set(
+        expected_languages
+    ), f"Expected {expected_languages}, got {list(SUMMARY_PROMPTS.keys())}"
 
     # Each language should have system and user_template
     for lang, prompts in SUMMARY_PROMPTS.items():
-        assert 'system' in prompts, f"Language {lang} missing 'system' prompt"
-        assert 'user_template' in prompts, f"Language {lang} missing 'user_template'"
-        assert '{text}' in prompts['user_template'], f"Language {lang} user_template missing {{text}} placeholder"
+        assert "system" in prompts, f"Language {lang} missing 'system' prompt"
+        assert "user_template" in prompts, f"Language {lang} missing 'user_template'"
+        assert (
+            "{text}" in prompts["user_template"]
+        ), f"Language {lang} user_template missing {{text}} placeholder"
 
 
 def test_srt_text_extraction():
@@ -294,7 +335,9 @@ First subtitle line
 Second subtitle line
 """
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.srt', delete=False, encoding='utf-8') as f:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".srt", delete=False, encoding="utf-8"
+    ) as f:
         f.write(srt_content)
         temp_path = f.name
 
@@ -302,15 +345,17 @@ Second subtitle line
         extracted_text = _extract_text_from_srt(temp_path)
 
         # Should extract only text, not numbers or timestamps
-        assert 'First subtitle line' in extracted_text
-        assert 'Second subtitle line' in extracted_text
-        assert '00:00:00' not in extracted_text
-        assert '-->' not in extracted_text
-        assert '1' not in extracted_text or extracted_text.count('1') < srt_content.count('1')
+        assert "First subtitle line" in extracted_text
+        assert "Second subtitle line" in extracted_text
+        assert "00:00:00" not in extracted_text
+        assert "-->" not in extracted_text
+        assert "1" not in extracted_text or extracted_text.count(
+            "1"
+        ) < srt_content.count("1")
 
     finally:
         os.remove(temp_path)
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v', '--tb=short'])
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

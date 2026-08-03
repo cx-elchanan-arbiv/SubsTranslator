@@ -3,16 +3,24 @@ Frontend Language Integration Tests
 Tests that verify the actual frontend displays correct languages in the browser
 """
 
+import time
+
 import pytest
 import requests
-import time
+
+# Selenium + a real Chrome driver are optional extras (requirements-test.txt); without
+# them this module used to blow up at import time and abort collection of the entire
+# suite. Skip the file instead.
+pytest.importorskip("selenium", reason="selenium not installed")
+pytest.importorskip("webdriver_manager", reason="webdriver-manager not installed")
+
 from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 
@@ -44,7 +52,7 @@ class TestFrontendLanguages:
     @classmethod
     def teardown_class(cls):
         """Close browser driver"""
-        if hasattr(cls, 'driver'):
+        if hasattr(cls, "driver"):
             cls.driver.quit()
 
     @classmethod
@@ -85,8 +93,8 @@ class TestFrontendLanguages:
         assert "SubsTranslator" in self.driver.title
 
         # Check for JavaScript errors
-        logs = self.driver.get_log('browser')
-        severe_errors = [log for log in logs if log['level'] == 'SEVERE']
+        logs = self.driver.get_log("browser")
+        severe_errors = [log for log in logs if log["level"] == "SEVERE"]
         assert len(severe_errors) == 0, f"JavaScript errors found: {severe_errors}"
 
     def test_english_is_default_language(self):
@@ -95,12 +103,20 @@ class TestFrontendLanguages:
         time.sleep(2)
 
         # Check localStorage (accept both 'en' and 'en-US')
-        stored_lang = self.driver.execute_script("return localStorage.getItem('i18nextLng');")
-        assert stored_lang in ['en', 'en-US'], f"Expected 'en' or 'en-US' in localStorage, got '{stored_lang}'"
+        stored_lang = self.driver.execute_script(
+            "return localStorage.getItem('i18nextLng');"
+        )
+        assert stored_lang in [
+            "en",
+            "en-US",
+        ], f"Expected 'en' or 'en-US' in localStorage, got '{stored_lang}'"
 
         # Check i18n current language (accept both 'en' and None if i18n not available)
         current_lang = self.driver.execute_script("return window.i18n?.language;")
-        assert current_lang in ['en', None], f"Expected 'en' or None as current language, got '{current_lang}'"
+        assert current_lang in [
+            "en",
+            None,
+        ], f"Expected 'en' or None as current language, got '{current_lang}'"
 
     def test_no_hebrew_text_in_english_mode(self):
         """Test that main UI elements are in English (language names in dropdowns are OK)"""
@@ -112,9 +128,9 @@ class TestFrontendLanguages:
         # (excluding language names which are OK to be in native script)
         problematic_hebrew_words = [
             "זיהוי אוטומטי",  # Should be "Auto Detect"
-            "שגיאה בעיבוד",   # Should be "Processing Error"
-            "מתחיל עיבוד",    # Should be "Starting processing"
-            "שלב נוכחי",      # Should be "Current step"
+            "שגיאה בעיבוד",  # Should be "Processing Error"
+            "מתחיל עיבוד",  # Should be "Starting processing"
+            "שלב נוכחי",  # Should be "Current step"
         ]
 
         found_hebrew = []
@@ -123,7 +139,9 @@ class TestFrontendLanguages:
                 found_hebrew.append(word)
 
         # Language names like "עברית" are OK in language selector
-        assert len(found_hebrew) == 0, f"Found problematic Hebrew text in English mode: {found_hebrew}"
+        assert (
+            len(found_hebrew) == 0
+        ), f"Found problematic Hebrew text in English mode: {found_hebrew}"
 
     def test_english_ui_elements_present(self):
         """Test that English UI elements are present"""
@@ -133,8 +151,12 @@ class TestFrontendLanguages:
         page_text = self.driver.find_element(By.TAG_NAME, "body").text
 
         expected_english_texts = [
-            "File Upload", "Online Video", "Source Language",
-            "Target Language", "English", "Create video with burned-in subtitles"
+            "File Upload",
+            "Online Video",
+            "Source Language",
+            "Target Language",
+            "English",
+            "Create video with burned-in subtitles",
         ]
 
         missing_texts = []
@@ -150,13 +172,20 @@ class TestFrontendLanguages:
 
         try:
             # Look for language selector (might be a dropdown or button)
-            language_elements = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'English') or contains(text(), 'עברית') or contains(text(), 'Español')]")
+            language_elements = self.driver.find_elements(
+                By.XPATH,
+                "//*[contains(text(), 'English') or contains(text(), 'עברית') or contains(text(), 'Español')]",
+            )
 
             assert len(language_elements) > 0, "No language selector found"
 
             # Check that English is selected/visible
-            english_elements = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'English')]")
-            assert len(english_elements) > 0, "English option not found in language selector"
+            english_elements = self.driver.find_elements(
+                By.XPATH, "//*[contains(text(), 'English')]"
+            )
+            assert (
+                len(english_elements) > 0
+            ), "English option not found in language selector"
 
         except NoSuchElementException:
             pytest.fail("Language selector not found")
@@ -172,7 +201,9 @@ class TestFrontendLanguages:
             for dropdown in dropdowns:
                 options_text = dropdown.text
                 # Should not contain Hebrew
-                hebrew_chars = any(ord(char) > 0x590 and ord(char) < 0x5FF for char in options_text)
+                hebrew_chars = any(
+                    ord(char) > 0x590 and ord(char) < 0x5FF for char in options_text
+                )
                 assert not hebrew_chars, f"Found Hebrew in dropdown: {options_text}"
 
             # Check buttons
@@ -180,7 +211,9 @@ class TestFrontendLanguages:
             for button in buttons:
                 button_text = button.text.strip()
                 if button_text:  # Skip empty buttons
-                    hebrew_chars = any(ord(char) > 0x590 and ord(char) < 0x5FF for char in button_text)
+                    hebrew_chars = any(
+                        ord(char) > 0x590 and ord(char) < 0x5FF for char in button_text
+                    )
                     assert not hebrew_chars, f"Found Hebrew in button: {button_text}"
 
         except Exception as e:
@@ -204,8 +237,12 @@ class TestFrontendLanguages:
         """)
 
         if step_labels:
-            assert step_labels['audioProcessing'] == 'Audio Processing', f"Wrong audio processing label: {step_labels['audioProcessing']}"
-            assert step_labels['downloadVideo'] == 'Downloading Video', f"Wrong download video label: {step_labels['downloadVideo']}"
+            assert (
+                step_labels["audioProcessing"] == "Audio Processing"
+            ), f"Wrong audio processing label: {step_labels['audioProcessing']}"
+            assert (
+                step_labels["downloadVideo"] == "Downloading Video"
+            ), f"Wrong download video label: {step_labels['downloadVideo']}"
 
     def test_direction_is_ltr(self):
         """Test that page direction is LTR for English"""
@@ -215,26 +252,35 @@ class TestFrontendLanguages:
         body_dir = self.driver.find_element(By.TAG_NAME, "body").get_attribute("dir")
 
         # Should be LTR or empty (defaults to LTR)
-        assert html_dir in ['ltr', ''] or html_dir is None, f"HTML direction should be LTR, got: {html_dir}"
-        assert body_dir in ['ltr', ''] or body_dir is None, f"Body direction should be LTR, got: {body_dir}"
+        assert (
+            html_dir in ["ltr", ""] or html_dir is None
+        ), f"HTML direction should be LTR, got: {html_dir}"
+        assert (
+            body_dir in ["ltr", ""] or body_dir is None
+        ), f"Body direction should be LTR, got: {body_dir}"
 
     def test_console_errors(self):
         """Test that there are no console errors"""
         time.sleep(3)
 
-        logs = self.driver.get_log('browser')
+        logs = self.driver.get_log("browser")
 
         # Filter out minor warnings, focus on errors
         errors = [
-            log for log in logs
-            if log['level'] in ['SEVERE', 'ERROR']
-            and 'favicon' not in log['message'].lower()  # Ignore favicon errors
+            log
+            for log in logs
+            if log["level"] in ["SEVERE", "ERROR"]
+            and "favicon" not in log["message"].lower()  # Ignore favicon errors
         ]
 
-        assert len(errors) == 0, f"Console errors found: {[error['message'] for error in errors]}"
+        assert (
+            len(errors) == 0
+        ), f"Console errors found: {[error['message'] for error in errors]}"
 
-    @pytest.mark.parametrize("language", ['he', 'es', 'ar'])
-    @pytest.mark.skip(reason="Language switching tests are outdated - window.i18n not available in current implementation")
+    @pytest.mark.parametrize("language", ["he", "es", "ar"])
+    @pytest.mark.skip(
+        reason="Language switching tests are outdated - window.i18n not available in current implementation"
+    )
     def test_language_switching(self, language):
         """Test switching to different languages - SKIPPED: outdated test"""
         # This test is skipped because the current frontend implementation
@@ -243,5 +289,5 @@ class TestFrontendLanguages:
         pass
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v', '-s'])
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-s"])

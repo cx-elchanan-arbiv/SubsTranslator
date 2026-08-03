@@ -3,9 +3,10 @@ FFmpeg helper utilities for integration tests.
 
 Creates real (but tiny) video files for testing.
 """
-import subprocess
-import os
+
 import logging
+import os
+import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ def make_video(
     seconds: int = 1,
     audio: bool = False,
     width: int = 320,
-    height: int = 180
+    height: int = 180,
 ) -> bool:
     """
     Create a dummy video file using FFmpeg.
@@ -39,35 +40,32 @@ def make_video(
     try:
         # Base command for video
         cmd = [
-            'ffmpeg', '-y',  # Overwrite output
-            '-f', 'lavfi',
-            '-t', str(seconds),
-            '-i', f'color=c={color}:s={width}x{height}:r=25'
+            "ffmpeg",
+            "-y",  # Overwrite output
+            "-f",
+            "lavfi",
+            "-t",
+            str(seconds),
+            "-i",
+            f"color=c={color}:s={width}x{height}:r=25",
         ]
 
         # Add audio if requested
         if audio:
             cmd += [
-                '-f', 'lavfi',
-                '-t', str(seconds),
-                '-i', 'anullsrc=r=48000:cl=stereo',
-                '-shortest'
+                "-f",
+                "lavfi",
+                "-t",
+                str(seconds),
+                "-i",
+                "anullsrc=r=48000:cl=stereo",
+                "-shortest",
             ]
 
         # Output settings - ultrafast for speed
-        cmd += [
-            '-c:v', 'libx264',
-            '-preset', 'ultrafast',
-            '-crf', '35',
-            path
-        ]
+        cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "35", path]
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
         if result.returncode != 0:
             logger.error(f"FFmpeg failed: {result.stderr}")
@@ -106,7 +104,7 @@ def make_srt_file(path: str, num_subtitles: int = 3) -> bool:
         True
     """
     try:
-        with open(path, 'w', encoding='utf-8') as f:
+        with open(path, "w", encoding="utf-8") as f:
             for i in range(1, num_subtitles + 1):
                 start_sec = (i - 1) * 2
                 end_sec = i * 2
@@ -141,19 +139,18 @@ def make_logo_image(path: str, width: int = 100, height: int = 50) -> bool:
     """
     try:
         cmd = [
-            'ffmpeg', '-y',
-            '-f', 'lavfi',
-            '-i', f'color=c=red:s={width}x{height}:d=1',
-            '-frames:v', '1',
-            path
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=red:s={width}x{height}:d=1",
+            "-frames:v",
+            "1",
+            path,
         ]
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
         if result.returncode != 0:
             logger.error(f"FFmpeg failed: {result.stderr}")
