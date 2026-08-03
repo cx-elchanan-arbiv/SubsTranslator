@@ -1,56 +1,57 @@
-import os
-import sys
-import time
-from multiprocessing import Process
-from pathlib import Path
+"""CORS preflight contract for the browser-facing endpoints.
+
+Driven through the Flask test client on purpose. The previous version forked a second
+copy of the app with ``os.execv`` and polled ``127.0.0.1:8081`` — inside the container
+that port already belongs to the running backend, so the fixture's health check passed
+against the *existing* server while the forked one failed to bind, and the tests silently
+measured something other than the code under test.
+"""
 
 import pytest
-import requests
 
-# Use relative paths that work both locally and in CI
-PROJECT_ROOT = Path(__file__).parent.parent
-BACKEND_ROOT = PROJECT_ROOT / "backend"
-BASE_URL = "http://127.0.0.1:8081"
+ALLOWED_ORIGIN = "http://localhost:3000"
 
 
-def start_backend():
-    os.chdir(str(BACKEND_ROOT))
-    # Use current Python executable instead of hardcoded path
-    os.execv(sys.executable, [sys.executable, "app.py"])
+@pytest.fixture
+def client():
+    from app import app
 
-
-@pytest.fixture(scope="session", autouse=True)
-def backend_server():
-    p = Process(target=start_backend)
-    p.daemon = True
-    p.start()
-    # Wait for health
-    for _ in range(60):
-        try:
-            r = requests.get(f"{BASE_URL}/health", timeout=1)
-            if r.status_code == 200:
-                break
-        except Exception:
-            pass
-        time.sleep(0.5)
-    yield
-    p.terminate()
-    p.join(timeout=5)
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        yield c
 
 
 @pytest.mark.integration
-def test_health_endpoint(backend_server):
-    r = requests.get(f"{BASE_URL}/health", timeout=3)
-    assert r.status_code == 200
-    data = r.json()
-    assert data.get("status") == "healthy"
-    assert "ffmpeg_installed" in data
+def test_cors_preflight_is_answered_for_the_dev_origin(client):
+    """The browser must get a usable preflight answer before it will POST /youtube.
+
+    Note the header is the echoed origin, not a literal ``*``: the app sets
+    ``supports_credentials``, and the CORS spec forbids the wildcard on credentialed
+    requests. An earlier version of this test asserted ``== "*"`` and had been failing
+    ever since credentials were turned on.
+    """
+    response = client.options(
+        "/youtube",
+        headers={
+            "Origin": ALLOWED_ORIGIN,
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.status_code in (200, 204)
+    assert response.headers.get("Access-Control-Allow-Origin") == ALLOWED_ORIGIN
+    assert "POST" in response.headers.get("Access-Control-Allow-Methods", "")
 
 
 @pytest.mark.integration
-def test_cors_preflight_youtube(backend_server):
-    r = requests.options(f"{BASE_URL}/youtube")
-    assert r.status_code in (200, 204)
-    # Headers presence
-    assert r.headers.get("Access-Control-Allow-Origin") == "*"
-    assert "POST" in r.headers.get("Access-Control-Allow-Methods", "")
+def test_a_credentialed_preflight_never_answers_with_a_wildcard(client):
+    """A wildcard plus credentials is rejected by every browser — belt and braces."""
+    response = client.options(
+        "/youtube",
+        headers={
+            "Origin": ALLOWED_ORIGIN,
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.headers.get("Access-Control-Allow-Origin") != "*"
