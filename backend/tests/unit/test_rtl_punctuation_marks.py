@@ -13,6 +13,7 @@ a phoneme (ג׳ = j) or mark an acronym (צה״ל, מפכ״ל, התנ״ך).
     ``build_ass`` has always applied, so the burned-in picture read התנ״ך while the .srt
     shipped beside it read התנ"ך with an ASCII quote.
 """
+
 import os
 import sys
 
@@ -95,7 +96,12 @@ class TestSrtCarriesHebrewTypography:
 
     def test_the_translated_track_gets_it_too(self, tmp_path):
         segments = [
-            {"start": 0.0, "end": 2.0, "text": "The Bible.", "translated_text": 'התנ"ך.'}
+            {
+                "start": 0.0,
+                "end": 2.0,
+                "text": "The Bible.",
+                "translated_text": 'התנ"ך.',
+            }
         ]
         body = self._write(tmp_path, segments, use_translation=True, language="he")
         assert f"התנ{GERSHAYIM}ך" in body
@@ -114,9 +120,13 @@ class TestSrtCarriesHebrewTypography:
         """The point of the fix, stated as an equality."""
         from services.subtitle_engine import build_ass
 
-        text = 'צה"ל וג\'ורג\'.'
+        text = "צה\"ל וג'ורג'."
         srt = self._write(tmp_path, [{"start": 0.0, "end": 2.0, "text": text}])
-        ass = build_ass([{"start": 0.0, "end": 2.0, "text": text}],
-                        video_w=1280, video_h=720, rtl=False)
+        ass = build_ass(
+            [{"start": 0.0, "end": 2.0, "text": text}],
+            video_w=1280,
+            video_h=720,
+            rtl=False,
+        )
         for mark in (GERSHAYIM, GERESH):
             assert (mark in srt) == (mark in ass) is True

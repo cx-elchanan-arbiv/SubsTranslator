@@ -2,6 +2,7 @@
 Download tasks for SubsTranslator
 Handles YouTube video downloads and related processing
 """
+
 import os
 import shutil
 import time
@@ -11,16 +12,16 @@ import yt_dlp
 from celery_worker import celery_app
 from config import get_config
 from logging_config import get_logger
+from services.subtitle_pipeline import resolve_flags
+from services.video_processing_service import verify_and_convert_video_format
 from services.youtube_service import (
     download_youtube_video,
     download_youtube_video_with_progress,
 )
-from services.subtitle_pipeline import resolve_flags
-from services.video_processing_service import verify_and_convert_video_format
 from utils.file_utils import clean_filename
 
-from .progress_manager import ProgressManager
 from .processing_tasks import process_video_task
+from .progress_manager import ProgressManager
 
 # Configuration
 config = get_config()
@@ -154,7 +155,9 @@ def download_and_process_youtube_task(
                 progress_manager.log("Starting download...", step_index=0)
 
         except Exception as e:
-            progress_manager.log(f"Could not extract early info: {str(e)}", step_index=0)
+            progress_manager.log(
+                f"Could not extract early info: {str(e)}", step_index=0
+            )
             video_metadata = None
 
         download_start_time = time.time()
@@ -167,20 +170,28 @@ def download_and_process_youtube_task(
 
         # Log time range if provided
         if start_time and end_time:
-            progress_manager.log(f"Requested time range: {start_time} - {end_time}", step_index=0)
+            progress_manager.log(
+                f"Requested time range: {start_time} - {end_time}", step_index=0
+            )
 
         # Now do the actual download
         if video_metadata:
             # If we have metadata, just download without re-extracting
             video_path, _ = download_youtube_video(
-                url, "high", progress_callback=download_progress_callback,
-                start_time=start_time, end_time=end_time
+                url,
+                "high",
+                progress_callback=download_progress_callback,
+                start_time=start_time,
+                end_time=end_time,
             )
         else:
             # Fallback: download and extract metadata together
             video_path, video_metadata = download_youtube_video(
-                url, "high", progress_callback=download_progress_callback,
-                start_time=start_time, end_time=end_time
+                url,
+                "high",
+                progress_callback=download_progress_callback,
+                start_time=start_time,
+                end_time=end_time,
             )
         download_time = f"{time.time() - download_start_time:.1f}"
         progress_manager.log("Finalizing download...", step_index=0)
@@ -200,7 +211,11 @@ def download_and_process_youtube_task(
                 "url": url,
                 "translation_service": translation_service,
                 **subtitle_flags,
-                **({"start_time": start_time, "end_time": end_time} if start_time and end_time else {}),
+                **(
+                    {"start_time": start_time, "end_time": end_time}
+                    if start_time and end_time
+                    else {}
+                ),
             },
         }
 
@@ -415,7 +430,9 @@ def download_highest_quality_video_task(self, url):
 
 
 @celery_app.task(bind=True, name="download_youtube_only_task")
-def download_youtube_only_task(self, url, quality="high", start_time=None, end_time=None):
+def download_youtube_only_task(
+    self, url, quality="high", start_time=None, end_time=None
+):
     """
     Enterprise-grade YouTube video download with robust error handling.
 
@@ -548,7 +565,9 @@ def download_youtube_only_task(self, url, quality="high", start_time=None, end_t
                     os.chmod(os.path.dirname(downloads_path), 0o755)
                     shutil.copy2(video_path, downloads_path)
                 except Exception as retry_error:
-                    raise Exception(f"Failed to copy video after permission fix: {retry_error}")
+                    raise Exception(
+                        f"Failed to copy video after permission fix: {retry_error}"
+                    )
         else:
             # File is already in downloads folder, no need to copy
             pass
@@ -575,27 +594,29 @@ def download_youtube_only_task(self, url, quality="high", start_time=None, end_t
 
         # Provide specific error messages for common issues
         # Check for bot detection first (most specific)
-        if ("Sign in to confirm" in error_str and "bot" in error_str.lower()) or "bot detection blocked" in error_str.lower():
+        if (
+            "Sign in to confirm" in error_str and "bot" in error_str.lower()
+        ) or "bot detection blocked" in error_str.lower():
             user_message = "YouTube is blocking downloads from our server. Please download the video to your computer and upload it as a file."
             error_code = "YOUTUBE_BOT_DETECTION"
         elif "403" in error_str and "Forbidden" in error_str:
-            user_message = (
-                "YouTube has blocked this video. Please try with a different video or try again later."
-            )
+            user_message = "YouTube has blocked this video. Please try with a different video or try again later."
             error_code = "YOUTUBE_ACCESS_BLOCKED"
         elif "404" in error_str or "Video unavailable" in error_str:
-            user_message = "Video not found or unavailable. Please check the link and try again."
+            user_message = (
+                "Video not found or unavailable. Please check the link and try again."
+            )
             error_code = "VIDEO_NOT_FOUND"
         elif "Private video" in error_str or "private" in error_str.lower():
             user_message = "The video is private and cannot be downloaded."
             error_code = "PRIVATE_VIDEO"
-        elif "age" in error_str.lower() or ("restricted" in error_str.lower() and "age" not in error_str.lower()):
+        elif "age" in error_str.lower() or (
+            "restricted" in error_str.lower() and "age" not in error_str.lower()
+        ):
             user_message = "The video is age-restricted and cannot be downloaded without signing in."
             error_code = "AGE_RESTRICTED"
         else:
-            user_message = (
-                "An error occurred during download. Please try with a different video or try again later."
-            )
+            user_message = "An error occurred during download. Please try with a different video or try again later."
             error_code = "DOWNLOAD_ERROR"
 
         return state_manager.fail_task(

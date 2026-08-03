@@ -46,6 +46,7 @@ FFmpeg 7.1.5 / libass 0.17.3 — see ``tests/integration/test_bidi_render.py``)
 Every capability is an independent keyword toggle so the API/UI layer can expose
 them one by one; nothing here reads config or touches the filesystem.
 """
+
 from __future__ import annotations
 
 import logging
@@ -247,9 +248,9 @@ _GERESH_RE = re.compile(f"(?<=[{_GERESH_LETTERS}])['’]")
 # Unicode bidirectional categories, used by the bidi pass below instead of a
 # hand-maintained character class (which is exactly what got this wrong before:
 # a literal class that forgot "%" renders "50%" as "%50").
-_BIDI_STRONG_RTL = frozenset({"R", "AL"})          # Hebrew, Arabic, Thaana, ...
-_BIDI_LTR_ANCHOR = frozenset({"L", "EN", "AN"})    # Latin letters and digits
-_BIDI_NUMERIC_TERMINATOR = "ET"                    # $ € ₪ % ‰ ° ...
+_BIDI_STRONG_RTL = frozenset({"R", "AL"})  # Hebrew, Arabic, Thaana, ...
+_BIDI_LTR_ANCHOR = frozenset({"L", "EN", "AN"})  # Latin letters and digits
+_BIDI_NUMERIC_TERMINATOR = "ET"  # $ € ₪ % ‰ ° ...
 
 # Break-preference bonuses used when choosing where to split two lines.
 _BONUS_SENTENCE_BREAK = 30
@@ -393,7 +394,9 @@ def layout_params(
     """
     width = max(1, int(video_w or 0))
     height = max(1, int(video_h or 0))
-    glyph_ratio = float(glyph_ratio) if glyph_ratio and glyph_ratio > 0 else GLYPH_WIDTH_RATIO
+    glyph_ratio = (
+        float(glyph_ratio) if glyph_ratio and glyph_ratio > 0 else GLYPH_WIDTH_RATIO
+    )
     max_line_chars = max(1, int(max_line_chars))
     max_lines = max(1, int(max_lines))
 
@@ -738,7 +741,9 @@ def words_to_cues(
     max_chars = max(1, int(max_line) * int(max_lines))
     # A silence long enough to be a speaker TURN cannot also be short enough to merge
     # across. Without this the two rules contradict each other and the merge wins.
-    merge_gap = min(MERGE_MAX_GAP, turn_gap) if turn_gap and turn_gap > 0 else MERGE_MAX_GAP
+    merge_gap = (
+        min(MERGE_MAX_GAP, turn_gap) if turn_gap and turn_gap > 0 else MERGE_MAX_GAP
+    )
 
     # Fallback for unpunctuated ASR output (the known large-v3 failure mode):
     # with NO terminal punctuation at all there are no sentences to find, so
@@ -959,7 +964,9 @@ def words_to_cues(
 def _normalized_text(text: str) -> str:
     """Case- and punctuation-insensitive form, for comparing two cues' wording."""
     return " ".join(
-        "".join(ch for ch in str(text or "").lower() if ch.isalnum() or ch.isspace()).split()
+        "".join(
+            ch for ch in str(text or "").lower() if ch.isalnum() or ch.isspace()
+        ).split()
     )
 
 
@@ -1116,8 +1123,8 @@ def drop_hallucinated_cues(
         record["energy_db"] = energy_db
         record["context_only"] = "duplicate_of_previous" not in hard
         record["drop_reason"] = (
-            ("hard signal: " if hard else "corroborated signals: ") + ", ".join(hard + soft)
-        )
+            "hard signal: " if hard else "corroborated signals: "
+        ) + ", ".join(hard + soft)
         dropped.append(record)
         logger.warning(
             "hallucination gate: dropping cue at %.2f-%.2fs (%d chars in %.2fs, %.1f "
@@ -1359,7 +1366,7 @@ def reflow_dangling_connectors(
         if gap > max_gap:
             continue
 
-        token = text[match.start(1):]  # the letter plus an optional trailing "-"
+        token = text[match.start(1) :]  # the letter plus an optional trailing "-"
         remainder = text[: match.start(1)].rstrip()
         if not remainder:
             continue  # the whole cue is the connector; moving it would empty the cue
@@ -1475,7 +1482,7 @@ def _ltr_runs(line: str) -> list[tuple[int, int]]:
 
     runs: list[list[int]] = [[anchors[0], anchors[0]]]
     for index in anchors[1:]:
-        between = cats[runs[-1][1] + 1: index]
+        between = cats[runs[-1][1] + 1 : index]
         if any(cat in _BIDI_STRONG_RTL for cat in between):
             runs.append([index, index])  # an RTL word closes the run
         else:
@@ -1620,7 +1627,9 @@ def build_ass(
 
     events: list[str] = []
     for cue in cues or []:
-        lines = wrap_two_lines(hebrew_typography(_ass_safe(cue.get("text", ""))), max_line)
+        lines = wrap_two_lines(
+            hebrew_typography(_ass_safe(cue.get("text", ""))), max_line
+        )
         if rtl:
             lines = [bidi_isolate(line) for line in lines]
         body = "\\N".join(lines)

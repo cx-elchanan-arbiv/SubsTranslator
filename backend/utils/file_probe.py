@@ -7,7 +7,8 @@ Extracts metadata from local video/audio files for unified UX display.
 import json
 import os
 import subprocess
-from typing import Dict, Optional, Any
+from typing import Any
+
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -15,16 +16,19 @@ logger = get_logger(__name__)
 
 class FileProbeError(Exception):
     """Base exception for file probing errors"""
+
     pass
 
 
 class UnsupportedMediaError(FileProbeError):
     """Raised when file is not a supported media format"""
+
     pass
 
 
 class ProbeFailedError(FileProbeError):
     """Raised when ffprobe fails to extract metadata"""
+
     pass
 
 
@@ -48,7 +52,7 @@ def format_duration_string(duration_seconds: float) -> str:
         return f"{minutes}:{seconds:02d}"
 
 
-def extract_file_metadata(file_path: str) -> Dict[str, Any]:
+def extract_file_metadata(file_path: str) -> dict[str, Any]:
     """
     Extract metadata from a local media file using ffprobe.
 
@@ -95,32 +99,32 @@ def extract_file_metadata(file_path: str) -> Dict[str, Any]:
     # Build ffprobe command
     cmd = [
         "ffprobe",
-        "-v", "quiet",
-        "-print_format", "json",
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
         "-show_format",
         "-show_streams",
-        file_path
+        file_path,
     ]
 
     try:
         logger.debug(f"Running ffprobe on: {filename}")
         result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30
+            cmd, capture_output=True, text=True, check=True, timeout=30
         )
 
         probe_data = json.loads(result.stdout)
 
     except subprocess.TimeoutExpired:
         logger.error(f"ffprobe timeout for file: {filename}")
-        raise ProbeFailedError(f"File analysis timed out (30s)")
+        raise ProbeFailedError("File analysis timed out (30s)")
 
     except subprocess.CalledProcessError as e:
         logger.error(f"ffprobe failed for {filename}: {e.stderr}")
-        raise UnsupportedMediaError(f"File is not a valid media file or format is not supported")
+        raise UnsupportedMediaError(
+            "File is not a valid media file or format is not supported"
+        )
 
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse ffprobe output: {e}")
@@ -208,7 +212,7 @@ def extract_file_metadata(file_path: str) -> Dict[str, Any]:
     return metadata
 
 
-def probe_file_safe(file_path: str) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+def probe_file_safe(file_path: str) -> tuple[dict[str, Any] | None, str | None]:
     """
     Safe wrapper around extract_file_metadata that returns (metadata, error_code).
 

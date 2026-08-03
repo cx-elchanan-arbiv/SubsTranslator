@@ -10,14 +10,15 @@ import shutil
 import subprocess
 import time  # Phase A: Added for performance monitoring
 from collections.abc import Callable
-from typing import Optional, Union
 
 import numpy as np
 
 from config import get_config
 from core.exceptions import FFmpegProcessError, FFmpegTimeoutError, FileNotFoundError
 from logging_config import get_logger, log_external_service_call
-from performance_monitor import performance_monitor  # Phase A: Import performance monitoring
+from performance_monitor import (  # Phase A: Import performance monitoring
+    performance_monitor,
+)
 from services.subtitle_engine import build_ass, hebrew_typography, layout_params
 from utils.rtl_utils import add_rtl_markers, clean_rtl_text, is_rtl_language
 
@@ -292,7 +293,7 @@ class SubtitleService:
         srt_path: str,
         output_path: str,
         target_language: str = "en",
-        progress_callback: Optional[Callable[[int], None]] = None,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> bool:
         """Create video with burned-in subtitles, reporting progress.
 
@@ -424,7 +425,7 @@ class SubtitleService:
             if config.DEBUG:
                 self.logger.debug(
                     "Running FFmpeg subtitle embedding",
-                    operation="ffmpeg_subtitle_start", 
+                    operation="ffmpeg_subtitle_start",
                     command=" ".join(cmd[:5]) + "...",  # Only show first few args
                 )
             else:
@@ -438,7 +439,7 @@ class SubtitleService:
 
             # Phase A: Enhanced FFmpeg performance monitoring
             ffmpeg_start_time = time.time()
-            
+
             # Execute FFmpeg with progress tracking
             if progress_callback:
                 success = self._run_ffmpeg_with_progress(
@@ -446,21 +447,35 @@ class SubtitleService:
                 )
             else:
                 success = self._run_ffmpeg_simple(cmd)
-                
+
             ffmpeg_duration = time.time() - ffmpeg_start_time
-            
+
             # Phase A: Log FFmpeg performance
             try:
                 # Get video duration for performance calculation
-                probe_cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", video_path]
-                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, check=True, timeout=10)
+                probe_cmd = [
+                    "ffprobe",
+                    "-v",
+                    "quiet",
+                    "-print_format",
+                    "json",
+                    "-show_format",
+                    video_path,
+                ]
+                probe_result = subprocess.run(
+                    probe_cmd, capture_output=True, text=True, check=True, timeout=10
+                )
                 probe_data = json.loads(probe_result.stdout)
                 video_duration = float(probe_data.get("format", {}).get("duration", 0))
-                
-                performance_monitor.log_ffmpeg_performance(video_duration, ffmpeg_duration, "subtitle_embedding")
+
+                performance_monitor.log_ffmpeg_performance(
+                    video_duration, ffmpeg_duration, "subtitle_embedding"
+                )
             except:
                 # Fallback if we can't get duration
-                self.logger.info(f"📊 Phase A: FFmpeg subtitle embedding took {ffmpeg_duration:.1f}s")
+                self.logger.info(
+                    f"📊 Phase A: FFmpeg subtitle embedding took {ffmpeg_duration:.1f}s"
+                )
 
             # Cleanup temporary file
             if os.path.exists(clean_srt_path):
@@ -606,12 +621,12 @@ class SubtitleService:
         watermark_position: tuple = ("right", "bottom"),
         watermark_opacity: float = 0.4,
         watermark_size_height: int = 80,
-        progress_callback: Optional[Callable[[int], None]] = None,
+        progress_callback: Callable[[int], None] | None = None,
     ) -> bool:
         """Create video with both subtitles and watermark in a single FFmpeg pass.
-        
+
         This is more efficient than running two separate FFmpeg operations.
-        
+
         Args:
             video_path: Path to input video file
             srt_path: Path to SRT subtitle file
@@ -622,7 +637,7 @@ class SubtitleService:
             watermark_opacity: Watermark opacity (0.0 to 1.0)
             watermark_size_height: Watermark height in pixels
             progress_callback: Optional callback for progress updates
-            
+
         Returns:
             True if successful, False otherwise
         """
@@ -646,9 +661,7 @@ class SubtitleService:
             if self.config.USE_FAKE_YTDLP:
                 try:
                     shutil.copy2(video_path, output_path)
-                    self.logger.info(
-                        "FAKE mode: copied video without processing"
-                    )
+                    self.logger.info("FAKE mode: copied video without processing")
                     return True
                 except Exception as e:
                     self.logger.error("FAKE video creation failed", error=str(e))
@@ -656,7 +669,7 @@ class SubtitleService:
 
             if not os.path.exists(srt_path):
                 raise FileNotFoundError(srt_path)
-                
+
             # Same guard as create_video_with_ass: a missing logo must degrade to a
             # subtitles-only render, never fail the whole job in FFmpeg. `not
             # watermark_path` is part of the check because os.path.exists(None)
@@ -667,7 +680,11 @@ class SubtitleService:
                     watermark_path=watermark_path,
                 )
                 return self.create_video_with_subtitles(
-                    video_path, srt_path, output_path, target_language, progress_callback
+                    video_path,
+                    srt_path,
+                    output_path,
+                    target_language,
+                    progress_callback,
                 )
 
             # Process SRT file for RTL languages (same as in create_video_with_subtitles)
@@ -746,14 +763,14 @@ class SubtitleService:
             # Build combined filter complex
             escaped_srt = _ffmpeg_escape_filter_arg(clean_srt_path)
             escaped_style = _ffmpeg_escape_filter_arg(subtitle_style)
-            
+
             # Combined filter: first apply subtitles, then overlay watermark
             filter_complex = (
                 f"[0:v]subtitles='{escaped_srt}':force_style='{escaped_style}':charenc=UTF-8[v1];"
                 f"[1:v]scale=-1:{watermark_size_height},format=rgba,colorchannelmixer=aa={watermark_opacity}[logo];"
                 f"[v1][logo]overlay={pos_str}[vout]"
             )
-            
+
             cmd = [
                 "ffmpeg",
                 "-i",
@@ -762,14 +779,20 @@ class SubtitleService:
                 watermark_path,
                 "-filter_complex",
                 filter_complex,
-                "-map", "[vout]",
-                "-map", "0:a",
-                "-c:a", "copy",
-                "-preset", "fast",
+                "-map",
+                "[vout]",
+                "-map",
+                "0:a",
+                "-c:a",
+                "copy",
+                "-preset",
+                "fast",
                 # Parity with create_video_with_ass: moov atom up front.
-                "-movflags", "+faststart",
+                "-movflags",
+                "+faststart",
                 "-y",
-                "-progress", "pipe:2",
+                "-progress",
+                "pipe:2",
                 output_path,
             ]
 
@@ -788,7 +811,7 @@ class SubtitleService:
 
             # Phase A: Enhanced FFmpeg performance monitoring
             ffmpeg_start_time = time.time()
-            
+
             # Execute FFmpeg with progress tracking
             if progress_callback:
                 success = self._run_ffmpeg_with_progress(
@@ -796,21 +819,35 @@ class SubtitleService:
                 )
             else:
                 success = self._run_ffmpeg_simple(cmd)
-                
+
             ffmpeg_duration = time.time() - ffmpeg_start_time
-            
+
             # Phase A: Log FFmpeg performance
             try:
                 # Get video duration for performance calculation
-                probe_cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", video_path]
-                probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, check=True, timeout=10)
+                probe_cmd = [
+                    "ffprobe",
+                    "-v",
+                    "quiet",
+                    "-print_format",
+                    "json",
+                    "-show_format",
+                    video_path,
+                ]
+                probe_result = subprocess.run(
+                    probe_cmd, capture_output=True, text=True, check=True, timeout=10
+                )
                 probe_data = json.loads(probe_result.stdout)
                 video_duration = float(probe_data.get("format", {}).get("duration", 0))
-                
-                performance_monitor.log_ffmpeg_performance(video_duration, ffmpeg_duration, "combined_subtitle_watermark")
+
+                performance_monitor.log_ffmpeg_performance(
+                    video_duration, ffmpeg_duration, "combined_subtitle_watermark"
+                )
             except:
                 # Fallback if we can't get duration
-                self.logger.info(f"📊 Phase A: FFmpeg combined processing took {ffmpeg_duration:.1f}s")
+                self.logger.info(
+                    f"📊 Phase A: FFmpeg combined processing took {ffmpeg_duration:.1f}s"
+                )
 
             # Cleanup temporary file
             if os.path.exists(clean_srt_path):
@@ -844,7 +881,9 @@ class SubtitleService:
             self._cleanup_temp_file(srt_path)
             return False
         except Exception as e:
-            self.logger.error("Unexpected error in combined video creation", error=str(e))
+            self.logger.error(
+                "Unexpected error in combined video creation", error=str(e)
+            )
             self._cleanup_temp_file(srt_path)
             return False
 
@@ -866,8 +905,15 @@ class SubtitleService:
         """
         try:
             probe_cmd = [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_streams", "-select_streams", "v:0", video_path,
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_streams",
+                "-select_streams",
+                "v:0",
+                video_path,
             ]
             probe_result = subprocess.run(
                 probe_cmd,
@@ -885,7 +931,8 @@ class SubtitleService:
         except Exception as e:  # ffprobe missing, timeout, odd container, ...
             self.logger.warning("Could not probe video dimensions", error=str(e))
         self.logger.warning(
-            "Falling back to 1920x1080 for ASS sizing", video_path=os.path.basename(video_path)
+            "Falling back to 1920x1080 for ASS sizing",
+            video_path=os.path.basename(video_path),
         )
         return 1920, 1080
 
@@ -898,8 +945,14 @@ class SubtitleService:
         try:
             result = subprocess.run(
                 [
-                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                    "-of", "default=nw=1:nk=1", video_path,
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=nw=1:nk=1",
+                    video_path,
                 ],
                 capture_output=True,
                 text=True,
@@ -921,10 +974,20 @@ class SubtitleService:
         detector simply does not get a vote from, never an exception into the render path.
         """
         cmd = [
-            "ffmpeg", "-v", "error", "-ss", f"{at:.3f}", "-i", video_path,
-            "-frames:v", "1",
-            "-vf", f"crop={width}:{height}:{x}:{y},format=gray",
-            "-f", "rawvideo", "-",
+            "ffmpeg",
+            "-v",
+            "error",
+            "-ss",
+            f"{at:.3f}",
+            "-i",
+            video_path,
+            "-frames:v",
+            "1",
+            "-vf",
+            f"crop={width}:{height}:{x}:{y},format=gray",
+            "-f",
+            "rawvideo",
+            "-",
         ]
         try:
             result = subprocess.run(cmd, capture_output=True, timeout=15)
@@ -962,8 +1025,16 @@ class SubtitleService:
         subtitle = frame[:split] if split > 1 else None
         bottom = frame[split:] if frame.shape[0] - split > 1 else None
         return (
-            round(_edge_density(subtitle), 4) if subtitle is not None and subtitle.size else None,
-            round(_edge_density(bottom), 4) if bottom is not None and bottom.size else None,
+            (
+                round(_edge_density(subtitle), 4)
+                if subtitle is not None and subtitle.size
+                else None
+            ),
+            (
+                round(_edge_density(bottom), 4)
+                if bottom is not None and bottom.size
+                else None
+            ),
         )
 
     @staticmethod
@@ -1085,7 +1156,13 @@ class SubtitleService:
             band_w = min(max(1, width - 2 * x), max(1, width - x))
             box_h = min(max(1, bottom - top), max(1, height - top))
             total_h = min(max(1, height - top), height - top)
-            geometry = {"x": x, "top": top, "w": band_w, "box_h": box_h, "total_h": total_h}
+            geometry = {
+                "x": x,
+                "top": top,
+                "w": band_w,
+                "box_h": box_h,
+                "total_h": total_h,
+            }
             decision["band"] = {"x": x, "y": top, "w": band_w, "h": box_h}
             decision["bands"] = {
                 "subtitle": {"x": x, "y": top, "w": band_w, "h": box_h},
@@ -1164,11 +1241,11 @@ class SubtitleService:
         output_path: str,
         target_language: str = "en",
         use_translation: bool = True,
-        watermark_path: Optional[str] = None,
+        watermark_path: str | None = None,
         watermark_position: tuple = ("right", "bottom"),
         watermark_opacity: float = 0.4,
         watermark_size_height: int = 80,
-        progress_callback: Optional[Callable[[int], None]] = None,
+        progress_callback: Callable[[int], None] | None = None,
         layout: "dict | None" = None,
         recorder=None,
         detect_lower_third: bool = True,
@@ -1236,14 +1313,20 @@ class SubtitleService:
 
             render_cues = []
             for cue in cues or []:
-                text = cue.get("translated_text") if use_translation else cue.get("text")
+                text = (
+                    cue.get("translated_text") if use_translation else cue.get("text")
+                )
                 if not text:
                     text = cue.get("text") or ""
                 text = str(text).replace("\n", " ").replace("\r", " ").strip()
                 if not text:
                     continue
                 render_cues.append(
-                    {"start": cue.get("start", 0), "end": cue.get("end", 0), "text": text}
+                    {
+                        "start": cue.get("start", 0),
+                        "end": cue.get("end", 0),
+                        "text": text,
+                    }
                 )
 
             if not render_cues:
@@ -1301,7 +1384,9 @@ class SubtitleService:
             # still recognised as RTL (utils.rtl_utils.is_rtl_language demands an exact
             # code and would answer False for it).
             rtl_languages = ("he", "ar", "fa", "ur", "yi")
-            is_rtl = any((target_language or "").startswith(lang) for lang in rtl_languages)
+            is_rtl = any(
+                (target_language or "").startswith(lang) for lang in rtl_languages
+            )
             ass_content = build_ass(
                 render_cues, video_w=video_w, video_h=video_h, rtl=is_rtl, layout=layout
             )
@@ -1327,12 +1412,18 @@ class SubtitleService:
             # Explicit encoder args: the ass filter re-encodes video, and the defaults
             # differ from the legacy path's. faststart keeps the moov atom up front.
             encode_args = [
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "20",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                "-c:a", "copy",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-c:a",
+                "copy",
             ]
 
             if watermark_path and os.path.exists(watermark_path):
@@ -1354,14 +1445,20 @@ class SubtitleService:
                 )
                 cmd = [
                     "ffmpeg",
-                    "-i", video_path,
-                    "-i", watermark_path,
-                    "-filter_complex", filter_complex,
-                    "-map", "[vout]",
-                    "-map", "0:a",
+                    "-i",
+                    video_path,
+                    "-i",
+                    watermark_path,
+                    "-filter_complex",
+                    filter_complex,
+                    "-map",
+                    "[vout]",
+                    "-map",
+                    "0:a",
                     *encode_args,
                     "-y",
-                    "-progress", "pipe:2",
+                    "-progress",
+                    "pipe:2",
                     output_path,
                 ]
             else:
@@ -1372,11 +1469,14 @@ class SubtitleService:
                     )
                 cmd = [
                     "ffmpeg",
-                    "-i", video_path,
-                    "-vf", ass_filter,
+                    "-i",
+                    video_path,
+                    "-vf",
+                    ass_filter,
                     *encode_args,
                     "-y",
-                    "-progress", "pipe:2",
+                    "-progress",
+                    "pipe:2",
                     output_path,
                 ]
 
@@ -1389,15 +1489,22 @@ class SubtitleService:
 
             ffmpeg_start_time = time.time()
             if progress_callback:
-                success = self._run_ffmpeg_with_progress(cmd, video_path, progress_callback)
+                success = self._run_ffmpeg_with_progress(
+                    cmd, video_path, progress_callback
+                )
             else:
                 success = self._run_ffmpeg_simple(cmd)
             ffmpeg_duration = time.time() - ffmpeg_start_time
 
             try:
                 probe_cmd = [
-                    "ffprobe", "-v", "quiet", "-print_format", "json",
-                    "-show_format", video_path,
+                    "ffprobe",
+                    "-v",
+                    "quiet",
+                    "-print_format",
+                    "json",
+                    "-show_format",
+                    video_path,
                 ]
                 probe_result = subprocess.run(
                     probe_cmd, capture_output=True, text=True, check=True, timeout=10
@@ -1411,7 +1518,11 @@ class SubtitleService:
             except Exception:
                 self.logger.info(f"📊 FFmpeg ASS embedding took {ffmpeg_duration:.1f}s")
 
-            if success and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            if (
+                success
+                and os.path.exists(output_path)
+                and os.path.getsize(output_path) > 0
+            ):
                 self.logger.info(
                     "Video with ASS subtitles created successfully",
                     operation="ass_embedding_complete",
@@ -1445,7 +1556,7 @@ class SubtitleService:
         position: tuple = ("right", "bottom"),
         opacity: float = 0.4,
         size_height: int = 80,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Add watermark/logo to video using FFmpeg.
 
         Args:
@@ -1554,6 +1665,8 @@ fix_rtl_text_for_subtitles = subtitle_service.fix_rtl_text_for_subtitles
 # Backward compatibility
 fix_hebrew_text_for_subtitles = subtitle_service.fix_rtl_text_for_subtitles
 create_video_with_subtitles = subtitle_service.create_video_with_subtitles
-create_video_with_subtitles_and_watermark = subtitle_service.create_video_with_subtitles_and_watermark
+create_video_with_subtitles_and_watermark = (
+    subtitle_service.create_video_with_subtitles_and_watermark
+)
 create_video_with_ass = subtitle_service.create_video_with_ass
 add_watermark_to_video = subtitle_service.add_watermark_to_video

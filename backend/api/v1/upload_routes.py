@@ -2,17 +2,19 @@
 Upload routes for SubsTranslator API v1.
 Handles file upload and processing initiation.
 """
+
 import os
 
 from flask import Blueprint, jsonify, request
 from werkzeug.utils import secure_filename
 
 from config import get_config
-from tasks import process_video_task
-from services.subtitle_pipeline import parse_subtitle_flags
-from utils.file_probe import probe_file_safe
-from logging_config import get_logger
 from i18n.translations import t
+from logging_config import get_logger
+from services.subtitle_pipeline import parse_subtitle_flags
+from tasks import process_video_task
+from utils.file_probe import probe_file_safe
+
 from .helpers import allowed_file, build_watermark_config
 
 # Configuration
@@ -20,7 +22,7 @@ config = get_config()
 logger = get_logger(__name__)
 
 # Create blueprint
-upload_bp = Blueprint('upload', __name__)
+upload_bp = Blueprint("upload", __name__)
 
 
 @upload_bp.route("/upload", methods=["POST"])
@@ -40,7 +42,14 @@ def upload_file_async():
         file.seek(0)  # Reset to beginning
 
         if file_size > config.MAX_FILE_SIZE:
-            return jsonify({"error": f"File too large. Maximum size: {config.MAX_FILE_SIZE // (1024*1024)}MB"}), 413
+            return (
+                jsonify(
+                    {
+                        "error": f"File too large. Maximum size: {config.MAX_FILE_SIZE // (1024*1024)}MB"
+                    }
+                ),
+                413,
+            )
 
         source_lang = request.form.get("source_lang", config.DEFAULT_SOURCE_LANG)
         target_lang = request.form.get("target_lang", config.DEFAULT_TARGET_LANG)
@@ -57,7 +66,9 @@ def upload_file_async():
         watermark_enabled = (
             request.form.get("watermark_enabled", "false").lower() == "true"
         )
-        watermark_config, watermark_error = build_watermark_config(watermark_enabled, request)
+        watermark_config, watermark_error = build_watermark_config(
+            watermark_enabled, request
+        )
         if watermark_error:
             return jsonify({"error": watermark_error}), 400
 
@@ -76,9 +87,10 @@ def upload_file_async():
             return (
                 jsonify(
                     {
-                        "error": t("whisperModels.proOnlyTooltip") or "This model is available for PRO users only",
+                        "error": t("whisperModels.proOnlyTooltip")
+                        or "This model is available for PRO users only",
                         "code": "MODEL_RESTRICTED",
-                        "restricted_model": whisper_model
+                        "restricted_model": whisper_model,
                     }
                 ),
                 403,
@@ -100,7 +112,9 @@ def upload_file_async():
                 "UNSUPPORTED_MEDIA": "File format is not supported. Please upload a valid video or audio file.",
                 "PROBE_FAILED": "Failed to analyze media file. The file may be corrupted or in an unsupported format.",
             }
-            error_msg = error_messages.get(probe_error, "Failed to process uploaded file")
+            error_msg = error_messages.get(
+                probe_error, "Failed to process uploaded file"
+            )
             logger.error(f"File probe failed for {filename}: {probe_error}")
 
             # Clean up the uploaded file
@@ -109,10 +123,7 @@ def upload_file_async():
             except:
                 pass
 
-            return jsonify({
-                "error": error_msg,
-                "code": probe_error
-            }), 400
+            return jsonify({"error": error_msg, "code": probe_error}), 400
 
         # Prepare processing_info with user choices and file metadata
         processing_info = {

@@ -160,12 +160,14 @@ def get_token_stats():
     current_time = time.time()
     with _download_tokens_lock:
         total = len(_download_tokens)
-        expired = sum(1 for info in _download_tokens.values() if current_time > info["expires_at"])
+        expired = sum(
+            1 for info in _download_tokens.values() if current_time > info["expires_at"]
+        )
         used = sum(1 for info in _download_tokens.values() if info["used"])
 
         return {
             "total_tokens": total,
             "expired_tokens": expired,
             "used_tokens": used,
-            "active_tokens": total - expired - used
+            "active_tokens": total - expired - used,
         }

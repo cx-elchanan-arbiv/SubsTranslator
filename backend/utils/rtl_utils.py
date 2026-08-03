@@ -104,8 +104,8 @@ def fix_rtl_punctuation(text):
         text = re.sub(f"([א-ת])({re.escape(punct)})", f"\\1{RLM}\\2", text)
 
     # Fix ellipsis at start/end of lines (for cases like "...monumental" or "...מונומנטלי")
-    text = re.sub(r'^(\.\.\.)', f'{RLM}\\1', text, flags=re.MULTILINE)  # Start of line
-    text = re.sub(r'(\.\.\.)\s*$', f'\\1{RLM}', text, flags=re.MULTILINE)  # End of line
+    text = re.sub(r"^(\.\.\.)", f"{RLM}\\1", text, flags=re.MULTILINE)  # Start of line
+    text = re.sub(r"(\.\.\.)\s*$", f"\\1{RLM}", text, flags=re.MULTILINE)  # End of line
 
     # Fix quotes and parentheses
     text = re.sub(r'"([^"]*)"', f'"{RLM}\\1{RLM}"', text)

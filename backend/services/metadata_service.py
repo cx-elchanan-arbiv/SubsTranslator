@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
@@ -89,7 +89,11 @@ class VideoMetadataService:
             if domain in self.ALLOWED_DOMAINS:
                 # Additional validation for known domains
                 if "youtube.com" in domain:
-                    if "/watch" not in parsed.path and "v=" not in parsed.query and "/shorts/" not in parsed.path:
+                    if (
+                        "/watch" not in parsed.path
+                        and "v=" not in parsed.query
+                        and "/shorts/" not in parsed.path
+                    ):
                         return False
                 elif "youtu.be" in domain:
                     if len(parsed.path) < 2:  # Must have video ID
@@ -124,7 +128,7 @@ class VideoMetadataService:
             return False
         return (time.time() - self._extraction_timestamps[cache_key]) < self.cache_ttl
 
-    def extract_metadata(self, url: str) -> tuple[VideoMetadata, Optional[str]]:
+    def extract_metadata(self, url: str) -> tuple[VideoMetadata, str | None]:
         """
         Extract video metadata with comprehensive error handling.
 
@@ -200,31 +204,42 @@ class VideoMetadataService:
             logger.error(f"yt-dlp DownloadError: {error_msg}")  # Log the actual error
 
             # Check for bot detection first (most specific)
-            if "sign in to confirm" in error_msg.lower() or "confirm you're not a bot" in error_msg.lower():
+            if (
+                "sign in to confirm" in error_msg.lower()
+                or "confirm you're not a bot" in error_msg.lower()
+            ):
                 raise MetadataExtractionError(
                     "YouTube is blocking downloads from our server. Please download the video to your computer and upload it as a file.",
                     "YOUTUBE_BOT_DETECTION",
-                    recoverable=False
+                    recoverable=False,
                 )
             elif "private" in error_msg.lower():
                 raise MetadataExtractionError(
-                    "The video is private or unavailable", "PRIVATE_VIDEO", recoverable=False
+                    "The video is private or unavailable",
+                    "PRIVATE_VIDEO",
+                    recoverable=False,
                 )
             elif "not available" in error_msg.lower():
                 raise MetadataExtractionError(
-                    "The video does not exist or has been removed", "VIDEO_NOT_AVAILABLE", recoverable=False
+                    "The video does not exist or has been removed",
+                    "VIDEO_NOT_AVAILABLE",
+                    recoverable=False,
                 )
             else:
                 # Log full error for debugging
                 logger.error(f"Generic yt-dlp download error: {error_msg}")
                 raise MetadataExtractionError(
-                    f"Error accessing video: {error_msg[:100]}", "DOWNLOAD_ERROR", recoverable=True
+                    f"Error accessing video: {error_msg[:100]}",
+                    "DOWNLOAD_ERROR",
+                    recoverable=True,
                 )
 
         except Exception as e:
             logger.error(f"Unexpected metadata extraction error: {e}")
             raise MetadataExtractionError(
-                "Error extracting video information", "EXTRACTION_ERROR", recoverable=True
+                "Error extracting video information",
+                "EXTRACTION_ERROR",
+                recoverable=True,
             )
 
     def _safe_description(self, description: str) -> str:

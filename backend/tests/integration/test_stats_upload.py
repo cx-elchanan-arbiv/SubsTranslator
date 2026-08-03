@@ -16,11 +16,12 @@ Example:
     python3 test_stats_upload.py backend/tests/fixtures/test_video_30s.mp4
 """
 
+import json
+import os
 import sys
 import time
-import json
+
 import requests
-import os
 
 # Configuration
 API_URL = "http://localhost:8081"
@@ -28,9 +29,9 @@ API_URL = "http://localhost:8081"
 
 def print_header(text):
     """Print fancy header."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print(f"  {text}")
-    print("="*60)
+    print("=" * 60)
 
 
 def get_stats_count():
@@ -50,7 +51,7 @@ def download_stats_file():
     try:
         response = requests.get(f"{API_URL}/api/stats/download")
         if response.status_code == 200:
-            with open("test_stats.jsonl", 'wb') as f:
+            with open("test_stats.jsonl", "wb") as f:
                 f.write(response.content)
             return True
         return False
@@ -62,7 +63,7 @@ def download_stats_file():
 def get_latest_stat():
     """Get the latest (last) stat from JSONL."""
     try:
-        with open("test_stats.jsonl", 'r') as f:
+        with open("test_stats.jsonl") as f:
             lines = f.readlines()
             if lines:
                 return json.loads(lines[-1].strip())
@@ -84,30 +85,25 @@ def upload_video(file_path):
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     print(f"File: {os.path.basename(file_path)}")
     print(f"Size: {file_size_mb:.2f} MB")
-    print(f"Model: base (fastest)")
-    print(f"Translation: Google (not OpenAI)")
-    print(f"Auto-create video: False (faster)")
+    print("Model: base (fastest)")
+    print("Translation: Google (not OpenAI)")
+    print("Auto-create video: False (faster)")
 
     try:
         # Prepare multipart form data
-        with open(file_path, 'rb') as video_file:
-            files = {
-                'file': (os.path.basename(file_path), video_file, 'video/mp4')
-            }
+        with open(file_path, "rb") as video_file:
+            files = {"file": (os.path.basename(file_path), video_file, "video/mp4")}
             data = {
-                'source_lang': 'auto',
-                'target_lang': 'he',
-                'auto_create_video': 'false',
-                'whisper_model': 'base',
-                'translation_service': 'google'
+                "source_lang": "auto",
+                "target_lang": "he",
+                "auto_create_video": "false",
+                "whisper_model": "base",
+                "translation_service": "google",
             }
 
             print("\n📡 Uploading...")
             response = requests.post(
-                f"{API_URL}/upload",
-                files=files,
-                data=data,
-                timeout=600
+                f"{API_URL}/upload", files=files, data=data, timeout=600
             )
 
         if response.status_code not in [200, 202]:
@@ -123,6 +119,7 @@ def upload_video(file_path):
     except Exception as e:
         print(f"❌ Error uploading: {e}")
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -197,7 +194,7 @@ def verify_stats(task_id, expected_model, expected_service):
         print("❌ No stats found")
         return False
 
-    print(f"\n📊 Latest stat entry:")
+    print("\n📊 Latest stat entry:")
     print(json.dumps(latest, indent=2, ensure_ascii=False))
 
     # Verify fields
@@ -217,7 +214,9 @@ def verify_stats(task_id, expected_model, expected_service):
         print(f"✅ Model: {expected_model}")
         checks.append(True)
     else:
-        print(f"❌ Model mismatch: {latest.get('transcription_model')} != {expected_model}")
+        print(
+            f"❌ Model mismatch: {latest.get('transcription_model')} != {expected_model}"
+        )
         checks.append(False)
 
     # Service check
@@ -225,7 +224,9 @@ def verify_stats(task_id, expected_model, expected_service):
         print(f"✅ Translation service: {expected_service}")
         checks.append(True)
     else:
-        print(f"❌ Service mismatch: {latest.get('translation_service')} != {expected_service}")
+        print(
+            f"❌ Service mismatch: {latest.get('translation_service')} != {expected_service}"
+        )
         checks.append(False)
 
     # Status check
@@ -281,7 +282,9 @@ def main():
         print("\nUsage:")
         print("  python3 test_stats_upload.py <video_file_path>")
         print("\nExample:")
-        print("  python3 test_stats_upload.py backend/tests/fixtures/test_video_30s.mp4")
+        print(
+            "  python3 test_stats_upload.py backend/tests/fixtures/test_video_30s.mp4"
+        )
         sys.exit(1)
 
     video_path = sys.argv[1]
@@ -317,9 +320,7 @@ def main():
 
     # Verify stats content
     success = verify_stats(
-        task_id=task_id,
-        expected_model="base",
-        expected_service="google"
+        task_id=task_id, expected_model="base", expected_service="google"
     )
 
     # Final result

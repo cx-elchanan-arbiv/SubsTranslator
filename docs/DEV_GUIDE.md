@@ -4,7 +4,7 @@
 
 ### Prerequisites
 - **Docker & Docker Compose** (recommended)
-- **Python 3.9+** (for local development)
+- **Python 3.12+** (for local development)
 - **Node.js 16+** (for frontend development)
 - **FFmpeg** (for video processing)
 - **Git** (version control)

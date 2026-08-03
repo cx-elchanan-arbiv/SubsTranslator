@@ -5,8 +5,6 @@ import { useI18n } from './i18n/I18nProvider';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from './contexts/AuthContext';
 import type { WhisperModel, TranslationService, WatermarkConfig, SubtitleQualityFlags } from './types';
-// Imported from the leaf module, not the ./types barrel: the barrel re-exports the
-// zod validation schemas, and a runtime import of it would pull zod into the bundle.
 import { DEFAULT_SUBTITLE_QUALITY_FLAGS } from './types/api';
 import LanguageSelection from './components/LanguageSelection';
 import LanguageSelector from './components/LanguageSelector';

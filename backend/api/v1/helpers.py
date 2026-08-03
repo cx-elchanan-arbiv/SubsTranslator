@@ -1,18 +1,19 @@
 """
 Shared helper functions for API v1 routes.
 """
+
+import base64
 import os
 import re
-import base64
 from urllib.parse import urlparse
 
-from flask import session, jsonify
+from flask import jsonify, session
 
 from config import get_config
+from i18n.translations import t
+from logging_config import get_logger
 from logo_manager import LogoManager
 from utils.file_utils import safe_int
-from logging_config import get_logger
-from i18n.translations import t
 
 # Configuration
 config = get_config()
@@ -41,17 +42,30 @@ def validate_video_url(url: str):
         # Popular supported domains (yt-dlp supports 1849+ sites)
         popular_domains = [
             # YouTube
-            "youtube.com", "www.youtube.com", "youtu.be",
-            "m.youtube.com", "music.youtube.com",
+            "youtube.com",
+            "www.youtube.com",
+            "youtu.be",
+            "m.youtube.com",
+            "music.youtube.com",
             # Other popular video sites
-            "vimeo.com", "dailymotion.com", "facebook.com",
-            "fb.watch", "instagram.com", "tiktok.com",
-            "twitch.tv", "reddit.com", "soundcloud.com",
-            "twitter.com", "x.com", "foxnews.com",
+            "vimeo.com",
+            "dailymotion.com",
+            "facebook.com",
+            "fb.watch",
+            "instagram.com",
+            "tiktok.com",
+            "twitch.tv",
+            "reddit.com",
+            "soundcloud.com",
+            "twitter.com",
+            "x.com",
+            "foxnews.com",
         ]
 
         # Check if it's a known popular domain or let yt-dlp handle it
-        is_known_domain = any(valid_domain in domain for valid_domain in popular_domains)
+        is_known_domain = any(
+            valid_domain in domain for valid_domain in popular_domains
+        )
 
         # For unknown domains, we'll let yt-dlp try and handle the error gracefully
         if not is_known_domain:
@@ -90,17 +104,19 @@ def build_watermark_config(watermark_enabled: bool, request):
         logo_file = request.files["watermark_logo"]
         if logo_file and logo_file.filename:
             file_content = logo_file.read()
-            extension = logo_file.filename.rsplit('.', 1)[1].lower()
+            extension = logo_file.filename.rsplit(".", 1)[1].lower()
             logo_path, is_new = logo_manager.save_logo(file_content, extension)
             watermark_config["custom_logo_path"] = logo_path
-            session['custom_logo_path'] = logo_path
-            logger.info(f"{'Saved new' if is_new else 'Reusing existing'} logo: {os.path.basename(logo_path)}")
+            session["custom_logo_path"] = logo_path
+            logger.info(
+                f"{'Saved new' if is_new else 'Reusing existing'} logo: {os.path.basename(logo_path)}"
+            )
     else:
         # Check for logo data URL
         logo_data_url = request.form.get("watermark_logo_url")
         if logo_data_url:
             _process_logo_data_url(logo_data_url, watermark_config)
-        elif 'custom_logo_path' in session:
+        elif "custom_logo_path" in session:
             _use_session_logo(watermark_config)
 
     return watermark_config, None
@@ -134,11 +150,13 @@ def build_watermark_config_from_data(watermark_enabled: bool, data: dict, reques
         logo_file = request.files["watermark_logo"]
         if logo_file and logo_file.filename:
             file_content = logo_file.read()
-            extension = logo_file.filename.rsplit('.', 1)[1].lower()
+            extension = logo_file.filename.rsplit(".", 1)[1].lower()
             logo_path, is_new = logo_manager.save_logo(file_content, extension)
             watermark_config["custom_logo_path"] = logo_path
-            session['custom_logo_path'] = logo_path
-            logger.info(f"{'Saved new' if is_new else 'Reusing existing'} logo for YouTube: {os.path.basename(logo_path)}")
+            session["custom_logo_path"] = logo_path
+            logger.info(
+                f"{'Saved new' if is_new else 'Reusing existing'} logo for YouTube: {os.path.basename(logo_path)}"
+            )
     else:
         # Check for logo data URL
         if request.content_type and "application/json" in request.content_type:
@@ -148,37 +166,41 @@ def build_watermark_config_from_data(watermark_enabled: bool, data: dict, reques
 
         if logo_data_url:
             _process_logo_data_url(logo_data_url, watermark_config, "YouTube")
-        elif 'custom_logo_path' in session:
+        elif "custom_logo_path" in session:
             _use_session_logo(watermark_config, "YouTube")
 
     return watermark_config, None
 
 
-def _process_logo_data_url(logo_data_url: str, watermark_config: dict, context: str = ""):
+def _process_logo_data_url(
+    logo_data_url: str, watermark_config: dict, context: str = ""
+):
     """Process a base64 logo data URL and add to config."""
     try:
-        match = re.match(r'data:image/([\w\+\-]+);base64,(.+)', logo_data_url)
+        match = re.match(r"data:image/([\w\+\-]+);base64,(.+)", logo_data_url)
         if match:
-            file_ext = match.group(1).replace('jpeg', 'jpg')
+            file_ext = match.group(1).replace("jpeg", "jpg")
             base64_data = match.group(2)
             file_content = base64.b64decode(base64_data)
             logo_path, is_new = logo_manager.save_logo(file_content, file_ext)
             watermark_config["custom_logo_path"] = logo_path
-            session['custom_logo_path'] = logo_path
+            session["custom_logo_path"] = logo_path
             ctx = f" for {context}" if context else ""
-            logger.info(f"{'Saved new' if is_new else 'Reusing existing'} logo from data URL{ctx}: {os.path.basename(logo_path)}")
+            logger.info(
+                f"{'Saved new' if is_new else 'Reusing existing'} logo from data URL{ctx}: {os.path.basename(logo_path)}"
+            )
     except Exception as e:
         logger.error(f"Failed to process logo data URL: {e}")
 
 
 def _use_session_logo(watermark_config: dict, context: str = ""):
     """Use logo from session if available."""
-    saved_logo_path = session['custom_logo_path']
+    saved_logo_path = session["custom_logo_path"]
     if os.path.exists(saved_logo_path):
         watermark_config["custom_logo_path"] = saved_logo_path
         ctx = f" for {context}" if context else ""
         logger.info(f"Using previously saved logo{ctx}: {saved_logo_path}")
     else:
-        session.pop('custom_logo_path', None)
+        session.pop("custom_logo_path", None)
         ctx = f" for {context}" if context else ""
         logger.warning(f"Previously saved logo not found{ctx}, removed from session")

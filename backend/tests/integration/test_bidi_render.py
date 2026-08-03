@@ -63,6 +63,7 @@ What the renders establish
 Skips (never fails) when ffmpeg or Noto Sans Hebrew is unavailable, so the suite still
 runs outside the container.
 """
+
 import hashlib
 import os
 import re
@@ -73,7 +74,9 @@ import tempfile
 
 import pytest
 
-backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+backend_dir = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 if not os.path.isfile(os.path.join(backend_dir, "services", "subtitle_engine.py")):
     # docker-compose mounts ./tests over /app/tests, so this file runs as
     # /app/tests/integration/... with /app as the backend root.
@@ -143,15 +146,25 @@ def render(tag, text):
     ass_path = os.path.join(OUT_DIR, f"{tag}.ass")
     png_path = os.path.join(OUT_DIR, f"{tag}.png")
     with open(ass_path, "w", encoding="utf-8") as handle:
-        handle.write(_ASS_HEAD + f"Dialogue: 0,0:00:00.00,0:00:01.00,He,,0,0,0,,{text}\n")
+        handle.write(
+            _ASS_HEAD + f"Dialogue: 0,0:00:00.00,0:00:01.00,He,,0,0,0,,{text}\n"
+        )
     subprocess.run(
         [
-            "ffmpeg", "-v", "error",
-            "-f", "lavfi", "-i", f"color=c=black:s={W}x{H}:d=1",
-            "-frames:v", "1",
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=black:s={W}x{H}:d=1",
+            "-frames:v",
+            "1",
             # `ass`, not `subtitles`: the subtitles filter has no `shaping` option.
-            "-vf", f"ass={ass_path}:shaping=complex",
-            "-y", png_path,
+            "-vf",
+            f"ass={ass_path}:shaping=complex",
+            "-y",
+            png_path,
         ],
         check=True,
         capture_output=True,
@@ -166,7 +179,18 @@ def digest(png_path):
 
 def _gray(png_path):
     return subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", png_path, "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            png_path,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
+        ],
         capture_output=True,
         check=True,
     ).stdout
@@ -239,8 +263,8 @@ def layout_difference(png_a, png_b, shift=3):
         for dx in range(-shift, shift + 1):
             total = 0
             for y in range(H):
-                row_a = buffer_a[y * W:(y + 1) * W]
-                row_b = buffer_b[y * W:(y + 1) * W]
+                row_a = buffer_a[y * W : (y + 1) * W]
+                row_b = buffer_b[y * W : (y + 1) * W]
                 for x in range(width):
                     xa, xb = start_a + x, start_b + x + dx
                     if 0 <= xa < W and 0 <= xb < W:
@@ -333,7 +357,9 @@ def evidence():
 
 
 def _report(case_id, variant, evidence):
-    difference = layout_difference(evidence[case_id][variant], evidence[case_id]["reference"])
+    difference = layout_difference(
+        evidence[case_id][variant], evidence[case_id]["reference"]
+    )
     return (
         f"{case_id}/{variant}: per-band difference {difference:.2f} "
         f"(same-layout threshold {SAME_LAYOUT_MAD})\n"
@@ -395,8 +421,12 @@ class TestShippedOutputRendersCorrectly:
     """The payload: every case must render the way a Hebrew reader expects."""
 
     @pytest.mark.parametrize("case_id,source,tokens", CASES, ids=CASE_IDS)
-    def test_shipped_matches_the_authored_layout(self, case_id, source, tokens, evidence):
-        assert same_layout(evidence[case_id]["shipped"], evidence[case_id]["reference"]), (
+    def test_shipped_matches_the_authored_layout(
+        self, case_id, source, tokens, evidence
+    ):
+        assert same_layout(
+            evidence[case_id]["shipped"], evidence[case_id]["reference"]
+        ), (
             _report(case_id, "shipped", evidence)
             + f"\n  expected left-to-right: {tokens}"
         )
@@ -406,9 +436,9 @@ class TestShippedOutputRendersCorrectly:
         """Isolates are zero-width: they may move glyphs, never add or drop ink."""
         shipped = total_ink(evidence[case_id]["shipped"])
         reference = total_ink(evidence[case_id]["reference"])
-        assert abs(shipped - reference) / max(reference, 1) < 0.02, (
-            f"{case_id}: ink differs by more than 2% — a glyph was dropped or added"
-        )
+        assert (
+            abs(shipped - reference) / max(reference, 1) < 0.02
+        ), f"{case_id}: ink differs by more than 2% — a glyph was dropped or added"
 
     def test_production_never_emits_the_rtl_override(self):
         """U+202E fights the bidi algorithm instead of informing it."""
@@ -424,7 +454,9 @@ class TestNoControlsIsTheDefect:
 
     @pytest.mark.parametrize("case_id", sorted(NO_CONTROLS_BREAKS))
     def test_no_controls_gets_the_layout_wrong(self, case_id, evidence):
-        assert not same_layout(evidence[case_id]["none"], evidence[case_id]["reference"]), (
+        assert not same_layout(
+            evidence[case_id]["none"], evidence[case_id]["reference"]
+        ), (
             _report(case_id, "none", evidence)
             + "\n  no-controls rendered CORRECTLY, so this case proves nothing"
         )
@@ -438,9 +470,9 @@ class TestNoControlsIsTheDefect:
         place either way. These four are the reason the no-controls render must not be
         used as a reference: it is right exactly where being right is free.
         """
-        assert same_layout(evidence[case_id]["none"], evidence[case_id]["reference"]), (
-            _report(case_id, "none", evidence)
-        )
+        assert same_layout(
+            evidence[case_id]["none"], evidence[case_id]["reference"]
+        ), _report(case_id, "none", evidence)
 
 
 class TestHistoricalImplementationBreaks:
@@ -484,9 +516,9 @@ class TestNaiveMaximalRegexBreaks:
         listing characters by hand, which is why it absorbs numeric terminators (``ET``)
         at both edges of a run and does not have this failure mode.
         """
-        assert not same_layout(evidence[case_id]["naive"], evidence[case_id]["reference"]), (
-            _report(case_id, "naive", evidence)
-        )
+        assert not same_layout(
+            evidence[case_id]["naive"], evidence[case_id]["reference"]
+        ), _report(case_id, "naive", evidence)
 
     @pytest.mark.parametrize("case_id", sorted(ALL_CASES - NAIVE_BREAKS))
     def test_it_survives_the_rest_including_case_d(self, case_id, evidence):
@@ -498,9 +530,9 @@ class TestNaiveMaximalRegexBreaks:
         :meth:`test_it_loses_the_characters_its_class_forgot` instead, which is a real
         and reproducible failure; the case originally cited for it was not.
         """
-        assert same_layout(evidence[case_id]["naive"], evidence[case_id]["reference"]), (
-            _report(case_id, "naive", evidence)
-        )
+        assert same_layout(
+            evidence[case_id]["naive"], evidence[case_id]["reference"]
+        ), _report(case_id, "naive", evidence)
 
 
 class TestTheMeasurementItselfWorks:
@@ -515,9 +547,9 @@ class TestTheMeasurementItselfWorks:
         forward = render("metric__3_5", visual_reference(["3.5"]))
         reversed_ = render("metric__5_3", visual_reference(["5.3"]))
 
-        assert ink_bands(forward) == ink_bands(reversed_), (
-            "the premise of this test is gone: the two now differ in width"
-        )
+        assert ink_bands(forward) == ink_bands(
+            reversed_
+        ), "the premise of this test is gone: the two now differ in width"
         assert not same_layout(forward, reversed_), (
             "the per-band pixel metric cannot see a digit swap — it would pass "
             "bidi_isolate() emitting 5.3 for 3.5"
@@ -529,7 +561,9 @@ class TestTheMeasurementItselfWorks:
 
     def test_a_different_band_count_is_reported_as_a_mismatch(self):
         two = render("metric__two_bands", visual_reference(["שלום", "עולם"]))
-        three = render("metric__three_bands", visual_reference(["שלום", "עולם", "היום"]))
+        three = render(
+            "metric__three_bands", visual_reference(["שלום", "עולם", "היום"])
+        )
         assert layout_difference(two, three) == MISMATCH
 
 
@@ -558,12 +592,12 @@ class TestDialogueDashRendersOnTheRightEdge:
         spans, _buffer = _band_spans(self._dashed("dash__rtl"))
         assert len(spans) == 3, f"expected two words and a dash: {spans}"
         *text_bands, dash = spans
-        assert dash[1] < min(width for _s, width in text_bands), (
-            f"the rightmost run is too wide to be the dash: {spans}"
-        )
-        assert dash[0] > max(start + width for start, width in text_bands), (
-            f"the dash at x={dash[0]} is not right of the Hebrew: {spans}"
-        )
+        assert dash[1] < min(
+            width for _s, width in text_bands
+        ), f"the rightmost run is too wide to be the dash: {spans}"
+        assert dash[0] > max(
+            start + width for start, width in text_bands
+        ), f"the dash at x={dash[0]} is not right of the Hebrew: {spans}"
 
     def test_the_dash_does_not_reorder_the_words(self):
         """Adding the marker must not disturb the line it marks."""
@@ -583,7 +617,9 @@ class TestDialogueDashRendersOnTheRightEdge:
 
         body = build_ass(
             [{"start": 0.0, "end": 2.0, "text": f"{DIALOGUE_DASH}{self.LINE}"}],
-            video_w=W, video_h=H, rtl=True,
+            video_w=W,
+            video_h=H,
+            rtl=True,
         )
         event = [line for line in body.splitlines() if line.startswith("Dialogue:")][0]
         assert "—" in event

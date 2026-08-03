@@ -50,7 +50,7 @@ SubsTranslator is an advanced AI-powered video subtitle generation and translati
 ## Technology Stack
 
 ### Backend
-- **Python 3.9+** with Flask web framework
+- **Python 3.12+** with Flask web framework
 - **Celery** for asynchronous task processing
 - **Redis** as message broker and cache
 - **faster-whisper** for AI transcription

@@ -25,6 +25,7 @@ Three things are established here:
 Requires ffmpeg, numpy and the Hebrew fonts — i.e. this project's own container. It
 skips cleanly anywhere else.
 """
+
 import hashlib
 import os
 import subprocess
@@ -86,7 +87,9 @@ HEBREW_LINES = [
 
 def _has_ffmpeg():
     try:
-        subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=10, check=True)
+        subprocess.run(
+            ["ffmpeg", "-version"], capture_output=True, timeout=10, check=True
+        )
         return True
     except Exception:
         return False
@@ -105,10 +108,22 @@ def render_frames(ass_path, width, height, frames):
     ``-r 1`` lines up with cues laid out one second apart, so every cue is inspected.
     """
     cmd = [
-        "ffmpeg", "-v", "error",
-        "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r=1:d={frames}",
-        "-vf", f"ass='{ass_path}':fontsdir={FONTS_DIR}:shaping=complex",
-        "-frames:v", str(frames), "-pix_fmt", "gray", "-f", "rawvideo", "-",
+        "ffmpeg",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=black:s={width}x{height}:r=1:d={frames}",
+        "-vf",
+        f"ass='{ass_path}':fontsdir={FONTS_DIR}:shaping=complex",
+        "-frames:v",
+        str(frames),
+        "-pix_fmt",
+        "gray",
+        "-f",
+        "rawvideo",
+        "-",
     ]
     raw = subprocess.run(cmd, capture_output=True, check=True, timeout=180).stdout
     expected = frames * width * height
@@ -164,10 +179,22 @@ class TestGlyphWidthRatio:
         # White canvas: measures the opaque BOX, i.e. the full visual extent of the
         # line rather than just the glyph ink inside it.
         cmd = [
-            "ffmpeg", "-v", "error",
-            "-f", "lavfi", "-i", f"color=c=white:s={width}x{height}:d=0.1",
-            "-vf", f"ass='{path}':fontsdir={FONTS_DIR}:shaping=complex",
-            "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "-",
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=white:s={width}x{height}:d=0.1",
+            "-vf",
+            f"ass='{path}':fontsdir={FONTS_DIR}:shaping=complex",
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "gray",
+            "-f",
+            "rawvideo",
+            "-",
         ]
         raw = subprocess.run(cmd, capture_output=True, check=True, timeout=60).stdout
         frame = numpy.frombuffer(raw, dtype=numpy.uint8).reshape(height, width)
@@ -218,7 +245,9 @@ class TestPortraitRender:
     def test_no_ink_in_the_outer_margin_columns(self, tmp_path):
         layout = layout_params(self.WIDTH, self.HEIGHT)
         cues = cues_from(HEBREW_LINES)
-        path = write_ass(tmp_path, build_ass(cues, video_w=self.WIDTH, video_h=self.HEIGHT))
+        path = write_ass(
+            tmp_path, build_ass(cues, video_w=self.WIDTH, video_h=self.HEIGHT)
+        )
         frames = render_frames(path, self.WIDTH, self.HEIGHT, len(cues))
 
         columns = ink_columns(frames)
@@ -227,12 +256,12 @@ class TestPortraitRender:
         margin = layout["margin_h"]
         left = numpy.flatnonzero(columns)[0]
         right = numpy.flatnonzero(columns)[-1]
-        assert not columns[:margin].any(), (
-            f"ink at column {left} is inside the {margin}px left margin"
-        )
-        assert not columns[self.WIDTH - margin:].any(), (
-            f"ink at column {right} is inside the {margin}px right margin"
-        )
+        assert not columns[
+            :margin
+        ].any(), f"ink at column {left} is inside the {margin}px left margin"
+        assert not columns[
+            self.WIDTH - margin :
+        ].any(), f"ink at column {right} is inside the {margin}px right margin"
         # Belt and braces: nothing may touch the frame edges either.
         assert left > 0 and right < self.WIDTH - 1
 
@@ -266,7 +295,9 @@ class TestPortraitRender:
         """Per-cue, not just in aggregate: one bad cue must not hide behind eleven good ones."""
         layout = layout_params(self.WIDTH, self.HEIGHT)
         cues = cues_from(HEBREW_LINES)
-        path = write_ass(tmp_path, build_ass(cues, video_w=self.WIDTH, video_h=self.HEIGHT))
+        path = write_ass(
+            tmp_path, build_ass(cues, video_w=self.WIDTH, video_h=self.HEIGHT)
+        )
         frames = render_frames(path, self.WIDTH, self.HEIGHT, len(cues))
         for index, frame in enumerate(frames):
             cols = numpy.flatnonzero((frame > INK_THRESHOLD).any(axis=0))
@@ -288,12 +319,14 @@ class TestLandscapeRender:
     def test_no_ink_in_the_outer_margin_columns(self, tmp_path):
         layout = layout_params(self.WIDTH, self.HEIGHT)
         cues = cues_from(HEBREW_LINES)
-        path = write_ass(tmp_path, build_ass(cues, video_w=self.WIDTH, video_h=self.HEIGHT))
+        path = write_ass(
+            tmp_path, build_ass(cues, video_w=self.WIDTH, video_h=self.HEIGHT)
+        )
         frames = render_frames(path, self.WIDTH, self.HEIGHT, len(cues))
         columns = ink_columns(frames)
         assert columns.any()
         assert not columns[: layout["margin_h"]].any()
-        assert not columns[self.WIDTH - layout["margin_h"]:].any()
+        assert not columns[self.WIDTH - layout["margin_h"] :].any()
 
     def test_ass_bytes_are_the_pre_change_ones(self):
         """Byte-level regression, mirroring tests/unit/test_subtitle_layout.py.
@@ -372,16 +405,23 @@ class TestLowerThirdAvoidance:
         from services.subtitle_service import subtitle_service
 
         _, layout = self._decide(FOX_CLIP)
-        cues = [{"start": 0.5, "end": 4.0, "text": "x", "translated_text": "שורת בדיקה"}]
+        cues = [
+            {"start": 0.5, "end": 4.0, "text": "x", "translated_text": "שורת בדיקה"}
+        ]
         margins = {}
         for tag, detect in (("auto", True), ("off", False)):
             out = str(tmp_path / f"fox_{tag}.mp4")
             assert subtitle_service.create_video_with_ass(
-                FOX_CLIP, cues, out, target_language="he",
-                layout=layout, detect_lower_third=detect,
+                FOX_CLIP,
+                cues,
+                out,
+                target_language="he",
+                layout=layout,
+                detect_lower_third=detect,
             )
             style = [
-                line for line in open(os.path.splitext(out)[0] + ".ass", encoding="utf-8")
+                line
+                for line in open(os.path.splitext(out)[0] + ".ass", encoding="utf-8")
                 if line.startswith("Style:")
             ][0]
             margins[tag] = int(style.strip().split(",")[21])
@@ -415,9 +455,9 @@ class TestLowerThirdAvoidance:
         weighted = (
             subtitle["score"] * subtitle["h"] + bottom["score"] * bottom["h"]
         ) / (subtitle["h"] + bottom["h"])
-        assert weighted < decision["threshold"], (
-            f"the merged band scores {weighted:.4f} — this test's premise is stale"
-        )
+        assert (
+            weighted < decision["threshold"]
+        ), f"the merged band scores {weighted:.4f} — this test's premise is stale"
 
     def test_a_clean_hd_clip_stays_quiet_with_both_bands_scored(self):
         """The false-positive guard: adding a band must not start firing on clean video."""
@@ -433,16 +473,23 @@ class TestLowerThirdAvoidance:
         if not os.path.exists(BOTTOM_BAR_CLIP):
             pytest.skip("eng_chyron.mp4 is not in the container")
         _, layout = self._decide(BOTTOM_BAR_CLIP)
-        cues = [{"start": 0.5, "end": 4.0, "text": "x", "translated_text": "שורת בדיקה"}]
+        cues = [
+            {"start": 0.5, "end": 4.0, "text": "x", "translated_text": "שורת בדיקה"}
+        ]
         margins = {}
         for tag, detect in (("auto", True), ("off", False)):
             out = str(tmp_path / f"bar_{tag}.mp4")
             assert subtitle_service.create_video_with_ass(
-                BOTTOM_BAR_CLIP, cues, out, target_language="he",
-                layout=layout, detect_lower_third=detect,
+                BOTTOM_BAR_CLIP,
+                cues,
+                out,
+                target_language="he",
+                layout=layout,
+                detect_lower_third=detect,
             )
             style = [
-                line for line in open(os.path.splitext(out)[0] + ".ass", encoding="utf-8")
+                line
+                for line in open(os.path.splitext(out)[0] + ".ass", encoding="utf-8")
                 if line.startswith("Style:")
             ][0]
             margins[tag] = int(style.strip().split(",")[21])
@@ -452,14 +499,22 @@ class TestLowerThirdAvoidance:
         from services.subtitle_service import subtitle_service
 
         _, layout = self._decide(CLEAN_CLIP)
-        cues = [{"start": 0.5, "end": 4.0, "text": "x", "translated_text": "שורת בדיקה"}]
+        cues = [
+            {"start": 0.5, "end": 4.0, "text": "x", "translated_text": "שורת בדיקה"}
+        ]
         produced = {}
         for tag, detect in (("auto", True), ("off", False)):
             out = str(tmp_path / f"clean_{tag}.mp4")
             assert subtitle_service.create_video_with_ass(
-                CLEAN_CLIP, cues, out, target_language="he",
-                layout=layout, detect_lower_third=detect,
+                CLEAN_CLIP,
+                cues,
+                out,
+                target_language="he",
+                layout=layout,
+                detect_lower_third=detect,
             )
             with open(os.path.splitext(out)[0] + ".ass", encoding="utf-8") as fh:
                 produced[tag] = fh.read()
-        assert produced["auto"] == produced["off"], "a clear clip must render identically"
+        assert (
+            produced["auto"] == produced["off"]
+        ), "a clear clip must render identically"

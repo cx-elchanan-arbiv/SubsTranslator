@@ -34,7 +34,7 @@ include = ["*"]
 
 [tool.black]
 line-length = 88
-target-version = ['py39']
+target-version = ['py312']
 include = '\.pyi?$'
 
 [tool.isort]
@@ -42,15 +42,30 @@ profile = "black"
 multi_line_output = 3
 
 [tool.pytest.ini_options]
+minversion = "6.0"
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# --strict-markers turns a typo'd mark into an error instead of a silent no-op,
+# so every mark below must stay in sync with what the suite actually uses.
+addopts = "-v --tb=short --strict-markers"
 markers = [
     "unit: Fast unit tests with mocked dependencies",
     "integration: Service-level tests hitting real dependencies",
     "e2e: End-to-end tests (slow)",
     "slow: Tests that take longer to run",
     "youtube: Tests that require YouTube access",
-    "openai: Tests that require OpenAI API key"
+    "openai: Tests that require OpenAI API key",
+    "benchmark: Long-running performance benchmarks (opt-in)"
+]
+# Safety net: no single test may hang the suite (see the OpenAI rate-limiter
+# backoff that used to stall these files for 10-17 minutes). Requires
+# pytest-timeout, which ships in requirements-test.txt.
+timeout = 300
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
 ]
 
 [tool.ruff]

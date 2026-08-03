@@ -13,6 +13,7 @@ Two independent obligations, and the second one matters more than the first:
    object) and assert the recorder returns normally anyway. A recorder that raises is
    worse than no recorder, because it converts an observability bug into a lost job.
 """
+
 import json
 import os
 import stat
@@ -136,7 +137,9 @@ class TestArchivedContent:
         recorder.save_segments(segments)
         recorder.save_words(words)
         recorder.save_cues("pre_translation", segments)
-        recorder.save_cues("post_translation", [{**segments[0], "translated_text": "שלום"}])
+        recorder.save_cues(
+            "post_translation", [{**segments[0], "translated_text": "שלום"}]
+        )
         recorder.save_cues("post_reflow", [{**segments[0], "translated_text": "שלום"}])
         recorder.finish(success=True)
 
@@ -156,7 +159,9 @@ class TestArchivedContent:
     def test_hebrew_is_stored_as_text_not_escapes(self, recorder):
         """A corpus you have to un-escape by hand is a corpus nobody reads."""
         recorder.save_segments([{"text": "צה״ל הודיע"}])
-        raw = open(os.path.join(recorder.run_dir, "segments.json"), encoding="utf-8").read()
+        raw = open(
+            os.path.join(recorder.run_dir, "segments.json"), encoding="utf-8"
+        ).read()
         assert "צה״ל" in raw
 
     def test_empty_word_list_writes_no_file(self, recorder):
@@ -183,8 +188,13 @@ class TestLlmCapture:
             for n in (1, 2, 3)
             for suffix in ("system.txt", "user.txt", "response.json", "meta.json")
         )
-        assert open(os.path.join(llm_dir, "02_system.txt"), encoding="utf-8").read() == "system 1"
-        assert read_json(os.path.join(llm_dir, "02_response.json"))["id"] == "chatcmpl-1"
+        assert (
+            open(os.path.join(llm_dir, "02_system.txt"), encoding="utf-8").read()
+            == "system 1"
+        )
+        assert (
+            read_json(os.path.join(llm_dir, "02_response.json"))["id"] == "chatcmpl-1"
+        )
         meta = read_json(os.path.join(llm_dir, "03_meta.json"))
         assert meta["stage"] == "translate_chunk_3"
         assert meta["index"] == 3
@@ -222,7 +232,9 @@ class TestLlmCapture:
         for _ in range(4):
             recorder.record_llm(stage="s", system="s", user="u", response=None, meta={})
         recorder.finish(success=True)
-        assert read_json(os.path.join(recorder.run_dir, "meta.json"))["llm_requests"] == 4
+        assert (
+            read_json(os.path.join(recorder.run_dir, "meta.json"))["llm_requests"] == 4
+        )
 
 
 # ======================================================================================
@@ -237,9 +249,10 @@ class TestOutputs:
         copied = os.path.join(recorder.run_dir, "outputs", "clip_translated.srt")
         assert os.path.exists(copied)
         assert "שלום" in open(copied, encoding="utf-8").read()
-        assert "clip_translated.srt" in read_json(
-            os.path.join(recorder.run_dir, "meta.json")
-        )["outputs"]
+        assert (
+            "clip_translated.srt"
+            in read_json(os.path.join(recorder.run_dir, "meta.json"))["outputs"]
+        )
 
     def test_a_missing_file_is_a_no_op(self, recorder):
         recorder.copy_output("/nonexistent/clip_final.mp4")
@@ -252,7 +265,9 @@ class TestOutputs:
         rec.copy_output(str(big))
         rec.finish(success=True)
         assert os.listdir(os.path.join(rec.run_dir, "outputs")) == []
-        warnings = read_json(os.path.join(rec.run_dir, "meta.json"))["recorder_warnings"]
+        warnings = read_json(os.path.join(rec.run_dir, "meta.json"))[
+            "recorder_warnings"
+        ]
         assert any("huge.mp4" in w for w in warnings)
 
 
@@ -264,7 +279,11 @@ class TestIndex:
             rec = rr.start_run(f"task{index}0000000", root=root, enabled=True)
             rec.update_meta(pipeline="v2", spotting_v2=True, whisper_model="large")
             rec.finish(success=True)
-        lines = open(os.path.join(root, "index.jsonl"), encoding="utf-8").read().splitlines()
+        lines = (
+            open(os.path.join(root, "index.jsonl"), encoding="utf-8")
+            .read()
+            .splitlines()
+        )
         assert len(lines) == 3
         rows = [json.loads(line) for line in lines]
         assert [row["task_id"] for row in rows] == [f"task{i}0000000" for i in range(3)]
@@ -288,7 +307,9 @@ class TestIndex:
         )
         recorder.save_cues("post_reflow", [{}, {}, {}])
         recorder.finish(success=True)
-        row = json.loads(open(os.path.join(root, "index.jsonl"), encoding="utf-8").read())
+        row = json.loads(
+            open(os.path.join(root, "index.jsonl"), encoding="utf-8").read()
+        )
         assert row["video"] == "IMG_8975.MP4"
         assert (row["w"], row["h"]) == (720, 1280)
         assert row["cues"] == 3
@@ -306,7 +327,9 @@ class TestItCanNeverFailTheJob:
         blocked.mkdir()
         os.chmod(blocked, stat.S_IRUSR | stat.S_IXUSR)  # r-x: no writing inside
         try:
-            rec = rr.start_run("deadbeef0000", root=str(blocked / "research"), enabled=True)
+            rec = rr.start_run(
+                "deadbeef0000", root=str(blocked / "research"), enabled=True
+            )
             assert rec.active is False
             # ...and every call on it is a silent no-op, not an AttributeError.
             rec.update_meta(pipeline="v2")
@@ -446,7 +469,9 @@ class TestSourceVideoProbe:
             returncode = 0
             stdout = json.dumps(
                 {
-                    "streams": [{"width": 720, "height": 1280, "avg_frame_rate": "30000/1001"}],
+                    "streams": [
+                        {"width": 720, "height": 1280, "avg_frame_rate": "30000/1001"}
+                    ],
                     "format": {"duration": "61.5"},
                 }
             )
@@ -473,7 +498,9 @@ class TestSourceVideoProbe:
         with patch("subprocess.run", return_value=Result()):
             recorder.record_source_video(str(video))
         recorder.finish(success=True)
-        warnings = read_json(os.path.join(recorder.run_dir, "meta.json"))["recorder_warnings"]
+        warnings = read_json(os.path.join(recorder.run_dir, "meta.json"))[
+            "recorder_warnings"
+        ]
         assert any("ffprobe" in w for w in warnings)
 
 
@@ -494,7 +521,9 @@ class TestSaveDroppedCues:
         recorder.finish(success=True)
 
         payload = json.loads(
-            open(os.path.join(recorder.run_dir, "dropped_cues.json"), encoding="utf-8").read()
+            open(
+                os.path.join(recorder.run_dir, "dropped_cues.json"), encoding="utf-8"
+            ).read()
         )
         assert payload["reason"] == "source_cps_hallucination"
         assert payload["cues"][0]["text"] == "invented"

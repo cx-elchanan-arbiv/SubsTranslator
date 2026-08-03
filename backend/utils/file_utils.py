@@ -1,17 +1,17 @@
 """
 File utility functions for SubsTranslator
 """
+
 import re
 import unicodedata
-from typing import Optional, Tuple, Union
 
 
 def safe_int(
-    value: Union[str, int, None],
+    value: str | int | None,
     default: int,
-    min_val: Optional[int] = None,
-    max_val: Optional[int] = None
-) -> Tuple[int, Optional[str]]:
+    min_val: int | None = None,
+    max_val: int | None = None,
+) -> tuple[int, str | None]:
     """
     Safely convert a value to integer with validation.
 
@@ -117,4 +117,6 @@ def parse_time_to_seconds(time_str):
             raise ValueError(f"Invalid HH:MM:SS format: {time_str}") from e
 
     else:
-        raise ValueError(f"Invalid time format: {time_str}. Expected: SS, MM:SS, or HH:MM:SS")
+        raise ValueError(
+            f"Invalid time format: {time_str}. Expected: SS, MM:SS, or HH:MM:SS"
+        )

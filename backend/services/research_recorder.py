@@ -45,6 +45,7 @@ observability. Concretely:
 Callers therefore never branch on ``if recorder:`` and never wrap calls in ``try``.
 :func:`start_run` always returns an object with the full API.
 """
+
 from __future__ import annotations
 
 import json
@@ -204,8 +205,16 @@ class ResearchRecorder:
 
         result = subprocess.run(
             [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_streams", "-show_format", "-select_streams", "v:0", video_path,
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_streams",
+                "-show_format",
+                "-select_streams",
+                "v:0",
+                video_path,
             ],
             capture_output=True,
             text=True,
@@ -231,7 +240,9 @@ class ResearchRecorder:
                     self._meta["video_fps"] = None
         duration = (data.get("format") or {}).get("duration")
         try:
-            self._meta["video_duration_s"] = round(float(duration), 3) if duration else None
+            self._meta["video_duration_s"] = (
+                round(float(duration), 3) if duration else None
+            )
         except (TypeError, ValueError):
             self._meta["video_duration_s"] = None
 
@@ -305,9 +316,13 @@ class ResearchRecorder:
         """
         self._llm_index += 1
         prefix = f"{self._llm_index:02d}"
-        with open(self._path(LLM_DIR, f"{prefix}_system.txt"), "w", encoding="utf-8") as fh:
+        with open(
+            self._path(LLM_DIR, f"{prefix}_system.txt"), "w", encoding="utf-8"
+        ) as fh:
             fh.write(system or "")
-        with open(self._path(LLM_DIR, f"{prefix}_user.txt"), "w", encoding="utf-8") as fh:
+        with open(
+            self._path(LLM_DIR, f"{prefix}_user.txt"), "w", encoding="utf-8"
+        ) as fh:
             fh.write(user or "")
 
         if response is not None:
@@ -346,7 +361,9 @@ class ResearchRecorder:
                 size_mb,
                 self.max_copy_mb,
             )
-            self._note(f"{name} skipped: {size_mb:.1f} MB over the {self.max_copy_mb} MB limit")
+            self._note(
+                f"{name} skipped: {size_mb:.1f} MB over the {self.max_copy_mb} MB limit"
+            )
             return
         shutil.copy2(path, self._path(OUTPUTS_DIR, name))
         self._meta.setdefault("outputs", {})[name] = round(size_mb, 2)
@@ -408,7 +425,9 @@ class ResearchRecorder:
                 "cost_usd": self._meta.get("translation_cost_usd"),
             }
             line = json.dumps(row, ensure_ascii=False, default=str) + "\n"
-            with open(os.path.join(self.root, INDEX_FILENAME), "a", encoding="utf-8") as fh:
+            with open(
+                os.path.join(self.root, INDEX_FILENAME), "a", encoding="utf-8"
+            ) as fh:
                 fh.write(line)
         except Exception as exc:  # noqa: BLE001
             logger.warning(

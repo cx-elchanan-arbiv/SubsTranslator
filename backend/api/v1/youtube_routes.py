@@ -2,22 +2,24 @@
 YouTube routes for SubsTranslator API v1.
 Handles YouTube video processing and download-only functionality.
 """
+
 from flask import Blueprint, jsonify, request
 
 from config import get_config
-from tasks import download_and_process_youtube_task, download_youtube_only_task
+from i18n.translations import t
+from logging_config import get_logger
 from services.subtitle_pipeline import parse_subtitle_flags
 from services.url_resolver_service import resolve_video_url
-from logging_config import get_logger
-from i18n.translations import t
-from .helpers import validate_video_url, build_watermark_config_from_data
+from tasks import download_and_process_youtube_task, download_youtube_only_task
+
+from .helpers import build_watermark_config_from_data, validate_video_url
 
 # Configuration
 config = get_config()
 logger = get_logger(__name__)
 
 # Create blueprint
-youtube_bp = Blueprint('youtube', __name__)
+youtube_bp = Blueprint("youtube", __name__)
 
 
 @youtube_bp.route("/youtube", methods=["POST"])
@@ -29,7 +31,8 @@ def process_youtube_async():
             return (
                 jsonify(
                     {
-                        "error": t("features.youtube_pro_only") or "YouTube processing is available for PRO users only",
+                        "error": t("features.youtube_pro_only")
+                        or "YouTube processing is available for PRO users only",
                         "code": "YOUTUBE_RESTRICTED",
                     }
                 ),
@@ -75,7 +78,9 @@ def process_youtube_async():
 
         # Handle watermark configuration
         watermark_enabled = data.get("watermark_enabled", False)
-        watermark_config, watermark_error = build_watermark_config_from_data(watermark_enabled, data, request)
+        watermark_config, watermark_error = build_watermark_config_from_data(
+            watermark_enabled, data, request
+        )
         if watermark_error:
             return jsonify({"error": watermark_error}), 400
 
@@ -97,9 +102,10 @@ def process_youtube_async():
             return (
                 jsonify(
                     {
-                        "error": t("whisperModels.proOnlyTooltip") or "This model is available for PRO users only",
+                        "error": t("whisperModels.proOnlyTooltip")
+                        or "This model is available for PRO users only",
                         "code": "MODEL_RESTRICTED",
-                        "restricted_model": whisper_model
+                        "restricted_model": whisper_model,
                     }
                 ),
                 403,
@@ -200,7 +206,8 @@ def download_video_only():
             return (
                 jsonify(
                     {
-                        "error": t("features.youtube_pro_only") or "YouTube download is available for PRO users only",
+                        "error": t("features.youtube_pro_only")
+                        or "YouTube download is available for PRO users only",
                         "code": "YOUTUBE_RESTRICTED",
                     }
                 ),

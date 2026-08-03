@@ -268,7 +268,7 @@ CLOUD SERVICES:
 
 SYSTEM DEPENDENCIES:
 ├── FFmpeg (video processing)
-├── Python 3.9+
+├── Python 3.12+
 ├── Node.js 18+ (for frontend)
 └── Docker (containerization)
 ```

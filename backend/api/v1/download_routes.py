@@ -2,6 +2,7 @@
 Download routes for SubsTranslator API v1.
 Handles file downloads with security protections.
 """
+
 import os
 
 from flask import Blueprint, jsonify, request, send_file
@@ -15,7 +16,7 @@ config = get_config()
 logger = get_logger(__name__)
 
 # Create blueprint
-download_bp = Blueprint('download', __name__)
+download_bp = Blueprint("download", __name__)
 
 
 @download_bp.route("/download/<path:filename>", methods=["GET"])
@@ -43,12 +44,12 @@ def download_file(filename):
             return jsonify({"error": "Token-file mismatch"}), 403
 
     # Set MIME type for .srt files to text/plain with UTF-8 charset for better macOS compatibility
-    if requested_path.lower().endswith('.srt'):
+    if requested_path.lower().endswith(".srt"):
         return send_file(
             requested_path,
             as_attachment=True,
-            mimetype='text/plain; charset=utf-8',
-            download_name=os.path.basename(requested_path) + '.txt'
+            mimetype="text/plain; charset=utf-8",
+            download_name=os.path.basename(requested_path) + ".txt",
         )
 
     return send_file(requested_path, as_attachment=True)

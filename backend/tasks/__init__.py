@@ -9,17 +9,17 @@ from .cleanup_tasks import (
     cleanup_old_files_task,
 )
 
-# Processing tasks
-from .processing_tasks import (
-    process_video_task,
-    create_video_with_subtitles_from_segments,
-)
-
 # Download tasks
 from .download_tasks import (
     download_and_process_youtube_task,
     download_highest_quality_video_task,
     download_youtube_only_task,
+)
+
+# Processing tasks
+from .processing_tasks import (
+    create_video_with_subtitles_from_segments,
+    process_video_task,
 )
 
 # Progress manager (for internal use)

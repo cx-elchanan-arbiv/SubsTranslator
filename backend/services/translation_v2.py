@@ -277,9 +277,12 @@ class TokenUsage:
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
         self.requests += 1
-        rate_in, rate_out = USD_PER_1M_TOKENS.get(model, USD_PER_1M_TOKENS[DEFAULT_MODEL])
+        rate_in, rate_out = USD_PER_1M_TOKENS.get(
+            model, USD_PER_1M_TOKENS[DEFAULT_MODEL]
+        )
         self.cost_usd += (
-            prompt_tokens / 1_000_000 * rate_in + completion_tokens / 1_000_000 * rate_out
+            prompt_tokens / 1_000_000 * rate_in
+            + completion_tokens / 1_000_000 * rate_out
         )
 
     def as_dict(self) -> dict:
@@ -420,9 +423,7 @@ def build_system_prompt(
     ]
     if context_note:
         header.append(str(context_note).strip())
-    header.append(
-        f"Translate each numbered cue into {lang} for burned-in subtitles."
-    )
+    header.append(f"Translate each numbered cue into {lang} for burned-in subtitles.")
 
     filler_examples = (
         '"uh", "um", "you know", "I mean", "listen", "look", "so", sentence-initial '
@@ -432,7 +433,7 @@ def build_system_prompt(
         filler_rule = (
             f"REMOVE spoken disfluencies and filler: {filler_examples}. Subtitles are "
             "read, not heard — filler wastes reading time. Note that these are FILLER "
-            "only when they carry no meaning: sentence-initial \"like\" ("
+            'only when they carry no meaning: sentence-initial "like" ('
             '"Like, I was there") is filler and is deleted, while comparative "like" '
             '("it moves like a train") is meaning and is translated. The same test '
             'applies to "look" and "listen": drop the interjection, keep the verb.\n'
@@ -447,8 +448,8 @@ def build_system_prompt(
         filler_rule = (
             f"KEEP spoken disfluencies and filler: {filler_examples}. Render them with "
             f"their natural {lang} equivalents — this is a faithful, verbatim rendering "
-            "of the speaker's delivery. Even here, sentence-initial \"like\" is an "
-            "interjection, NOT the comparative \"like\": never render it as a "
+            'of the speaker\'s delivery. Even here, sentence-initial "like" is an '
+            'interjection, NOT the comparative "like": never render it as a '
             "comparison word."
         )
 
@@ -486,25 +487,25 @@ def build_system_prompt(
         f"phonetically into {lang} (optionally in quotes) instead of translating both "
         "names to the same word. This rule is triggered by the SYNTACTIC FRAME, not by "
         "the words in it — treat every one of these as the same construction:\n"
-        "   \"it wasn't called X, it was called Y\" / \"they didn't call it X, they "
+        '   "it wasn\'t called X, it was called Y" / "they didn\'t call it X, they '
         'called it Y"\n'
         '   "X, not Y" / "we say X rather than Y" / "the real name is X, not Y"\n'
         '"It is not Farsi, it is Parsi" turns on a single consonant and must keep it: '
-        "פארסי vs פרסי. A cue that reads \"it is not called A, it is called A\" is a "
+        'פארסי vs פרסי. A cue that reads "it is not called A, it is called A" is a '
         "mistranslation, not a subtitle.\n"
         f"WHEN TRANSLITERATION CANNOT CARRY THE CONTRAST — because the {lang} for the "
         f"foreign term and the transliteration of it are the SAME {lang} word, or differ "
         "only by diacritics — KEEP THE FOREIGN TERM IN LATIN SCRIPT instead. Diacritics "
         "are not a contrast: subtitle fonts do not draw Hebrew niqqud, so עברית and "
         "עִברית are one word on screen and a cue built on the difference between them "
-        "says nothing. \"They didn't call it Hebrew, they called it Ivrit\" must not "
+        'says nothing. "They didn\'t call it Hebrew, they called it Ivrit" must not '
         'become "לא קראו לזה עברית. קראו לזה עברית." and must not be rescued with '
         'niqqud either — it is "לא קראו לזה Hebrew. קראו לזה עברית." And "What is the '
         'Hebrew word for Hebrew?" is "מה המילה העברית ל-Hebrew?", never the tautology '
         '"מה המילה העברית לעברית?".'
     )
     rules.append(
-        f"A cue that begins with the dialogue dash \"{DIALOGUE_DASH}\" MUST begin with "
+        f'A cue that begins with the dialogue dash "{DIALOGUE_DASH}" MUST begin with '
         "that same dash in your translation. It marks a change of speaker inside the "
         "scene and the timing of that change has already been established from the "
         "audio — do not add it where it is absent and do not remove it where it is "
@@ -514,7 +515,7 @@ def build_system_prompt(
     if lang == "Hebrew":
         rules.append(
             f"Use correct Hebrew typography: gershayim {GERSHAYIM} (U+05F4) inside "
-            f"acronyms — צה{GERSHAYIM}ל, חו{GERSHAYIM}ל — never the ASCII quote \"."
+            f'acronyms — צה{GERSHAYIM}ל, חו{GERSHAYIM}ל — never the ASCII quote ".'
         )
         rules.append(
             f"Foreign names and loanwords take a geresh {GERESH} (U+05F3), never an "
@@ -524,7 +525,7 @@ def build_system_prompt(
         rules.append(
             "Grammatical gender must agree WITHIN each noun phrase, not only across "
             "speakers: the noun, its adjectives and its demonstratives all carry the "
-            f"noun's own gender (אותה מחווה מדהימה, not את אותו מחווה מדהימה)."
+            "noun's own gender (אותה מחווה מדהימה, not את אותו מחווה מדהימה)."
         )
     elif lang == "Arabic":
         rules.append(
@@ -545,8 +546,8 @@ def build_system_prompt(
         "INFER each speaker's and each addressee's gender ONLY from EXPLICIT TEXTUAL "
         "EVIDENCE in the cues in front of you: a personal name, a gendered form of "
         "address, a gendered pronoun used about that person, or a gendered noun they "
-        "use about themselves or their relationships (\"my husband\", \"my wife\", "
-        "\"ma'am\", \"sir\", \"she said\"). That is the whole list of admissible "
+        'use about themselves or their relationships ("my husband", "my wife", '
+        '"ma\'am", "sir", "she said"). That is the whole list of admissible '
         "evidence. Tone, topic, politeness, warmth, who is asking and who is answering, "
         "and what the scene 'feels' like are NOT evidence and must never move you off "
         "the default. WITH NO SUCH EVIDENCE, USE MASCULINE FORMS. This is mandatory, "
@@ -593,6 +594,7 @@ def same_language(source_lang, target_lang) -> bool:
     unrecognised are NOT a match, because "we do not know what was spoken" is not the
     same claim as "it was spoken in the target language".
     """
+
     def base(code):
         if not code or not isinstance(code, str):
             return None
@@ -699,7 +701,7 @@ def build_proofread_prompt(
     rules += [
         "Read the whole sequence first — it is ONE continuous recording, and a name "
         "spelled correctly in one cue tells you how to spell it in the next.",
-        f"A cue that begins with the dialogue dash \"{DIALOGUE_DASH}\" MUST keep it.",
+        f'A cue that begins with the dialogue dash "{DIALOGUE_DASH}" MUST keep it.',
         f"Cues marked {CONTEXT_MARKER} are surrounding dialogue given only so you "
         "understand the scene. Read them, never return them, and never include their "
         "ids in your output.",
@@ -812,7 +814,9 @@ def _resolve_client(client=None):
 
         # Mirrors the legacy translator: an explicit httpx client avoids the
         # "proxies" kwarg incompatibility seen with some httpx versions.
-        return OpenAI(api_key=api_key, http_client=httpx.Client(timeout=DEFAULT_TIMEOUT_S))
+        return OpenAI(
+            api_key=api_key, http_client=httpx.Client(timeout=DEFAULT_TIMEOUT_S)
+        )
     except Exception:  # pragma: no cover
         return OpenAI(api_key=api_key)
 
@@ -888,7 +892,9 @@ def _parse_cue_map(content: str) -> dict:
         try:
             cue_id = int(cue_id)
         except (TypeError, ValueError):
-            logger.warning("translation_v2: skipping cue entry without int id: %r", entry)
+            logger.warning(
+                "translation_v2: skipping cue entry without int id: %r", entry
+            )
             continue
         text = entry.get("t")
         if text is None:
@@ -902,7 +908,9 @@ def _parse_cue_map(content: str) -> dict:
     return out
 
 
-def _record_llm(recorder, stage: str, system: str, user: str, response, meta: dict) -> None:
+def _record_llm(
+    recorder, stage: str, system: str, user: str, response, meta: dict
+) -> None:
     """Hand one request/response pair to an optional research recorder.
 
     The recorder is **duck-typed and optional on purpose**: this module must stay
@@ -916,7 +924,9 @@ def _record_llm(recorder, stage: str, system: str, user: str, response, meta: di
     if recorder is None:
         return
     try:
-        recorder.record_llm(stage=stage, system=system, user=user, response=response, meta=meta)
+        recorder.record_llm(
+            stage=stage, system=system, user=user, response=response, meta=meta
+        )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("translation_v2: research recorder raised %s — ignored", exc)
 
@@ -1146,7 +1156,9 @@ def translate_cues(
         # of the next line's pronoun).
         context_ids = [
             i
-            for i in list(range(max(1, chunk_start + 1 - OVERLAP_CUES), chunk_start + 1))
+            for i in list(
+                range(max(1, chunk_start + 1 - OVERLAP_CUES), chunk_start + 1)
+            )
             + list(range(chunk_end + 1, min(total, chunk_end + OVERLAP_CUES) + 1))
             if i in texts
         ]
@@ -1315,7 +1327,7 @@ _CPS_SYSTEM_PROMPT = (
     "final mark it already has. A question stays a question.\n"
     "8. Keep proper nouns, numbers and acronyms, and keep existing typography "
     f"(Hebrew gershayim {GERSHAYIM}, geresh {GERESH}).\n"
-    f"9. A cue that begins with the dialogue dash \"{DIALOGUE_DASH}\" must still begin "
+    f'9. A cue that begins with the dialogue dash "{DIALOGUE_DASH}" must still begin '
     "with it.\n\n"
     'Return ONLY JSON: {"cues":[{"id":<int>,"t":"<shortened cue>"}]} — one entry per '
     "cue given, reusing the same ids."
@@ -1430,7 +1442,9 @@ def apply_time_relief(
         ceiling = start + float(max_dur)
         if index + 1 < len(out):
             try:
-                ceiling = min(ceiling, float(out[index + 1].get("start", 0) or 0) - min_gap)
+                ceiling = min(
+                    ceiling, float(out[index + 1].get("start", 0) or 0) - min_gap
+                )
             except (TypeError, ValueError):
                 pass
         if video_duration:
@@ -1480,8 +1494,7 @@ _TRAILING_PUNCT = _TERMINAL_PUNCT + ",:;"
 #: pronouns. Deliberately a CLOSED list — an unknown word counts as content, because the
 #: cost of protecting a filler word (a cue a few characters over budget) is nothing next
 #: to the cost of deleting a content word (a cue that says something else).
-_DROPPABLE = frozenset(
-    """
+_DROPPABLE = frozenset("""
     אה אהה אמ המ הא נו ובכן טוב אוקיי אוקי הנה כאילו בעצם פשוט ממש מאוד די לגמרי
     כמובן למעשה בכלל הרי בערך כמעט בעצם אז גם רק עוד כבר הכי יותר פחות כך ככה
     היי הי אוי אויה וואו וואי אופס הופ יאללה אוף
@@ -1495,32 +1508,27 @@ _DROPPABLE = frozenset(
     ו ש כי אם אבל או אשר כדי של עם על אל מן כן נכון
     uh um er ah oh hey well okay ok like you know i mean so right yeah
     a an the is are was were that this it
-    """.split()
-)
+    """.split())
 
 #: Words a condensation may NEVER delete, whatever else is going on. Negations invert
 #: the sentence; reflexives are the verb's object and leave a transitive verb dangling
 #: ("הכינו את עצמכם" -> "הכינו", "get yourselves ready" -> "get ready").
 #: ("אל" is deliberately absent: the negative imperative and the preposition "to" are
 #: spelled the same, and the preposition is the common one.)
-_NEVER_DROPPABLE = frozenset(
-    """
+_NEVER_DROPPABLE = frozenset("""
     לא אין בלי ללא לעולם מעולם לאו אינו אינה אינם אינן
     עצמי עצמך עצמו עצמה עצמנו עצמכם עצמכן עצמם עצמן
     not no never none without
-    """.split()
-)
+    """.split())
 
 #: Words that cannot be the last word of a cue. A cue ending on a preposition, a
 #: subordinator or the accusative את is a sentence someone cut in half.
 #: ("גם" and "רק" are deliberately absent — "ואני גם." is a whole Hebrew sentence.)
-_CANNOT_END = frozenset(
-    """
+_CANNOT_END = frozenset("""
     של את עם על אל מן אצל בין מול תחת לפי לגבי בגלל למרות כמו אחרי לפני
     כי אם אבל או אשר כדי כאשר ו ש הכי
     of to in on at by for with from and or but that which the a an
-    """.split()
-)
+    """.split())
 
 
 def _normalize_token(token: str) -> str:
@@ -1792,7 +1800,7 @@ def enforce_cps(
 
     client = _resolve_client(client)
     batches = [
-        violators[i: i + MAX_CUES_PER_CPS_REQUEST]
+        violators[i : i + MAX_CUES_PER_CPS_REQUEST]
         for i in range(0, len(violators), MAX_CUES_PER_CPS_REQUEST)
     ]
     still_over = 0
@@ -1944,7 +1952,9 @@ def enforce_cps(
                     limit,
                 )
 
-    _report(progress_callback, len(violators), len(violators), "Reading-speed pass done")
+    _report(
+        progress_callback, len(violators), len(violators), "Reading-speed pass done"
+    )
 
     logger.info(
         "translation_v2.enforce_cps: done | %d condensed, %d still over budget, "
@@ -1994,7 +2004,9 @@ def _measured_text(cue) -> str:
     return ""
 
 
-def cps_report(cues, *, max_cps=DEFAULT_MAX_CPS, max_chars_per_cue=DEFAULT_MAX_CHARS_PER_CUE):
+def cps_report(
+    cues, *, max_cps=DEFAULT_MAX_CPS, max_chars_per_cue=DEFAULT_MAX_CHARS_PER_CUE
+):
     """
     Measure-only helper: per-cue characters, duration, CPS and whether it is in budget.
 
@@ -2013,7 +2025,8 @@ def cps_report(cues, *, max_cps=DEFAULT_MAX_CPS, max_chars_per_cue=DEFAULT_MAX_C
                 "chars": len(text),
                 "duration": round(duration, 3),
                 "cps": round(cps, 2) if duration > 0 else None,
-                "ok": len(text) <= max_chars_per_cue and (duration <= 0 or cps <= max_cps),
+                "ok": len(text) <= max_chars_per_cue
+                and (duration <= 0 or cps <= max_cps),
             }
         )
     return report

@@ -2,11 +2,13 @@
 Health, config, and metadata routes for SubsTranslator
 Handles health checks, feature flags, and configuration endpoints
 """
+
 import os
 import shutil
 import subprocess
 
 from flask import Blueprint, jsonify
+
 from config import get_config
 from logging_config import get_logger
 
@@ -15,7 +17,7 @@ config = get_config()
 logger = get_logger(__name__)
 
 # Create blueprint
-health_bp = Blueprint('health', __name__)
+health_bp = Blueprint("health", __name__)
 
 
 def _is_valid_openai_key(api_key: str) -> bool:
@@ -45,7 +47,7 @@ def _is_valid_openai_key(api_key: str) -> bool:
         return False
 
     # Basic format check - OpenAI keys should start with 'sk-'
-    if not api_key.startswith('sk-'):
+    if not api_key.startswith("sk-"):
         return False
 
     # Key should have reasonable length (OpenAI keys are typically 51+ chars)
@@ -58,19 +60,24 @@ def _is_valid_openai_key(api_key: str) -> bool:
 @health_bp.route("/", methods=["GET"])
 def root():
     """Root endpoint - service information"""
-    return jsonify({
-        "ok": True,
-        "service": "SubsTranslator API",
-        "version": "1.0.0",
-        "environment": os.getenv("FLASK_ENV", "production"),
-        "endpoints": {
-            "health": "/health",
-            "upload": "/upload",
-            "youtube": "/youtube",
-            "status": "/status/<task_id>",
-            "documentation": "https://github.com/cx-elchanan-arbiv/SubsTranslator"
-        }
-    }), 200
+    return (
+        jsonify(
+            {
+                "ok": True,
+                "service": "SubsTranslator API",
+                "version": "1.0.0",
+                "environment": os.getenv("FLASK_ENV", "production"),
+                "endpoints": {
+                    "health": "/health",
+                    "upload": "/upload",
+                    "youtube": "/youtube",
+                    "status": "/status/<task_id>",
+                    "documentation": "https://github.com/cx-elchanan-arbiv/SubsTranslator",
+                },
+            }
+        ),
+        200,
+    )
 
 
 @health_bp.route("/ping", methods=["GET"])
@@ -82,11 +89,13 @@ def ping():
 @health_bp.route("/healthz", methods=["GET"])
 def healthz():
     """Health check endpoint (alias for /health for Render compatibility)"""
-    return jsonify({
-        "status": "healthy",
-        "message": "SubsTranslator is running!",
-        "ffmpeg_installed": shutil.which("ffmpeg") is not None,
-    })
+    return jsonify(
+        {
+            "status": "healthy",
+            "message": "SubsTranslator is running!",
+            "ffmpeg_installed": shutil.which("ffmpeg") is not None,
+        }
+    )
 
 
 @health_bp.route("/health", methods=["GET"])
@@ -104,11 +113,13 @@ def health_check():
 @health_bp.route("/api/features", methods=["GET"])
 def get_features():
     """Return feature flags for frontend."""
-    return jsonify({
-        "youtube_download_enabled": config.ENABLE_YOUTUBE_DOWNLOAD,
-        "youtube_restricted": config.is_youtube_restricted(),
-        "hosted_mode": config.HOSTED_MODE
-    })
+    return jsonify(
+        {
+            "youtube_download_enabled": config.ENABLE_YOUTUBE_DOWNLOAD,
+            "youtube_restricted": config.is_youtube_restricted(),
+            "hosted_mode": config.HOSTED_MODE,
+        }
+    )
 
 
 @health_bp.route("/health/deps", methods=["GET"])
@@ -122,6 +133,7 @@ def health_deps():
     # Check Redis connection
     try:
         import redis
+
         redis_client = redis.from_url(config.REDIS_URL)
         redis_client.ping()
         deps["redis"] = "ok"
@@ -130,7 +142,8 @@ def health_deps():
 
     # Check Celery broker connection
     try:
-        from app_celery import celery_app
+        from celery_worker import celery_app
+
         # Ping with 1 second timeout
         celery_app.control.inspect().ping()
         deps["celery"] = "ok"
@@ -144,7 +157,7 @@ def health_deps():
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=2
+            timeout=2,
         )
         deps["ffmpeg"] = "ok"
     except Exception as e:
@@ -153,6 +166,7 @@ def health_deps():
     # Check yt-dlp installation and version
     try:
         import yt_dlp
+
         version = yt_dlp.version.__version__
         deps["yt_dlp"] = f"ok (v{version})"
 
@@ -183,6 +197,7 @@ def health_deps():
     try:
         # Import get_storage_uri from app if available
         from app import get_storage_uri
+
         storage_uri = get_storage_uri()
         deps["limiter_storage"] = storage_uri
     except Exception as e:
@@ -248,8 +263,8 @@ def get_translation_services():
 @health_bp.route("/whisper-models", methods=["GET"])
 def get_whisper_models():
     """Get available Whisper models with user-friendly descriptions"""
-    from services.whisper_smart import SmartWhisperManager
     from i18n.translations import t
+    from services.whisper_smart import SmartWhisperManager
 
     manager = SmartWhisperManager()
     model_capabilities = manager.get_available_models()
@@ -274,8 +289,10 @@ def get_whisper_models():
             # Restriction info for frontend
             "restricted": is_restricted,
             "restrictedReason": (
-                t("whisperModels.proOnlyTooltip") or "Available for PRO users only"
-            ) if is_restricted else None,
+                (t("whisperModels.proOnlyTooltip") or "Available for PRO users only")
+                if is_restricted
+                else None
+            ),
             # Only show "pro" tier when in hosted mode AND model is in pro_only_models
             # In self-hosted mode, all models are "free" (unlocked)
             "tier": "pro" if (is_hosted and model_name in pro_only_models) else "free",

@@ -7,16 +7,20 @@ celery_app = Celery("tasks")
 celery_app.config_from_object("celery_config")
 
 # This import is placed here to avoid circular imports.
-# The tasks module needs the `celery_app` object, so it's imported after the app is created.
-import tasks  # Import tasks to register them with Celery
-import tasks_addition  # Import additional tasks
+# The tasks module needs the `celery_app` object, so it's imported after the app is
+# created. It is a SIDE-EFFECT import: importing `tasks` is what runs every
+# @celery_app.task decorator and registers the tasks on the worker. It looks unused
+# to a linter, but removing it silently produces a worker with zero tasks.
+import tasks  # noqa: F401  (side-effect import: registers Celery tasks)
 
 # Get logger for startup messages
 from logging_config import get_logger
+
 logger = get_logger(__name__)
 
 # Log SSL configuration for debugging
 from config import get_config
+
 _config = get_config()
 if _config.CELERY_BROKER_URL and "ssl_cert_reqs" in _config.CELERY_BROKER_URL:
     logger.info("🔒 Redis TLS configured with ssl_cert_reqs in URL")

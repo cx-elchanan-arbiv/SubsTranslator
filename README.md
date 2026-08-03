@@ -7,7 +7,7 @@
 The entire application is containerized using Docker with professional-grade Hebrew/RTL text support and intelligent model selection.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![Node.js 18+](https://img.shields.io/badge/node-18+-green.svg)](https://nodejs.org/)
 [![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
 
@@ -67,7 +67,7 @@ The entire application is containerized using Docker with professional-grade Heb
     - Firebase project for authentication ([Setup guide](https://firebase.google.com/docs/web/setup))
 
 **For local development (without Docker):**
--   Python 3.9+
+-   Python 3.12+
 -   Node.js 18+
 -   FFmpeg 4.4+
 -   Redis 6.0+
@@ -260,7 +260,7 @@ subtitles-ai/
 ## 🛠️ Tech Stack
 
 ### Backend
-- **Python 3.9+** - Core language
+- **Python 3.12+** - Core language
 - **Flask 3.0+** - Web framework
 - **Celery 5.3+** - Distributed task queue
 - **Redis 6.0+** - Message broker & caching

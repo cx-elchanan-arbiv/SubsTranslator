@@ -19,6 +19,7 @@ Two obligations, both tested here:
    values captured from the pre-change code (commit 92163f6). Any drift is a failure,
    not a diff to eyeball.
 """
+
 import hashlib
 import os
 import sys
@@ -58,10 +59,22 @@ from services.subtitle_engine import (  # noqa: E402
 #: with digits and a percent sign, an acronym that becomes gershayim, and a short cue.
 #: Used for both the golden hashes and the overflow checks.
 CUES = [
-    {"start": 0.0, "end": 2.4, "text": "It could complicate things. Do you worry about that?"},
+    {
+        "start": 0.0,
+        "end": 2.4,
+        "text": "It could complicate things. Do you worry about that?",
+    },
     {"start": 2.5, "end": 4.0, "text": "כן, אני חושב על זה הרבה מאוד לאחרונה."},
-    {"start": 4.1, "end": 7.0, "text": "הם עברו ל-Microsoft Azure ב-2026, וזה עלה 15% יותר."},
-    {"start": 7.2, "end": 9.9, "text": 'שירתתי בצה"ל חמש שנים, ואני יודע בדיוק איך זה עובד שם.'},
+    {
+        "start": 4.1,
+        "end": 7.0,
+        "text": "הם עברו ל-Microsoft Azure ב-2026, וזה עלה 15% יותר.",
+    },
+    {
+        "start": 7.2,
+        "end": 9.9,
+        "text": 'שירתתי בצה"ל חמש שנים, ואני יודע בדיוק איך זה עובד שם.',
+    },
     {"start": 10.0, "end": 12.0, "text": "Short one."},
 ]
 
@@ -84,9 +97,11 @@ def event_lines(ass_text):
     for line in ass_text.splitlines():
         if not line.startswith("Dialogue:"):
             continue
-        body = line[len("Dialogue:"):].strip().split(",", _EVENT_TEXT_FIELD)[
-            _EVENT_TEXT_FIELD
-        ]
+        body = (
+            line[len("Dialogue:") :]
+            .strip()
+            .split(",", _EVENT_TEXT_FIELD)[_EVENT_TEXT_FIELD]
+        )
         for piece in body.split("\\N"):
             out.append(piece.replace("⁦", "").replace("⁧", "").replace("⁩", ""))
     return out
@@ -117,18 +132,66 @@ class TestLandscapeIsUntouched:
 
     #: (width, height, rtl) -> sha256 of the complete .ass file the OLD code emitted.
     GOLDEN_HASHES = {
-        (1280, 720, True): "9c23677460c5267b00b5b6d16d625ae084847763c088ccfbe7d0c9c1fae97b35",
-        (1280, 720, False): "3c2d8ffb658aed992e19aa6d79c779dcc2f50c9907ff372d40161895d73ce461",
-        (1920, 1080, True): "580c53e83a28833fa47fa5e878079ea720ebab2ae52bcc45b0c118361f1949eb",
-        (1920, 1080, False): "b47472584998d851f028ebb31f075ab25dedd3855a97b140e1954a3fa6183cec",
-        (3840, 2160, True): "73e327ca15d99afbc237691cc93879b0b999742bd3bf876f7c0f01f62ac9a20e",
-        (3840, 2160, False): "fd5cef7dd51abe11730cefc2a13cf885e9b40d75bf9af7b6d0766a89f9e3b4e7",
-        (854, 480, True): "a68d22ce817b4ec2b099767437129ab39085263987c2a41616c06a87329931f2",
-        (854, 480, False): "71594dd5738fa6fa7f794dd0da908d8a6a884a2178a414cff49a33870ea6a13b",
-        (640, 360, True): "c8102dd612d0dd98d8d89cdf8bbe1e385cf48fa89a7d86c0ae930c83a8f4e9fc",
-        (640, 360, False): "2f6f77d63bfcffaf1e23e361fb9840bdf168a499a9054e864cf70090b354c804",
-        (1920, 800, True): "f58b0113c5f6898e842154a5e561a6831b0617610c708211da38a7b9e0f172e1",
-        (1920, 800, False): "008517cdb63456b236f24e73b9f14546b1515783801b621f9827bd736b896607",
+        (
+            1280,
+            720,
+            True,
+        ): "9c23677460c5267b00b5b6d16d625ae084847763c088ccfbe7d0c9c1fae97b35",
+        (
+            1280,
+            720,
+            False,
+        ): "3c2d8ffb658aed992e19aa6d79c779dcc2f50c9907ff372d40161895d73ce461",
+        (
+            1920,
+            1080,
+            True,
+        ): "580c53e83a28833fa47fa5e878079ea720ebab2ae52bcc45b0c118361f1949eb",
+        (
+            1920,
+            1080,
+            False,
+        ): "b47472584998d851f028ebb31f075ab25dedd3855a97b140e1954a3fa6183cec",
+        (
+            3840,
+            2160,
+            True,
+        ): "73e327ca15d99afbc237691cc93879b0b999742bd3bf876f7c0f01f62ac9a20e",
+        (
+            3840,
+            2160,
+            False,
+        ): "fd5cef7dd51abe11730cefc2a13cf885e9b40d75bf9af7b6d0766a89f9e3b4e7",
+        (
+            854,
+            480,
+            True,
+        ): "a68d22ce817b4ec2b099767437129ab39085263987c2a41616c06a87329931f2",
+        (
+            854,
+            480,
+            False,
+        ): "71594dd5738fa6fa7f794dd0da908d8a6a884a2178a414cff49a33870ea6a13b",
+        (
+            640,
+            360,
+            True,
+        ): "c8102dd612d0dd98d8d89cdf8bbe1e385cf48fa89a7d86c0ae930c83a8f4e9fc",
+        (
+            640,
+            360,
+            False,
+        ): "2f6f77d63bfcffaf1e23e361fb9840bdf168a499a9054e864cf70090b354c804",
+        (
+            1920,
+            800,
+            True,
+        ): "f58b0113c5f6898e842154a5e561a6831b0617610c708211da38a7b9e0f172e1",
+        (
+            1920,
+            800,
+            False,
+        ): "008517cdb63456b236f24e73b9f14546b1515783801b621f9827bd736b896607",
     }
 
     @pytest.mark.parametrize(("size", "expected"), sorted(EXPECTED_PARAMS.items()))
@@ -231,9 +294,21 @@ class TestOtherAspectRatios:
     @pytest.mark.parametrize(
         "size",
         [
-            (1280, 720), (1920, 1080), (3840, 2160), (854, 480), (640, 360),
-            (1080, 1080), (720, 1280), (1080, 1920), (480, 854), (240, 426),
-            (1920, 800), (2560, 1080), (1440, 1080), (360, 640), (200, 400),
+            (1280, 720),
+            (1920, 1080),
+            (3840, 2160),
+            (854, 480),
+            (640, 360),
+            (1080, 1080),
+            (720, 1280),
+            (1080, 1920),
+            (480, 854),
+            (240, 426),
+            (1920, 800),
+            (2560, 1080),
+            (1440, 1080),
+            (360, 640),
+            (200, 400),
         ],
     )
     def test_estimated_line_width_never_exceeds_the_usable_width(self, size):

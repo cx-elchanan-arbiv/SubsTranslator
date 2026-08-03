@@ -2,9 +2,9 @@
 Video processing routes for SubsTranslator
 Handles video upload, YouTube processing, task status, and file downloads
 """
-import os
-import uuid
+
 import base64
+import os
 import re
 
 from celery.result import AsyncResult
@@ -12,7 +12,12 @@ from flask import Blueprint, jsonify, request, send_file, session
 from werkzeug.utils import secure_filename
 
 from config import get_config
+from i18n.translations import t
+from logging_config import get_logger
 from logo_manager import LogoManager
+from services.subtitle_pipeline import parse_subtitle_flags
+from services.token_service import use_download_token
+from services.url_resolver_service import resolve_video_url
 from tasks import (
     download_and_process_youtube_task,
     download_youtube_only_task,
@@ -20,11 +25,6 @@ from tasks import (
 )
 from utils.file_probe import probe_file_safe
 from utils.file_utils import safe_int
-from logging_config import get_logger
-from i18n.translations import t
-from services.subtitle_pipeline import parse_subtitle_flags
-from services.token_service import use_download_token
-from services.url_resolver_service import resolve_video_url
 
 # Configuration
 config = get_config()
@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 logo_manager = LogoManager(config.ASSETS_FOLDER)
 
 # Create blueprint
-video_bp = Blueprint('video', __name__)
+video_bp = Blueprint("video", __name__)
 
 
 def allowed_file(filename):
@@ -62,7 +62,14 @@ def upload_file_async():
         file.seek(0)  # Reset to beginning
 
         if file_size > config.MAX_FILE_SIZE:
-            return jsonify({"error": f"File too large. Maximum size: {config.MAX_FILE_SIZE // (1024*1024)}MB"}), 413
+            return (
+                jsonify(
+                    {
+                        "error": f"File too large. Maximum size: {config.MAX_FILE_SIZE // (1024*1024)}MB"
+                    }
+                ),
+                413,
+            )
 
         source_lang = request.form.get("source_lang", config.DEFAULT_SOURCE_LANG)
         target_lang = request.form.get("target_lang", config.DEFAULT_TARGET_LANG)
@@ -81,7 +88,9 @@ def upload_file_async():
         watermark_enabled = (
             request.form.get("watermark_enabled", "false").lower() == "true"
         )
-        watermark_config, watermark_error = _build_watermark_config(watermark_enabled, request)
+        watermark_config, watermark_error = _build_watermark_config(
+            watermark_enabled, request
+        )
         if watermark_error:
             return jsonify({"error": watermark_error}), 400
 
@@ -100,9 +109,10 @@ def upload_file_async():
             return (
                 jsonify(
                     {
-                        "error": t("whisperModels.proOnlyTooltip") or "This model is available for PRO users only",
+                        "error": t("whisperModels.proOnlyTooltip")
+                        or "This model is available for PRO users only",
                         "code": "MODEL_RESTRICTED",
-                        "restricted_model": whisper_model
+                        "restricted_model": whisper_model,
                     }
                 ),
                 403,
@@ -124,7 +134,9 @@ def upload_file_async():
                 "UNSUPPORTED_MEDIA": "File format is not supported. Please upload a valid video or audio file.",
                 "PROBE_FAILED": "Failed to analyze media file. The file may be corrupted or in an unsupported format.",
             }
-            error_msg = error_messages.get(probe_error, "Failed to process uploaded file")
+            error_msg = error_messages.get(
+                probe_error, "Failed to process uploaded file"
+            )
             logger.error(f"File probe failed for {filename}: {probe_error}")
 
             # Clean up the uploaded file
@@ -133,10 +145,7 @@ def upload_file_async():
             except:
                 pass
 
-            return jsonify({
-                "error": error_msg,
-                "code": probe_error
-            }), 400
+            return jsonify({"error": error_msg, "code": probe_error}), 400
 
         # Prepare processing_info with user choices and file metadata.
         # The four subtitle-quality toggles are user choices like any other: without
@@ -209,7 +218,8 @@ def process_youtube_async():
             return (
                 jsonify(
                     {
-                        "error": t("features.youtube_pro_only") or "YouTube processing is available for PRO users only",
+                        "error": t("features.youtube_pro_only")
+                        or "YouTube processing is available for PRO users only",
                         "code": "YOUTUBE_RESTRICTED",
                     }
                 ),
@@ -256,7 +266,9 @@ def process_youtube_async():
 
         # Handle watermark configuration
         watermark_enabled = data.get("watermark_enabled", False)
-        watermark_config, watermark_error = _build_watermark_config_from_data(watermark_enabled, data, request)
+        watermark_config, watermark_error = _build_watermark_config_from_data(
+            watermark_enabled, data, request
+        )
         if watermark_error:
             return jsonify({"error": watermark_error}), 400
 
@@ -278,9 +290,10 @@ def process_youtube_async():
             return (
                 jsonify(
                     {
-                        "error": t("whisperModels.proOnlyTooltip") or "This model is available for PRO users only",
+                        "error": t("whisperModels.proOnlyTooltip")
+                        or "This model is available for PRO users only",
                         "code": "MODEL_RESTRICTED",
-                        "restricted_model": whisper_model
+                        "restricted_model": whisper_model,
                     }
                 ),
                 403,
@@ -381,7 +394,8 @@ def download_video_only():
             return (
                 jsonify(
                     {
-                        "error": t("features.youtube_pro_only") or "YouTube download is available for PRO users only",
+                        "error": t("features.youtube_pro_only")
+                        or "YouTube download is available for PRO users only",
                         "code": "YOUTUBE_RESTRICTED",
                     }
                 ),
@@ -482,7 +496,9 @@ def get_task_status(task_id):
                 status = "FAILURE"
                 error_info = {
                     "code": result.get("code", "TASK_FAILED"),
-                    "message": result.get("message", result.get("error", "Task failed")),
+                    "message": result.get(
+                        "message", result.get("error", "Task failed")
+                    ),
                     "user_facing_message": result.get(
                         "user_facing_message", "Processing failed. Please try again."
                     ),
@@ -518,7 +534,8 @@ def get_task_status(task_id):
                 "code": result_dict.get("code", "TASK_FAILED"),
                 "message": result_dict.get("message", "Task failed"),
                 "user_facing_message": result_dict.get(
-                    "user_facing_message", "An error occurred during processing. Please try again."
+                    "user_facing_message",
+                    "An error occurred during processing. Please try again.",
                 ),
                 "recoverable": result_dict.get("recoverable", True),
             }
@@ -605,12 +622,12 @@ def download_file(filename):
             return jsonify({"error": "Token-file mismatch"}), 403
 
     # Set MIME type for .srt files to text/plain with UTF-8 charset for better macOS compatibility
-    if requested_path.lower().endswith('.srt'):
+    if requested_path.lower().endswith(".srt"):
         return send_file(
             requested_path,
             as_attachment=True,
-            mimetype='text/plain; charset=utf-8',
-            download_name=os.path.basename(requested_path) + '.txt'
+            mimetype="text/plain; charset=utf-8",
+            download_name=os.path.basename(requested_path) + ".txt",
         )
 
     return send_file(requested_path, as_attachment=True)
@@ -620,8 +637,8 @@ def download_file(filename):
 def clear_watermark_logo():
     """Clear the saved watermark logo from session."""
     try:
-        if 'custom_logo_path' in session:
-            logo_path = session.pop('custom_logo_path', None)
+        if "custom_logo_path" in session:
+            logo_path = session.pop("custom_logo_path", None)
             # Optionally delete the file
             if logo_path and os.path.exists(logo_path):
                 try:
@@ -633,7 +650,10 @@ def clear_watermark_logo():
             logger.info("Watermark logo cleared from session")
             return jsonify({"success": True, "message": "Watermark logo cleared"}), 200
         else:
-            return jsonify({"success": True, "message": "No watermark logo to clear"}), 200
+            return (
+                jsonify({"success": True, "message": "No watermark logo to clear"}),
+                200,
+            )
 
     except Exception as e:
         logger.error(f"Error clearing watermark logo: {str(e)}")
@@ -645,23 +665,30 @@ def cleanup_logos():
     """Clean up old logo files (admin endpoint)"""
     try:
         # Only allow in development or with admin key
-        admin_key = request.headers.get('X-Admin-Key')
-        if os.getenv('FLASK_ENV') != 'development' and admin_key != os.getenv('ADMIN_KEY'):
+        admin_key = request.headers.get("X-Admin-Key")
+        if os.getenv("FLASK_ENV") != "development" and admin_key != os.getenv(
+            "ADMIN_KEY"
+        ):
             return jsonify({"error": "Unauthorized"}), 401
 
         # Run cleanup (default: remove logos older than 24 hours)
-        keep_hours = request.json.get('keep_hours', 24) if request.is_json else 24
+        keep_hours = request.json.get("keep_hours", 24) if request.is_json else 24
         logo_manager.cleanup_old_logos(keep_hours)
 
         # Get current logo stats
         logos = logo_manager.get_all_logos()
 
-        return jsonify({
-            "success": True,
-            "message": f"Cleanup completed. Kept logos from last {keep_hours} hours.",
-            "current_logos": len(logos),
-            "logos": logos
-        }), 200
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "message": f"Cleanup completed. Kept logos from last {keep_hours} hours.",
+                    "current_logos": len(logos),
+                    "logos": logos,
+                }
+            ),
+            200,
+        )
     except Exception as e:
         logger.error(f"Failed to cleanup logos: {e}")
         return jsonify({"error": str(e)}), 500
@@ -681,17 +708,30 @@ def _validate_video_url(url):
         # Popular supported domains (yt-dlp supports 1849+ sites)
         popular_domains = [
             # YouTube
-            "youtube.com", "www.youtube.com", "youtu.be",
-            "m.youtube.com", "music.youtube.com",
+            "youtube.com",
+            "www.youtube.com",
+            "youtu.be",
+            "m.youtube.com",
+            "music.youtube.com",
             # Other popular video sites
-            "vimeo.com", "dailymotion.com", "facebook.com",
-            "fb.watch", "instagram.com", "tiktok.com",
-            "twitch.tv", "reddit.com", "soundcloud.com",
-            "twitter.com", "x.com", "foxnews.com",
+            "vimeo.com",
+            "dailymotion.com",
+            "facebook.com",
+            "fb.watch",
+            "instagram.com",
+            "tiktok.com",
+            "twitch.tv",
+            "reddit.com",
+            "soundcloud.com",
+            "twitter.com",
+            "x.com",
+            "foxnews.com",
         ]
 
         # Check if it's a known popular domain or let yt-dlp handle it
-        is_known_domain = any(valid_domain in domain for valid_domain in popular_domains)
+        is_known_domain = any(
+            valid_domain in domain for valid_domain in popular_domains
+        )
 
         # For unknown domains, we'll let yt-dlp try and handle the error gracefully
         if not is_known_domain:
@@ -730,17 +770,19 @@ def _build_watermark_config(watermark_enabled, request):
         logo_file = request.files["watermark_logo"]
         if logo_file and logo_file.filename:
             file_content = logo_file.read()
-            extension = logo_file.filename.rsplit('.', 1)[1].lower()
+            extension = logo_file.filename.rsplit(".", 1)[1].lower()
             logo_path, is_new = logo_manager.save_logo(file_content, extension)
             watermark_config["custom_logo_path"] = logo_path
-            session['custom_logo_path'] = logo_path
-            logger.info(f"{'Saved new' if is_new else 'Reusing existing'} logo: {os.path.basename(logo_path)}")
+            session["custom_logo_path"] = logo_path
+            logger.info(
+                f"{'Saved new' if is_new else 'Reusing existing'} logo: {os.path.basename(logo_path)}"
+            )
     else:
         # Check for logo data URL
         logo_data_url = request.form.get("watermark_logo_url")
         if logo_data_url:
             _process_logo_data_url(logo_data_url, watermark_config)
-        elif 'custom_logo_path' in session:
+        elif "custom_logo_path" in session:
             _use_session_logo(watermark_config)
 
     return watermark_config, None
@@ -774,11 +816,13 @@ def _build_watermark_config_from_data(watermark_enabled, data, request):
         logo_file = request.files["watermark_logo"]
         if logo_file and logo_file.filename:
             file_content = logo_file.read()
-            extension = logo_file.filename.rsplit('.', 1)[1].lower()
+            extension = logo_file.filename.rsplit(".", 1)[1].lower()
             logo_path, is_new = logo_manager.save_logo(file_content, extension)
             watermark_config["custom_logo_path"] = logo_path
-            session['custom_logo_path'] = logo_path
-            logger.info(f"{'Saved new' if is_new else 'Reusing existing'} logo for YouTube: {os.path.basename(logo_path)}")
+            session["custom_logo_path"] = logo_path
+            logger.info(
+                f"{'Saved new' if is_new else 'Reusing existing'} logo for YouTube: {os.path.basename(logo_path)}"
+            )
     else:
         # Check for logo data URL
         if request.content_type and "application/json" in request.content_type:
@@ -788,7 +832,7 @@ def _build_watermark_config_from_data(watermark_enabled, data, request):
 
         if logo_data_url:
             _process_logo_data_url(logo_data_url, watermark_config, "YouTube")
-        elif 'custom_logo_path' in session:
+        elif "custom_logo_path" in session:
             _use_session_logo(watermark_config, "YouTube")
 
     return watermark_config, None
@@ -797,28 +841,30 @@ def _build_watermark_config_from_data(watermark_enabled, data, request):
 def _process_logo_data_url(logo_data_url, watermark_config, context=""):
     """Process a base64 logo data URL and add to config."""
     try:
-        match = re.match(r'data:image/([\w\+\-]+);base64,(.+)', logo_data_url)
+        match = re.match(r"data:image/([\w\+\-]+);base64,(.+)", logo_data_url)
         if match:
-            file_ext = match.group(1).replace('jpeg', 'jpg')
+            file_ext = match.group(1).replace("jpeg", "jpg")
             base64_data = match.group(2)
             file_content = base64.b64decode(base64_data)
             logo_path, is_new = logo_manager.save_logo(file_content, file_ext)
             watermark_config["custom_logo_path"] = logo_path
-            session['custom_logo_path'] = logo_path
+            session["custom_logo_path"] = logo_path
             ctx = f" for {context}" if context else ""
-            logger.info(f"{'Saved new' if is_new else 'Reusing existing'} logo from data URL{ctx}: {os.path.basename(logo_path)}")
+            logger.info(
+                f"{'Saved new' if is_new else 'Reusing existing'} logo from data URL{ctx}: {os.path.basename(logo_path)}"
+            )
     except Exception as e:
         logger.error(f"Failed to process logo data URL: {e}")
 
 
 def _use_session_logo(watermark_config, context=""):
     """Use logo from session if available."""
-    saved_logo_path = session['custom_logo_path']
+    saved_logo_path = session["custom_logo_path"]
     if os.path.exists(saved_logo_path):
         watermark_config["custom_logo_path"] = saved_logo_path
         ctx = f" for {context}" if context else ""
         logger.info(f"Using previously saved logo{ctx}: {saved_logo_path}")
     else:
-        session.pop('custom_logo_path', None)
+        session.pop("custom_logo_path", None)
         ctx = f" for {context}" if context else ""
         logger.warning(f"Previously saved logo not found{ctx}, removed from session")

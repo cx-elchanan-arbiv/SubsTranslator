@@ -2,13 +2,14 @@
 Video processing service for SubsTranslator
 Handles video format verification and conversion operations
 """
+
 import json
 import os
 import subprocess
 
 from config import get_config
+from core.exceptions import FFmpegProcessError, FFmpegTimeoutError
 from logging_config import get_logger
-from core.exceptions import FFmpegTimeoutError, FFmpegProcessError
 
 # Configuration
 config = get_config()

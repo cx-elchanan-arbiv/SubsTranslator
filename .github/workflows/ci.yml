@@ -41,10 +41,7 @@ jobs:
         TESTING: "true"
       run: |
         # Run only unit tests in CI (integration tests require Docker/services)
-        # Excluded: 4 legacy translation-service test files with pre-existing
-        # failures (rate-limiter backoff, months old) — tracked in the maintenance
-        # backlog; every other unit test runs.
-        python -m pytest backend/tests/unit/ -v --tb=short -m unit --cov=backend --cov-report=xml --cov-report=term --ignore=backend/tests/unit/test_enhanced_translation.py --ignore=backend/tests/unit/test_segment_batching.py --ignore=backend/tests/unit/test_openai_mismatch_protection.py --ignore=backend/tests/unit/test_translation_services.py
+        python -m pytest backend/tests/unit/ -v --tb=short -m unit --cov=backend --cov-report=xml --cov-report=term
         
     - name: 📈 Upload Coverage to Codecov
       uses: codecov/codecov-action@v3
@@ -86,8 +83,7 @@ jobs:
   lint-and-format:
     name: Code Quality Check
     runs-on: ubuntu-latest
-    if: false  # Skip code quality checks for now
-    
+
     steps:
     - name: 📥 Checkout Code
       uses: actions/checkout@v4
@@ -110,16 +106,22 @@ jobs:
         DISABLE_RATE_LIMIT: "1"
         TESTING: "true"
       run: |
-        pip install flake8 black isort ruff
+        pip install black isort
         pip install -r backend/requirements.txt
         pip install -e backend/
         # Check formatting
         black --check backend/
-        # Check imports  
+        # Check imports
         isort --check-only backend/
-        # Check linting with ruff (modern replacement)
-        ruff check backend/
-        
+        # NOTE: `ruff check backend/` is intentionally NOT gated yet. The backend is
+        # black/isort-clean, but ruff's configured rule set ([tool.ruff] in
+        # backend/pyproject.toml) still reports ~190 findings that need judgement,
+        # not formatting: B904 (raise ... from), E722 (bare except), E402
+        # (deliberate late imports), B023 (closure-over-loop-variable). Turning it on
+        # is a separate, reviewable change — auto-fixing it is NOT safe here: a
+        # `ruff --fix` pass silently deleted the side-effect `import tasks` from
+        # celery_worker.py, which would have shipped a worker with zero tasks.
+
     - name: 🔍 Check TypeScript Code Style (Frontend)
       working-directory: ./frontend
       run: |
@@ -132,8 +134,20 @@ jobs:
   security-check:
     name: Security Scan
     runs-on: ubuntu-latest
-    if: false  # Skip security scans for now
-    
+    # DISABLED — blocked on the security workstream, not on this job's wiring.
+    # Verified 2026-08-03 against the current tree:
+    #   * pip-audit  -> 16 known CVEs across 6 pinned deps (flask, requests, werkzeug,
+    #                   yt-dlp, python-dotenv, deep-translator). Green requires
+    #                   dependency upgrades + regression testing.
+    #   * bandit     -> 67 findings (1 High / 6 Medium / 60 Low) needing triage.
+    #   * npm audit  -> 62 findings (3 critical / 32 high), almost all react-scripts
+    #                   transitives; `npm audit fix --force` is a breaking upgrade.
+    # Enabling it before that work lands would make every unrelated PR red. Note also
+    # that pip-audit/npm audit are time-varying: a green run today goes red tomorrow
+    # when a new advisory lands, with no code change — so this job wants a scheduled
+    # run + explicit allowlist, not a per-PR blocking gate.
+    if: false
+
     steps:
     - name: 📥 Checkout Code
       uses: actions/checkout@v4

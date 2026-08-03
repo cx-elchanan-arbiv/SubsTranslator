@@ -11,6 +11,7 @@ professional editor's output has and ours did not:
   * mid-sentence fragments ("things.") are folded back into their sentence,
   * Netflix Hebrew Timed Text limits: <= 2 lines, <= 42 chars per line.
 """
+
 import json
 import sys
 from pathlib import Path
@@ -169,11 +170,11 @@ class TestWrapTwoLines:
             "y" * 60,
             "y" * 100,
             "https://example.com/" + "a" * 200,
-            " ".join(["word"] * 60),               # 300 chars, plenty of spaces
-            "supercalifragilistic " * 12,          # long tokens AND spaces
-            "א" * 90,                              # Hebrew, no spaces
-            "מילה " * 40,                          # Hebrew with spaces
-            "x" * 43,                              # one over the limit
+            " ".join(["word"] * 60),  # 300 chars, plenty of spaces
+            "supercalifragilistic " * 12,  # long tokens AND spaces
+            "א" * 90,  # Hebrew, no spaces
+            "מילה " * 40,  # Hebrew with spaces
+            "x" * 43,  # one over the limit
             "ab " + "c" * 200,
         ],
     )
@@ -190,12 +191,12 @@ class TestWrapTwoLines:
 
     def test_hard_wrap_prefers_whitespace(self):
         lines = wrap_two_lines(" ".join(["word"] * 60))
-        assert all(not line.startswith(" ") and not line.endswith(" ") for line in lines)
+        assert all(
+            not line.startswith(" ") and not line.endswith(" ") for line in lines
+        )
         assert all("word" in line for line in lines)
         # No word was chopped in half when a space was available.
-        assert all(
-            all(token == "word" for token in line.split()) for line in lines
-        )
+        assert all(all(token == "word" for token in line.split()) for line in lines)
 
 
 @pytest.mark.unit
@@ -256,8 +257,14 @@ class TestBidiIsolate:
         out = bidi_isolate("ב-ICC זה יכול לסבך דברים ב-2026")
         assert out == (
             RLI
-            + "ב-" + LRI + "ICC" + PDI
-            + " זה יכול לסבך דברים ב-" + LRI + "2026" + PDI
+            + "ב-"
+            + LRI
+            + "ICC"
+            + PDI
+            + " זה יכול לסבך דברים ב-"
+            + LRI
+            + "2026"
+            + PDI
             + PDI
         )
 
@@ -268,9 +275,9 @@ class TestBidiIsolate:
     @pytest.mark.parametrize(
         "line, run",
         [
-            ("זה עלה 50% השנה", "50%"),          # ET after a number
-            ("המחיר הוא $25 בלבד", "$25"),        # ET before a number
-            ("דו״ח AT&T פורסם", "AT&T"),          # ON inside a Latin run
+            ("זה עלה 50% השנה", "50%"),  # ET after a number
+            ("המחיר הוא $25 בלבד", "$25"),  # ET before a number
+            ("דו״ח AT&T פורסם", "AT&T"),  # ON inside a Latin run
             ("הם קנו Microsoft Azure 2024 אתמול", "Microsoft Azure 2024"),
             ("הוא אמר Boeing 737 היום", "Boeing 737"),
         ],
@@ -445,6 +452,7 @@ class TestSparsePunctuationFallback:
 
     def test_pause_split_engages_without_punctuation(self):
         from services.subtitle_engine import words_to_cues
+
         cues = words_to_cues(self._words())
         assert len(cues) >= 3, "pauses should become sentence boundaries"
         assert "word4" in cues[0]["text"] and "word5" not in cues[0]["text"]
@@ -787,7 +795,7 @@ class TestGeresh:
     def test_hebrew_typography_applies_both_marks(self):
         from services.subtitle_engine import GERESH, GERSHAYIM, hebrew_typography
 
-        out = hebrew_typography('צה"ל ו-ג\'ורג\'')
+        out = hebrew_typography("צה\"ל ו-ג'ורג'")
         assert f"צה{GERSHAYIM}ל" in out
         assert f"ג{GERESH}ורג{GERESH}" in out
 
@@ -825,8 +833,12 @@ class TestDropHallucinatedCues:
 
     @staticmethod
     def _stats(run=0, words=8):
-        return {"words": words, "degenerate": run, "degenerate_run": run,
-                "min_word_dur": 0.0 if run else 0.2}
+        return {
+            "words": words,
+            "degenerate": run,
+            "degenerate_run": run,
+            "min_word_dur": 0.0 if run else 0.2,
+        }
 
     def test_normal_speech_is_kept(self):
         from services.subtitle_engine import drop_hallucinated_cues
@@ -850,7 +862,9 @@ class TestDropHallucinatedCues:
         """The measured regression: real standup delivery at 39 CPS was being deleted."""
         from services.subtitle_engine import drop_hallucinated_cues
 
-        real = self._cue("and they were screaming and yelling at each other.", 8.78, 10.06)
+        real = self._cue(
+            "and they were screaming and yelling at each other.", 8.78, 10.06
+        )
         kept, dropped = drop_hallucinated_cues([real])
         assert (10.06 - 8.78) and len(real["text"]) / (10.06 - 8.78) > 35
         assert kept == [real] and dropped == []
@@ -869,14 +883,18 @@ class TestDropHallucinatedCues:
     def test_a_degenerate_run_alone_is_not_enough(self):
         from services.subtitle_engine import drop_hallucinated_cues
 
-        cue = self._cue("Do you have a boyfriend?", 59.14, 60.0, word_stats=self._stats(run=6))
+        cue = self._cue(
+            "Do you have a boyfriend?", 59.14, 60.0, word_stats=self._stats(run=6)
+        )
         kept, _dropped = drop_hallucinated_cues([cue])
         assert kept == [cue]
 
     def test_a_short_degenerate_run_is_not_a_signal(self):
         from services.subtitle_engine import DEGENERATE_WORD_RUN, drop_hallucinated_cues
 
-        cue = self._cue("x" * 40, 0.0, 1.0, word_stats=self._stats(run=DEGENERATE_WORD_RUN - 1))
+        cue = self._cue(
+            "x" * 40, 0.0, 1.0, word_stats=self._stats(run=DEGENERATE_WORD_RUN - 1)
+        )
         kept, dropped = drop_hallucinated_cues([cue])
         assert kept == [cue] and dropped == []
 
@@ -893,8 +911,10 @@ class TestDropHallucinatedCues:
         """Its text is by definition still in the cue that was kept."""
         from services.subtitle_engine import drop_hallucinated_cues
 
-        cues = [self._cue("Thank you very much.", 0.0, 1.5),
-                self._cue("Thank you very much.", 1.6, 3.0)]
+        cues = [
+            self._cue("Thank you very much.", 0.0, 1.5),
+            self._cue("Thank you very much.", 1.6, 3.0),
+        ]
         _kept, dropped = drop_hallucinated_cues(cues)
         assert dropped[0]["context_only"] is False
 
@@ -945,8 +965,10 @@ class TestDropHallucinatedCues:
             return 0.0
 
         drop_hallucinated_cues(
-            [self._cue("An ordinary line.", 0.0, 3.0),
-             self._cue("x" * 40, 5.0, 6.0, word_stats=self._stats(run=5))],
+            [
+                self._cue("An ordinary line.", 0.0, 3.0),
+                self._cue("x" * 40, 5.0, 6.0, word_stats=self._stats(run=5)),
+            ],
             energy_probe=probe,
         )
         assert calls == [(5.0, 6.0)]
@@ -963,7 +985,10 @@ class TestDropHallucinatedCues:
 
     def test_boundary_exactly_at_threshold_is_kept(self):
         """Strictly-greater-than, so a cue measuring exactly the limit survives."""
-        from services.subtitle_engine import IMPOSSIBLE_SOURCE_CPS, drop_hallucinated_cues
+        from services.subtitle_engine import (
+            IMPOSSIBLE_SOURCE_CPS,
+            drop_hallucinated_cues,
+        )
 
         text = "x" * int(IMPOSSIBLE_SOURCE_CPS)
         kept, dropped = drop_hallucinated_cues([self._cue(text, 0.0, 1.0)])
@@ -1027,7 +1052,10 @@ class TestAbsorbDroppedTime:
     def test_previous_cue_grows_into_the_freed_span(self):
         from services.subtitle_engine import absorb_dropped_time
 
-        kept = [{"start": 0.0, "end": 2.0, "text": "a"}, {"start": 6.0, "end": 8.0, "text": "b"}]
+        kept = [
+            {"start": 0.0, "end": 2.0, "text": "a"},
+            {"start": 6.0, "end": 8.0, "text": "b"},
+        ]
         dropped = [{"start": 2.5, "end": 4.0, "text": "gone"}]
         out = absorb_dropped_time(kept, dropped)
         assert out[0]["end"] == 4.0
@@ -1036,7 +1064,10 @@ class TestAbsorbDroppedTime:
     def test_it_never_overlaps_the_next_surviving_cue(self):
         from services.subtitle_engine import MIN_CUE_GAP, absorb_dropped_time
 
-        kept = [{"start": 0.0, "end": 2.0, "text": "a"}, {"start": 3.0, "end": 5.0, "text": "b"}]
+        kept = [
+            {"start": 0.0, "end": 2.0, "text": "a"},
+            {"start": 3.0, "end": 5.0, "text": "b"},
+        ]
         dropped = [{"start": 2.1, "end": 4.5, "text": "gone"}]
         out = absorb_dropped_time(kept, dropped)
         assert out[0]["end"] == round(3.0 - MIN_CUE_GAP, 3)
@@ -1117,9 +1148,14 @@ class TestMinDurationFloor:
                 cues = words_to_cues(words)
             compromised = "cannot be merged" in caplog.text
             for cue in cues:
-                if cue["end"] - cue["start"] < MIN_CUE_DUR - self.TOL and not compromised:
+                if (
+                    cue["end"] - cue["start"] < MIN_CUE_DUR - self.TOL
+                    and not compromised
+                ):
                     violations.append((seed, cue))
-        assert not violations, f"{len(violations)} sub-floor cues, e.g. {violations[:3]}"
+        assert (
+            not violations
+        ), f"{len(violations)} sub-floor cues, e.g. {violations[:3]}"
 
     def test_impossible_merge_keeps_the_compromise_and_warns(self, caplog):
         """When the character budget forbids the merge, the short cue ships — loudly."""
@@ -1322,7 +1358,7 @@ class TestRefuseSplitOnDegenerateTerminal:
         words = [
             {"s": 0.0, "e": 0.5, "w": "They"},
             {"s": 0.5, "e": 1.0, "w": "have"},
-            {"s": 1.0, "e": 1.0, "w": "record."},   # 0.000s — the corpus case
+            {"s": 1.0, "e": 1.0, "w": "record."},  # 0.000s — the corpus case
             {"s": 1.0, "e": 1.5, "w": "They"},
             {"s": 1.5, "e": 2.0, "w": "have"},
             {"s": 2.0, "e": 2.6, "w": "reputation."},
@@ -1336,7 +1372,7 @@ class TestRefuseSplitOnDegenerateTerminal:
         words = [
             {"s": 0.0, "e": 0.5, "w": "They"},
             {"s": 0.5, "e": 1.0, "w": "have"},
-            {"s": 1.0, "e": 1.3, "w": "record."},   # 0.30s: really said
+            {"s": 1.0, "e": 1.3, "w": "record."},  # 0.30s: really said
             {"s": 2.2, "e": 2.7, "w": "They"},
             {"s": 2.7, "e": 3.2, "w": "have"},
             {"s": 3.2, "e": 3.8, "w": "reputation."},
@@ -1428,7 +1464,9 @@ class TestVideoDurationClamp:
         from services.subtitle_engine import words_to_cues
 
         with caplog.at_level("INFO"):
-            words_to_cues([{"s": 0.0, "e": 2.0, "w": "Words here now."}], video_duration=2.1)
+            words_to_cues(
+                [{"s": 0.0, "e": 2.0, "w": "Words here now."}], video_duration=2.1
+            )
         assert "clamped" in caplog.text
 
 
@@ -1475,40 +1513,48 @@ class TestQuotedPhrasePairing:
 
     def typo(self, text):
         from services.subtitle_engine import hebrew_typography
+
         return hebrew_typography(text)
 
     def test_the_shipped_defect(self):
         from services.subtitle_engine import GERSHAYIM as G
+
         assert self.typo('נלחמת באחד המתמודדים ב"פחד גורם"?') == (
             f"נלחמת באחד המתמודדים ב{G}פחד גורם{G}?"
         )
 
     def test_a_quotation_before_a_full_stop(self):
         from services.subtitle_engine import GERSHAYIM as G
+
         assert self.typo('הבחור מ"הישרדות".') == f"הבחור מ{G}הישרדות{G}."
 
     def test_a_half_converted_pair_is_repaired(self):
         """GPT-4o emits the two marks interchangeably; both ends still have to match."""
         from services.subtitle_engine import GERSHAYIM as G
+
         assert self.typo(f'ב{G}פחד גורם"?') == f"ב{G}פחד גורם{G}?"
 
     def test_a_quotation_with_no_prefix_letter(self):
         from services.subtitle_engine import GERSHAYIM as G
+
         assert self.typo('הם אמרו "שלום" והלכו.') == f"הם אמרו {G}שלום{G} והלכו."
 
     # --- what must NOT be treated as a quotation -------------------------------------
     def test_a_plain_acronym_is_untouched(self):
         from services.subtitle_engine import GERSHAYIM as G
+
         assert self.typo('עם מפכ"ל המשטרה,') == f"עם מפכ{G}ל המשטרה,"
 
     def test_an_inflected_acronym_keeps_its_mark(self):
         """דו"חות and מל"טים carry MORE than one letter after the mark and are still
         acronyms — which is why the pair rule, not a letter count, is what decides."""
         from services.subtitle_engine import GERSHAYIM as G
+
         assert self.typo('הוא הגיש דו"חות רבים.') == f"הוא הגיש דו{G}חות רבים."
 
     def test_two_acronyms_in_one_line_are_not_a_pair(self):
         from services.subtitle_engine import GERSHAYIM as G
+
         assert self.typo('בצה"ל ובמפכ"ל.') == f"בצה{G}ל ובמפכ{G}ל."
 
     def test_an_english_quotation_inside_a_hebrew_line_is_untouched(self):

@@ -14,6 +14,7 @@ Two things are covered, and both are things that break silently rather than loud
 
 No network, no Celery broker, no ffmpeg: ``apply_async`` is mocked and its kwargs captured.
 """
+
 import os
 import sys
 from unittest.mock import MagicMock, patch
@@ -163,7 +164,9 @@ class TestParseSubtitleFlags:
         for name in ("spotting_v2", "translation_v2", "render_v2"):
             flags = parse_subtitle_flags({name: "true"})
             assert flags[name] is True
-            others = [k for k in ("spotting_v2", "translation_v2", "render_v2") if k != name]
+            others = [
+                k for k in ("spotting_v2", "translation_v2", "render_v2") if k != name
+            ]
             assert all(flags[other] is False for other in others)
 
 
@@ -174,7 +177,10 @@ class TestResolveFlagsAndSummary:
 
     def test_reparses_values_that_travelled_through_celery(self):
         assert resolve_flags(
-            spotting_v2="true", translation_v2=0, translation_style="FAITHFUL", render_v2=True
+            spotting_v2="true",
+            translation_v2=0,
+            translation_style="FAITHFUL",
+            render_v2=True,
         ) == {
             "spotting_v2": True,
             "translation_v2": False,
@@ -188,7 +194,9 @@ class TestResolveFlagsAndSummary:
         assert any_enabled(resolve_flags(render_v2=True)) is True
 
     def test_summary_names_every_flag_on_one_line(self):
-        summary = flags_summary(resolve_flags(spotting_v2=True, translation_style="faithful"))
+        summary = flags_summary(
+            resolve_flags(spotting_v2=True, translation_style="faithful")
+        )
         assert "\n" not in summary
         assert summary == (
             "spotting_v2=True translation_v2=False "
@@ -211,7 +219,9 @@ class TestNormalizeCues:
 
     def test_words_to_cues_output_gets_an_empty_translation(self):
         """subtitle_engine emits no translation key at all; the shape must still be complete."""
-        cues = normalize_cues([{"start": 1.0, "end": 3.5, "text": "It could complicate things."}])
+        cues = normalize_cues(
+            [{"start": 1.0, "end": 3.5, "text": "It could complicate things."}]
+        )
         assert cues == [
             {
                 "start": 1.0,
@@ -223,13 +233,23 @@ class TestNormalizeCues:
 
     def test_translation_v2_translated_key_is_mapped(self):
         """translate_cues() writes "translated"; the app speaks "translated_text"."""
-        cues = normalize_cues([{"start": 0, "end": 1, "text": "Yeah.", "translated": "כן."}])
+        cues = normalize_cues(
+            [{"start": 0, "end": 1, "text": "Yeah.", "translated": "כן."}]
+        )
         assert cues[0]["translated_text"] == "כן."
         assert "translated" not in cues[0]
 
     def test_existing_translated_text_wins_over_translated(self):
         cues = normalize_cues(
-            [{"start": 0, "end": 1, "text": "a", "translated_text": "first", "translated": "second"}]
+            [
+                {
+                    "start": 0,
+                    "end": 1,
+                    "text": "a",
+                    "translated_text": "first",
+                    "translated": "second",
+                }
+            ]
         )
         assert cues[0]["translated_text"] == "first"
 
@@ -254,7 +274,15 @@ class TestNormalizeCues:
 
     def test_whitespace_only_translated_text_does_not_beat_a_real_translation(self):
         cues = normalize_cues(
-            [{"start": 0, "end": 1, "text": "a", "translated_text": "   ", "translated": "כן."}]
+            [
+                {
+                    "start": 0,
+                    "end": 1,
+                    "text": "a",
+                    "translated_text": "   ",
+                    "translated": "כן.",
+                }
+            ]
         )
         assert cues[0]["translated_text"] == "כן."
 
@@ -262,7 +290,9 @@ class TestNormalizeCues:
         """translate_cues returns a TranslationResult subclass; downstream code copies dicts."""
         from services.translation_v2 import TranslationResult
 
-        result = TranslationResult([{"start": 0, "end": 1, "text": "a", "translated": "b"}])
+        result = TranslationResult(
+            [{"start": 0, "end": 1, "text": "a", "translated": "b"}]
+        )
         cues = normalize_cues(result)
         assert type(cues) is list
         assert all(type(cue) is dict for cue in cues)
@@ -280,7 +310,9 @@ class TestNormalizeCues:
         assert cues[0]["end"] == 0.0
 
     def test_whitespace_is_stripped(self):
-        cues = normalize_cues([{"start": 0, "end": 1, "text": "  padded  ", "translated": " כן "}])
+        cues = normalize_cues(
+            [{"start": 0, "end": 1, "text": "  padded  ", "translated": " כן "}]
+        )
         assert cues[0]["text"] == "padded"
         assert cues[0]["translated_text"] == "כן"
 
@@ -295,12 +327,16 @@ class TestNormalizeCues:
         assert [cue["text"] for cue in cues] == ["keep me"]
 
     def test_translation_only_cue_is_kept(self):
-        cues = normalize_cues([{"start": 0, "end": 1, "text": "", "translated": "שלום"}])
+        cues = normalize_cues(
+            [{"start": 0, "end": 1, "text": "", "translated": "שלום"}]
+        )
         assert len(cues) == 1
         assert cues[0]["translated_text"] == "שלום"
 
     def test_non_dict_entries_are_skipped(self):
-        cues = normalize_cues([None, "nonsense", 42, {"start": 0, "end": 1, "text": "ok"}])
+        cues = normalize_cues(
+            [None, "nonsense", 42, {"start": 0, "end": 1, "text": "ok"}]
+        )
         assert [cue["text"] for cue in cues] == ["ok"]
 
     def test_empty_and_none_input(self):
@@ -350,7 +386,15 @@ class TestNormalizeCues:
     def test_the_four_known_keys_are_still_normalised_around_them(self):
         """Passing extras through must not stop the normalisation itself happening."""
         cues = normalize_cues(
-            [{"start": "2.5", "end": 4, "text": " x ", "translated": " כן ", "extra": 1}]
+            [
+                {
+                    "start": "2.5",
+                    "end": 4,
+                    "text": " x ",
+                    "translated": " כן ",
+                    "extra": 1,
+                }
+            ]
         )
         assert cues[0] == {
             "start": 2.5,
@@ -374,7 +418,15 @@ class TestNormalizeCues:
     def test_an_unknown_key_never_overwrites_a_normalised_one(self):
         """A stage emitting a stray `text` variant must not win over the real field."""
         cues = normalize_cues(
-            [{"start": 0, "end": 1, "text": "real", "translated_text": "תרגום", "note": "x"}]
+            [
+                {
+                    "start": 0,
+                    "end": 1,
+                    "text": "real",
+                    "translated_text": "תרגום",
+                    "note": "x",
+                }
+            ]
         )
         assert cues[0]["text"] == "real"
         assert cues[0]["translated_text"] == "תרגום"
@@ -386,8 +438,20 @@ class TestNormalizeCues:
 
         cues = normalize_cues(
             [
-                {"start": 0, "end": 1, "text": "a", "translated": "המטוס נחת ו", "speaker": "A"},
-                {"start": 1.2, "end": 2, "text": "b", "translated": "הנוסעים ירדו", "speaker": "B"},
+                {
+                    "start": 0,
+                    "end": 1,
+                    "text": "a",
+                    "translated": "המטוס נחת ו",
+                    "speaker": "A",
+                },
+                {
+                    "start": 1.2,
+                    "end": 2,
+                    "text": "b",
+                    "translated": "הנוסעים ירדו",
+                    "speaker": "B",
+                },
             ]
         )
         out = reflow_dangling_connectors(cues)
@@ -441,8 +505,11 @@ def upload_route(tmp_path):
     original_upload_folder = video_routes.config.UPLOAD_FOLDER
     video_routes.config.UPLOAD_FOLDER = str(tmp_path)
     try:
-        with patch.object(video_routes, "process_video_task", task), patch.object(
-            video_routes, "probe_file_safe", return_value=({"duration": 1.0}, None)
+        with (
+            patch.object(video_routes, "process_video_task", task),
+            patch.object(
+                video_routes, "probe_file_safe", return_value=({"duration": 1.0}, None)
+            ),
         ):
             yield task
     finally:
@@ -456,8 +523,9 @@ def youtube_route():
 
     task = MagicMock()
     task.apply_async.return_value = MagicMock(id="task-456")
-    with patch.object(video_routes, "download_and_process_youtube_task", task), patch.object(
-        video_routes.config, "is_youtube_restricted", return_value=False
+    with (
+        patch.object(video_routes, "download_and_process_youtube_task", task),
+        patch.object(video_routes.config, "is_youtube_restricted", return_value=False),
     ):
         yield task
 
@@ -531,13 +599,25 @@ class TestUploadRouteFlagParsing:
             upload_route.apply_async.reset_mock()
             response = flask_client.post(
                 "/upload",
-                data={"file": _video_file(), "target_lang": "he", "whisper_model": "base", name: "true"},
+                data={
+                    "file": _video_file(),
+                    "target_lang": "he",
+                    "whisper_model": "base",
+                    name: "true",
+                },
                 content_type="multipart/form-data",
             )
             assert response.status_code == 202
             kwargs = _captured_kwargs(upload_route)
             assert kwargs[name] is True, name
-            assert sum(1 for k in ("spotting_v2", "translation_v2", "render_v2") if kwargs[k]) == 1
+            assert (
+                sum(
+                    1
+                    for k in ("spotting_v2", "translation_v2", "render_v2")
+                    if kwargs[k]
+                )
+                == 1
+            )
 
 
 @pytest.mark.unit
@@ -545,7 +625,10 @@ class TestYoutubeRouteFlagParsing:
     URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
     def test_defaults_when_the_client_sends_nothing(self, flask_client, youtube_route):
-        response = flask_client.post("/youtube", json={"url": self.URL, "target_lang": "he", "whisper_model": "base"})
+        response = flask_client.post(
+            "/youtube",
+            json={"url": self.URL, "target_lang": "he", "whisper_model": "base"},
+        )
         assert response.status_code == 202
         assert _captured_kwargs(youtube_route) == FLAG_DEFAULTS
 
@@ -611,10 +694,15 @@ class TestYoutubeRouteFlagParsing:
 
     def test_positional_args_are_unchanged(self, flask_client, youtube_route):
         """The flags ride in kwargs; the legacy positional contract must not shift."""
-        flask_client.post("/youtube", json={"url": self.URL, "target_lang": "he", "whisper_model": "base"})
+        flask_client.post(
+            "/youtube",
+            json={"url": self.URL, "target_lang": "he", "whisper_model": "base"},
+        )
         args = youtube_route.apply_async.call_args.kwargs["args"]
         assert args[0] == self.URL
-        assert len(args) == 7  # url, source, target, auto_create, model, service, watermark
+        assert (
+            len(args) == 7
+        )  # url, source, target, auto_create, model, service, watermark
 
 
 @pytest.mark.unit
@@ -636,9 +724,9 @@ class TestTaskSignaturesAcceptTheFlags:
         params = inspect.signature(task.run).parameters
         for flag in ALL_FLAG_KEYS:
             assert flag in params, f"{name} does not accept {flag}"
-            assert params[flag].default == FLAG_DEFAULTS[flag], (
-                f"{name}.{flag} must default to the legacy behaviour"
-            )
+            assert (
+                params[flag].default == FLAG_DEFAULTS[flag]
+            ), f"{name}.{flag} must default to the legacy behaviour"
 
     @staticmethod
     def _run_youtube_task(**task_kwargs):
@@ -656,14 +744,18 @@ class TestTaskSignaturesAcceptTheFlags:
             chained["kwargs"] = kwargs
             return MagicMock(id="chained-task-1")
 
-        with patch.object(download_tasks, "yt_dlp") as fake_ytdlp, patch.object(
-            download_tasks, "download_youtube_video"
-        ) as fake_download, patch.object(
-            download_tasks.process_video_task, "apply_async", fake_apply_async
-        ), patch.object(
-            download_tasks.time, "sleep", lambda *_a, **_k: None
-        ), patch.object(
-            download_tasks.download_and_process_youtube_task, "update_state", MagicMock()
+        with (
+            patch.object(download_tasks, "yt_dlp") as fake_ytdlp,
+            patch.object(download_tasks, "download_youtube_video") as fake_download,
+            patch.object(
+                download_tasks.process_video_task, "apply_async", fake_apply_async
+            ),
+            patch.object(download_tasks.time, "sleep", lambda *_a, **_k: None),
+            patch.object(
+                download_tasks.download_and_process_youtube_task,
+                "update_state",
+                MagicMock(),
+            ),
         ):
             fake_ytdlp.YoutubeDL.return_value.__enter__.return_value.extract_info.return_value = {
                 "title": "clip",
@@ -703,9 +795,9 @@ class TestTaskSignaturesAcceptTheFlags:
         )
 
         assert chained.get("kwargs"), "the processing task was never enqueued"
-        assert set(chained["kwargs"]) == ALL_FLAG_KEYS, (
-            f"chained kwargs are {sorted(chained['kwargs'])}, expected exactly the flags"
-        )
+        assert (
+            set(chained["kwargs"]) == ALL_FLAG_KEYS
+        ), f"chained kwargs are {sorted(chained['kwargs'])}, expected exactly the flags"
         assert chained["kwargs"] == {
             "spotting_v2": True,
             "translation_v2": True,
@@ -734,9 +826,9 @@ class TestTaskSignaturesAcceptTheFlags:
         assert chained["kwargs"]["spotting_v2"] is True
         assert chained["kwargs"]["translation_v2"] is False
         assert chained["kwargs"]["render_v2"] is True
-        assert chained["kwargs"]["translation_style"] == STYLE_CLEAN, (
-            "an unrecognised style must fall back to the default, not be passed through"
-        )
+        assert (
+            chained["kwargs"]["translation_style"] == STYLE_CLEAN
+        ), "an unrecognised style must fall back to the default, not be passed through"
 
     def test_youtube_task_reports_the_flags_as_user_choices(self):
         """The YouTube path must be attributable to its settings exactly like an upload."""

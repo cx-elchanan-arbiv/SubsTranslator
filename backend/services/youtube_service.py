@@ -2,6 +2,7 @@
 YouTube download service for SubsTranslator
 Handles video downloads from YouTube with metadata extraction
 """
+
 import os
 import shutil
 import time
@@ -10,8 +11,12 @@ import yt_dlp
 
 from config import get_config
 from logging_config import get_logger
+from performance_monitor import (
+    log_download_performance,
+    log_move_performance,
+    performance_monitor,
+)
 from utils.file_utils import clean_filename, parse_time_to_seconds
-from performance_monitor import performance_monitor, log_download_performance, log_move_performance
 from ytdlp_hooks import create_clean_progress_hook
 
 # Configuration
@@ -21,7 +26,9 @@ logger = get_logger(__name__)
 DOWNLOADS_FOLDER = config.DOWNLOADS_FOLDER
 
 
-def download_youtube_video(url, quality="medium", progress_callback=None, start_time=None, end_time=None):
+def download_youtube_video(
+    url, quality="medium", progress_callback=None, start_time=None, end_time=None
+):
     """
     Download video from YouTube and extract comprehensive metadata.
 
@@ -87,7 +94,10 @@ def download_youtube_video(url, quality="medium", progress_callback=None, start_
             "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
             # Phase A: Only faststart, no re-encoding
             "postprocessor_args": {
-                "ffmpeg": ["-movflags", "+faststart"]  # Removed all codec args for remux-only
+                "ffmpeg": [
+                    "-movflags",
+                    "+faststart",
+                ]  # Removed all codec args for remux-only
             },
         }
 
@@ -98,36 +108,51 @@ def download_youtube_video(url, quality="medium", progress_callback=None, start_
                 end_seconds = parse_time_to_seconds(end_time)
 
                 # Use ffmpeg to trim after download (most reliable approach)
-                ydl_opts['postprocessor_args']['ffmpeg'].extend([
-                    '-ss', str(start_seconds),
-                    '-to', str(end_seconds),
-                    '-c', 'copy'  # Stream copy (no re-encoding) for speed
-                ])
-                logger.info(f"🎯 Time range: {start_time} - {end_time} (will trim after download)")
+                ydl_opts["postprocessor_args"]["ffmpeg"].extend(
+                    [
+                        "-ss",
+                        str(start_seconds),
+                        "-to",
+                        str(end_seconds),
+                        "-c",
+                        "copy",  # Stream copy (no re-encoding) for speed
+                    ]
+                )
+                logger.info(
+                    f"🎯 Time range: {start_time} - {end_time} (will trim after download)"
+                )
             except ValueError as e:
-                logger.warning(f"⚠️ Invalid time format: {e}. Downloading full video instead.")
+                logger.warning(
+                    f"⚠️ Invalid time format: {e}. Downloading full video instead."
+                )
                 # Continue without time range if parsing fails
 
         # Use clean progress hooks from ytdlp_hooks
 
         if progress_callback:
+
             def progress_wrapper(d):
                 if d["status"] == "downloading":
                     if "total_bytes" in d and d["total_bytes"]:
                         percent = (d["downloaded_bytes"] / d["total_bytes"]) * 100
                     elif "total_bytes_estimate" in d and d["total_bytes_estimate"]:
-                        percent = (d["downloaded_bytes"] / d["total_bytes_estimate"]) * 100
+                        percent = (
+                            d["downloaded_bytes"] / d["total_bytes_estimate"]
+                        ) * 100
                     else:
                         percent = 50  # Fallback
                     progress_callback(min(95, max(15, percent)))
 
             # Use both the clean progress hook and our progress callback
-            ydl_opts["progress_hooks"] = [create_clean_progress_hook(), progress_wrapper]
+            ydl_opts["progress_hooks"] = [
+                create_clean_progress_hook(),
+                progress_wrapper,
+            ]
         else:
             # Use only the clean progress hook
             ydl_opts["progress_hooks"] = [create_clean_progress_hook()]
 
-        logger.info(f"🎯 Starting optimized download")
+        logger.info("🎯 Starting optimized download")
         if config.DEBUG:
             logger.debug(f"📂 Working in fast storage: {work_dir}")
 
@@ -142,14 +167,14 @@ def download_youtube_video(url, quality="medium", progress_callback=None, start_
                 cleaned_title = clean_filename(title)
                 work_dir_path = os.path.dirname(work_filename)
                 ext = os.path.splitext(work_filename)[1]
-                cleaned_work_filename = os.path.join(work_dir_path, f"{cleaned_title}{ext}")
+                cleaned_work_filename = os.path.join(
+                    work_dir_path, f"{cleaned_title}{ext}"
+                )
 
                 if work_filename != cleaned_work_filename:
                     os.rename(work_filename, cleaned_work_filename)
                     work_filename = cleaned_work_filename
-                    logger.info(
-                        f"🔧 Renamed file: {os.path.basename(work_filename)}"
-                    )
+                    logger.info(f"🔧 Renamed file: {os.path.basename(work_filename)}")
 
                 # Phase A: Move from fast workspace to final directory
                 final_filename = work_filename.replace(work_dir, final_dir)
@@ -171,25 +196,33 @@ def download_youtube_video(url, quality="medium", progress_callback=None, start_
                         # Fallback: try regular move
                         shutil.move(work_filename, final_filename)
                     except (OSError, PermissionError) as move_error:
-                        logger.error(f"Move also failed ({move_error}), trying with elevated permissions")
+                        logger.error(
+                            f"Move also failed ({move_error}), trying with elevated permissions"
+                        )
                         # Final fallback: try to fix permissions and move again
                         try:
                             os.chmod(os.path.dirname(final_filename), 0o755)
                             shutil.move(work_filename, final_filename)
                         except Exception as final_error:
-                            raise Exception(f"Failed to move file after all attempts: {final_error}")
+                            raise Exception(
+                                f"Failed to move file after all attempts: {final_error}"
+                            )
 
                 move_duration = time.time() - move_start
 
                 # Phase A: Enhanced performance monitoring
-                file_size_mb = os.path.getsize(final_filename) / (1024*1024)
+                file_size_mb = os.path.getsize(final_filename) / (1024 * 1024)
                 total_duration = time.time() - start_time_ts
 
                 # Log download performance
-                log_download_performance(file_size_mb, total_duration, "download_and_merge")
+                log_download_performance(
+                    file_size_mb, total_duration, "download_and_merge"
+                )
 
                 # Log file move performance
-                log_move_performance(file_size_mb, move_duration, "fast_work", "downloads")
+                log_move_performance(
+                    file_size_mb, move_duration, "fast_work", "downloads"
+                )
 
                 # Check system resources
                 performance_monitor.check_system_resources()
@@ -228,10 +261,13 @@ def download_youtube_video(url, quality="medium", progress_callback=None, start_
         logger.error(f"YouTube download failed: {e}")
         # Convert to structured exception with proper error codes
         from core.exceptions import handle_youtube_error
+
         raise handle_youtube_error(e, url)
 
 
-def download_youtube_video_with_progress(url, quality="medium", progress_manager=None, start_time=None, end_time=None):
+def download_youtube_video_with_progress(
+    url, quality="medium", progress_manager=None, start_time=None, end_time=None
+):
     """
     Download video from YouTube with real-time progress updates.
 
@@ -300,7 +336,10 @@ def download_youtube_video_with_progress(url, quality="medium", progress_manager
             "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
             # Phase A: Only faststart, no re-encoding
             "postprocessor_args": {
-                "ffmpeg": ["-movflags", "+faststart"]  # Removed all codec args for remux-only
+                "ffmpeg": [
+                    "-movflags",
+                    "+faststart",
+                ]  # Removed all codec args for remux-only
             },
             "restrict_filenames": config.YTDLP_RESTRICT_FILENAMES,
             "continue_dl": config.YTDLP_CONTINUE_DL,
@@ -314,18 +353,27 @@ def download_youtube_video_with_progress(url, quality="medium", progress_manager
 
                 # Use ffmpeg to trim after download (most reliable approach)
                 # -ss: start time, -to: end time, -c copy: no re-encoding (fast)
-                ydl_opts['postprocessor_args']['ffmpeg'].extend([
-                    '-ss', str(start_seconds),
-                    '-to', str(end_seconds),
-                    '-c', 'copy'  # Stream copy (no re-encoding) for speed
-                ])
+                ydl_opts["postprocessor_args"]["ffmpeg"].extend(
+                    [
+                        "-ss",
+                        str(start_seconds),
+                        "-to",
+                        str(end_seconds),
+                        "-c",
+                        "copy",  # Stream copy (no re-encoding) for speed
+                    ]
+                )
 
                 if progress_manager:
-                    progress_manager.log(f"🎯 Time range requested: {start_time} - {end_time}")
+                    progress_manager.log(
+                        f"🎯 Time range requested: {start_time} - {end_time}"
+                    )
                     progress_manager.log("Will trim video after download using ffmpeg")
             except ValueError as e:
                 if progress_manager:
-                    progress_manager.log(f"⚠️ Invalid time format: {e}. Downloading full video instead.")
+                    progress_manager.log(
+                        f"⚠️ Invalid time format: {e}. Downloading full video instead."
+                    )
                 # Continue without time range if parsing fails
 
         # Add real progress hooks.
@@ -376,7 +424,9 @@ def download_youtube_video_with_progress(url, quality="medium", progress_manager
                 else:
                     raw = None
                 if raw is not None:
-                    percent = lo + max(0.0, min(1.0, raw)) * (hi - lo)  # 0..1 within stream
+                    percent = lo + max(0.0, min(1.0, raw)) * (
+                        hi - lo
+                    )  # 0..1 within stream
                 else:
                     percent = download_progress["max"]  # keep current if unknown
 
@@ -425,14 +475,14 @@ def download_youtube_video_with_progress(url, quality="medium", progress_manager
                 cleaned_title = clean_filename(title)
                 work_dir_path = os.path.dirname(original_filename)
                 ext = os.path.splitext(original_filename)[1]
-                cleaned_work_filename = os.path.join(work_dir_path, f"{cleaned_title}{ext}")
+                cleaned_work_filename = os.path.join(
+                    work_dir_path, f"{cleaned_title}{ext}"
+                )
 
                 if original_filename != cleaned_work_filename:
                     os.rename(original_filename, cleaned_work_filename)
                     work_filename = cleaned_work_filename
-                    logger.info(
-                        f"🔧 Renamed file: {os.path.basename(work_filename)}"
-                    )
+                    logger.info(f"🔧 Renamed file: {os.path.basename(work_filename)}")
                 else:
                     work_filename = original_filename
 
@@ -444,7 +494,9 @@ def download_youtube_video_with_progress(url, quality="medium", progress_manager
 
                 try:
                     # Ensure directory exists with proper permissions
-                    os.makedirs(os.path.dirname(final_filename), mode=0o755, exist_ok=True)
+                    os.makedirs(
+                        os.path.dirname(final_filename), mode=0o755, exist_ok=True
+                    )
                     shutil.move(work_filename, final_filename)
                 except (OSError, PermissionError) as e:
                     logger.error(f"Failed to move file: {e}")
@@ -453,17 +505,23 @@ def download_youtube_video_with_progress(url, quality="medium", progress_manager
                         os.chmod(os.path.dirname(final_filename), 0o755)
                         shutil.move(work_filename, final_filename)
                     except Exception as retry_error:
-                        raise Exception(f"Failed to move file after permission fix: {retry_error}")
+                        raise Exception(
+                            f"Failed to move file after permission fix: {retry_error}"
+                        )
                 filename = final_filename
 
                 if progress_manager:
-                    progress_manager.log("🔧 Moved from fast storage to downloads folder...")
+                    progress_manager.log(
+                        "🔧 Moved from fast storage to downloads folder..."
+                    )
             else:
                 filename = original_filename
 
             if progress_manager:
                 bump(95, "Preparing metadata...")
-                progress_manager.log(f"📊 Video info: {info.get('title', 'Unknown')} ({info.get('duration_string', '00:00')})")
+                progress_manager.log(
+                    f"📊 Video info: {info.get('title', 'Unknown')} ({info.get('duration_string', '00:00')})"
+                )
 
             logger.info(f"✅ Phase A download completed: {os.path.basename(filename)}")
 
@@ -502,4 +560,5 @@ def download_youtube_video_with_progress(url, quality="medium", progress_manager
         logger.error(f"YouTube download failed: {e}")
         # Convert to structured exception with proper error codes
         from core.exceptions import handle_youtube_error
+
         raise handle_youtube_error(e, url)

@@ -4,19 +4,18 @@ Integration tests for /embed-subtitles endpoint.
 Tests the full endpoint with real FFmpeg and dummy files.
 Requires FFmpeg to be installed.
 """
+
 import io
 import os
 import shutil
-import pytest
-from .ffmpeg_helpers import make_video, make_srt_file, make_logo_image
 
+import pytest
+
+from .ffmpeg_helpers import make_logo_image, make_srt_file, make_video
 
 # Skip all tests if FFmpeg is not available
 ffmpeg_available = shutil.which("ffmpeg") is not None
-pytestmark = pytest.mark.skipif(
-    not ffmpeg_available,
-    reason="FFmpeg not installed"
-)
+pytestmark = pytest.mark.skipif(not ffmpeg_available, reason="FFmpeg not installed")
 
 
 # Use shared flask_test_client fixture from conftest.py
@@ -41,13 +40,11 @@ def test_embed_subtitles_with_srt_file(client, temp_dirs):
         data = {
             "video": (io.BytesIO(fv.read()), "test.mp4"),
             "srt_file": (io.BytesIO(fs.read()), "test.srt"),
-            "include_logo": "false"
+            "include_logo": "false",
         }
 
         response = client.post(
-            "/embed-subtitles",
-            data=data,
-            content_type="multipart/form-data"
+            "/embed-subtitles", data=data, content_type="multipart/form-data"
         )
 
     assert response.status_code == 200
@@ -68,13 +65,11 @@ def test_embed_subtitles_with_text(client, temp_dirs):
         data = {
             "video": (io.BytesIO(fv.read()), "test.mp4"),
             "srt_text": srt_text,
-            "include_logo": "false"
+            "include_logo": "false",
         }
 
         response = client.post(
-            "/embed-subtitles",
-            data=data,
-            content_type="multipart/form-data"
+            "/embed-subtitles", data=data, content_type="multipart/form-data"
         )
 
     assert response.status_code == 200
@@ -84,15 +79,10 @@ def test_embed_subtitles_with_text(client, temp_dirs):
 @pytest.mark.integration
 def test_embed_subtitles_missing_video_returns_400(client):
     """Test that missing video file returns 400."""
-    data = {
-        "srt_text": "[00:00 - 00:05] Test",
-        "include_logo": "false"
-    }
+    data = {"srt_text": "[00:00 - 00:05] Test", "include_logo": "false"}
 
     response = client.post(
-        "/embed-subtitles",
-        data=data,
-        content_type="multipart/form-data"
+        "/embed-subtitles", data=data, content_type="multipart/form-data"
     )
 
     assert response.status_code == 400
@@ -109,14 +99,12 @@ def test_embed_subtitles_missing_both_srt_and_text_returns_400(client, temp_dirs
     with open(video_path, "rb") as fv:
         data = {
             "video": (io.BytesIO(fv.read()), "test.mp4"),
-            "include_logo": "false"
+            "include_logo": "false",
             # No srt_file or srt_text
         }
 
         response = client.post(
-            "/embed-subtitles",
-            data=data,
-            content_type="multipart/form-data"
+            "/embed-subtitles", data=data, content_type="multipart/form-data"
         )
 
     # Should fail because no subtitles provided
@@ -124,7 +112,7 @@ def test_embed_subtitles_missing_both_srt_and_text_returns_400(client, temp_dirs
 
 
 @pytest.mark.integration
-def test_embed_subtitles_with_logo(client, temp_dirs, monkeypatch):
+def test_embed_subtitles_with_logo(client, temp_dirs):
     """Test embedding subtitles with logo watermark."""
     # Create test files
     video_path = os.path.join(temp_dirs["uploads"], "test.mp4")
@@ -135,18 +123,10 @@ def test_embed_subtitles_with_logo(client, temp_dirs, monkeypatch):
     assert make_srt_file(srt_path, num_subtitles=2)
     assert make_logo_image(logo_path, width=100, height=50)
 
-    # Mock logo_manager to return our test logo
-    class MockLogoManager:
-        def get_user_logo_path(self, session_id):
-            return logo_path
-
-    # Patch logo_manager in app
-    import sys
-    from pathlib import Path
-    backend_dir = Path(__file__).parent.parent.parent
-    sys.path.insert(0, str(backend_dir))
-    import app
-    monkeypatch.setattr(app, "logo_manager", MockLogoManager())
+    # The endpoint reads the user's logo from the Flask session key that the
+    # watermark upload routes write ('custom_logo_path').
+    with client.session_transaction() as sess:
+        sess["custom_logo_path"] = logo_path
 
     with open(video_path, "rb") as fv, open(srt_path, "rb") as fs:
         data = {
@@ -155,13 +135,11 @@ def test_embed_subtitles_with_logo(client, temp_dirs, monkeypatch):
             "include_logo": "true",
             "logo_position": "bottom-right",
             "logo_size": "medium",
-            "logo_opacity": "50"
+            "logo_opacity": "50",
         }
 
         response = client.post(
-            "/embed-subtitles",
-            data=data,
-            content_type="multipart/form-data"
+            "/embed-subtitles", data=data, content_type="multipart/form-data"
         )
 
     assert response.status_code == 200
@@ -172,8 +150,7 @@ def test_embed_subtitles_with_logo(client, temp_dirs, monkeypatch):
 def test_embed_subtitles_options_request(client):
     """Test CORS preflight OPTIONS request."""
     response = client.options(
-        "/embed-subtitles",
-        headers={"Origin": "http://localhost:3000"}
+        "/embed-subtitles", headers={"Origin": "http://localhost:3000"}
     )
 
     assert response.status_code == 200
@@ -192,13 +169,11 @@ def test_embed_subtitles_output_filename(client, temp_dirs):
         data = {
             "video": (io.BytesIO(fv.read()), "my_video.mp4"),
             "srt_file": (io.BytesIO(fs.read()), "subs.srt"),
-            "include_logo": "false"
+            "include_logo": "false",
         }
 
         response = client.post(
-            "/embed-subtitles",
-            data=data,
-            content_type="multipart/form-data"
+            "/embed-subtitles", data=data, content_type="multipart/form-data"
         )
 
     assert response.status_code == 200
@@ -208,7 +183,7 @@ def test_embed_subtitles_output_filename(client, temp_dirs):
 
 
 @pytest.mark.integration
-def test_embed_subtitles_different_logo_settings(client, temp_dirs, monkeypatch):
+def test_embed_subtitles_different_logo_settings(client, temp_dirs):
     """Test different logo position/size/opacity settings."""
     video_path = os.path.join(temp_dirs["uploads"], "test.mp4")
     srt_path = os.path.join(temp_dirs["uploads"], "test.srt")
@@ -218,17 +193,10 @@ def test_embed_subtitles_different_logo_settings(client, temp_dirs, monkeypatch)
     assert make_srt_file(srt_path, num_subtitles=1)
     assert make_logo_image(logo_path)
 
-    # Mock logo_manager
-    class MockLogoManager:
-        def get_user_logo_path(self, session_id):
-            return logo_path
-
-    import sys
-    from pathlib import Path
-    backend_dir = Path(__file__).parent.parent.parent
-    sys.path.insert(0, str(backend_dir))
-    import app
-    monkeypatch.setattr(app, "logo_manager", MockLogoManager())
+    # See test_embed_subtitles_with_logo: the endpoint resolves the logo from
+    # the 'custom_logo_path' session key.
+    with client.session_transaction() as sess:
+        sess["custom_logo_path"] = logo_path
 
     # Test different combinations
     settings = [
@@ -244,13 +212,11 @@ def test_embed_subtitles_different_logo_settings(client, temp_dirs, monkeypatch)
                 "include_logo": "true",
                 "logo_position": setting["position"],
                 "logo_size": setting["size"],
-                "logo_opacity": setting["opacity"]
+                "logo_opacity": setting["opacity"],
             }
 
             response = client.post(
-                "/embed-subtitles",
-                data=data,
-                content_type="multipart/form-data"
+                "/embed-subtitles", data=data, content_type="multipart/form-data"
             )
 
         assert response.status_code == 200

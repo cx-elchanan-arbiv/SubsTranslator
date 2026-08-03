@@ -3,36 +3,39 @@ Structured exception hierarchy for SubsTranslator.
 Provides consistent error handling with error codes, user messages, and recovery hints.
 """
 
-from typing import Optional
-
-
 # =============================================================================
 # Simple Base Exceptions (for backwards compatibility)
 # =============================================================================
 
+
 class AppError(Exception):
     """Base class for all application-specific errors."""
+
     pass
 
 
 class FfmpegNotInstalledError(AppError):
     """Raised when FFmpeg is not installed or not in PATH (legacy compatibility)."""
+
     pass
 
 
 class InvalidFileError(AppError):
     """Raised when an invalid file is provided."""
+
     pass
 
 
 class TokenError(AppError):
     """Raised when download token validation fails."""
+
     pass
 
 
 # =============================================================================
 # Structured Exceptions with Error Codes
 # =============================================================================
+
 
 class VideoProcessingError(Exception):
     """Base class for all video processing errors."""
@@ -42,7 +45,7 @@ class VideoProcessingError(Exception):
         message: str,
         error_code: str,
         recoverable: bool = True,
-        user_message: Optional[str] = None,
+        user_message: str | None = None,
     ):
         self.message = message
         self.error_code = error_code
@@ -71,9 +74,7 @@ class FFmpegTimeoutError(FFmpegError):
 
     def __init__(self, operation: str, timeout: int):
         message = f"FFmpeg {operation} timeout after {timeout} seconds"
-        user_message = (
-            f"The {operation} operation took too long. Please try again or choose a smaller file."
-        )
+        user_message = f"The {operation} operation took too long. Please try again or choose a smaller file."
         super().__init__(
             message=message,
             error_code="FFMPEG_TIMEOUT",
@@ -89,7 +90,9 @@ class FFmpegProcessError(FFmpegError):
 
     def __init__(self, operation: str, stderr: str):
         message = f"FFmpeg {operation} failed: {stderr}"
-        user_message = f"Error processing {operation}. The file may be corrupted or unsupported."
+        user_message = (
+            f"Error processing {operation}. The file may be corrupted or unsupported."
+        )
         super().__init__(
             message=message,
             error_code="FFMPEG_PROCESS_ERROR",
@@ -105,7 +108,9 @@ class FFmpegNotFoundError(FFmpegError):
 
     def __init__(self):
         message = "FFmpeg is not installed or not found in PATH"
-        user_message = "FFmpeg is not installed on the system. Please install FFmpeg to continue."
+        user_message = (
+            "FFmpeg is not installed on the system. Please install FFmpeg to continue."
+        )
         super().__init__(
             message=message,
             error_code="FFMPEG_NOT_FOUND",
@@ -125,9 +130,7 @@ class YouTubeAccessError(YouTubeDownloadError):
 
     def __init__(self, url: str, reason: str):
         message = f"Cannot access YouTube video {url}: {reason}"
-        user_message = (
-            "Cannot access the video. It may be private, age-restricted, or unavailable."
-        )
+        user_message = "Cannot access the video. It may be private, age-restricted, or unavailable."
         super().__init__(
             message=message,
             error_code="YOUTUBE_ACCESS_ERROR",
@@ -196,9 +199,7 @@ class AudioExtractionError(TranscriptionError):
 
     def __init__(self, video_path: str, error: str):
         message = f"Audio extraction failed for {video_path}: {error}"
-        user_message = (
-            "Cannot extract audio from the video. The file may be corrupted or in an unsupported format."
-        )
+        user_message = "Cannot extract audio from the video. The file may be corrupted or in an unsupported format."
         super().__init__(
             message=message,
             error_code="AUDIO_EXTRACTION_ERROR",
@@ -236,9 +237,7 @@ class TranslationQuotaError(TranslationError):
 
     def __init__(self, service: str):
         message = f"Translation service {service} quota exceeded"
-        user_message = (
-            f"The translation quota for {service} has been exceeded. Please try again later or use a different service."
-        )
+        user_message = f"The translation quota for {service} has been exceeded. Please try again later or use a different service."
         super().__init__(
             message=message,
             error_code="TRANSLATION_QUOTA_ERROR",
@@ -259,7 +258,9 @@ class FileNotFoundError(FileProcessingError):
 
     def __init__(self, file_path: str):
         message = f"File not found: {file_path}"
-        user_message = "The file was not found. It may have been deleted or the path is incorrect."
+        user_message = (
+            "The file was not found. It may have been deleted or the path is incorrect."
+        )
         super().__init__(
             message=message,
             error_code="FILE_NOT_FOUND",
@@ -274,7 +275,9 @@ class FilePermissionError(FileProcessingError):
 
     def __init__(self, file_path: str, operation: str):
         message = f"Permission denied for {operation} on {file_path}"
-        user_message = f"Permission denied to {operation} the file. Please check file permissions."
+        user_message = (
+            f"Permission denied to {operation} the file. Please check file permissions."
+        )
         super().__init__(
             message=message,
             error_code="FILE_PERMISSION_ERROR",
@@ -307,7 +310,9 @@ class ConfigurationError(VideoProcessingError):
 
     def __init__(self, config_key: str, value: str, expected: str):
         message = f"Invalid configuration {config_key}={value}, expected {expected}"
-        user_message = f"System configuration {config_key} is invalid. Please check the settings."
+        user_message = (
+            f"System configuration {config_key} is invalid. Please check the settings."
+        )
         super().__init__(
             message=message,
             error_code="CONFIGURATION_ERROR",
@@ -343,7 +348,10 @@ def handle_youtube_error(e: Exception, url: str) -> YouTubeDownloadError:
     error_str = str(e).lower()
 
     # Check for bot detection first (most specific)
-    if any(keyword in error_str for keyword in ["sign in to confirm", "confirm you're not a bot", "bot"]):
+    if any(
+        keyword in error_str
+        for keyword in ["sign in to confirm", "confirm you're not a bot", "bot"]
+    ):
         return YouTubeBotDetectionError(url)
     elif any(
         keyword in error_str

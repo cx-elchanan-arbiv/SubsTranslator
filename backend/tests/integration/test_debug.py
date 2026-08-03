@@ -1,10 +1,13 @@
 """Quick debug script to see what's wrong with endpoints."""
+
 import os
+
 os.environ["DISABLE_RATE_LIMIT"] = "1"
 os.environ["TESTING"] = "1"
 
-import tempfile
 import shutil
+import tempfile
+
 from tests.integration.ffmpeg_helpers import make_video
 
 # Create temp dirs
@@ -33,11 +36,13 @@ with app.test_client() as client:
         data = {
             "video": (f, "test.mp4"),
             "start_time": "00:00:00",
-            "end_time": "00:00:01"
+            "end_time": "00:00:01",
         }
 
         print("\n=== Testing /cut-video ===")
-        response = client.post("/cut-video", data=data, content_type="multipart/form-data")
+        response = client.post(
+            "/cut-video", data=data, content_type="multipart/form-data"
+        )
         print(f"Status: {response.status_code}")
 
         if response.status_code != 200:
