@@ -2,6 +2,7 @@
 Video editing routes for SubsTranslator
 Handles video cutting, merging, subtitle embedding, and watermark addition
 """
+
 import os
 import uuid
 
@@ -9,16 +10,16 @@ from flask import Blueprint, jsonify, request, send_file, session
 from werkzeug.utils import secure_filename
 
 from config import get_config
-from logo_manager import LogoManager
 from logging_config import get_logger
+from logo_manager import LogoManager
+from utils.file_utils import safe_int
 from utils.video_utils import (
+    add_watermark_to_video,
     cut_video_ffmpeg,
     embed_subtitles_ffmpeg,
-    parse_text_to_srt,
-    add_watermark_to_video,
     merge_videos_ffmpeg,
+    parse_text_to_srt,
 )
-from utils.file_utils import safe_int
 
 # Configuration
 config = get_config()
@@ -28,7 +29,7 @@ logger = get_logger(__name__)
 logo_manager = LogoManager(config.ASSETS_FOLDER)
 
 # Create blueprint
-editing_bp = Blueprint('editing', __name__)
+editing_bp = Blueprint("editing", __name__)
 
 
 @editing_bp.route("/cut-video", methods=["POST"])
@@ -36,22 +37,26 @@ def cut_video():
     """Cut a video from start_time to end_time with ultra-precise FFmpeg cutting."""
     try:
         # Check if video file was uploaded
-        if 'video' not in request.files:
+        if "video" not in request.files:
             return jsonify({"error": "No video file provided"}), 400
 
-        video_file = request.files['video']
-        if video_file.filename == '':
+        video_file = request.files["video"]
+        if video_file.filename == "":
             return jsonify({"error": "No video file selected"}), 400
 
         # Get time parameters
-        start_time = request.form.get('start_time', '00:00:00')
-        end_time = request.form.get('end_time', '00:01:00')
+        start_time = request.form.get("start_time", "00:00:00")
+        end_time = request.form.get("end_time", "00:01:00")
 
-        logger.info(f"Cutting video: {video_file.filename} from {start_time} to {end_time}")
+        logger.info(
+            f"Cutting video: {video_file.filename} from {start_time} to {end_time}"
+        )
 
         # Save uploaded video
         video_filename = secure_filename(video_file.filename)
-        input_path = os.path.join(config.UPLOAD_FOLDER, f"cut_input_{uuid.uuid4()}_{video_filename}")
+        input_path = os.path.join(
+            config.UPLOAD_FOLDER, f"cut_input_{uuid.uuid4()}_{video_filename}"
+        )
         video_file.save(input_path)
 
         # Prepare output path
@@ -65,7 +70,14 @@ def cut_video():
             # Clean up
             if os.path.exists(input_path):
                 os.remove(input_path)
-            return jsonify({"error": "Failed to cut video. Please check the time format and try again."}), 500
+            return (
+                jsonify(
+                    {
+                        "error": "Failed to cut video. Please check the time format and try again."
+                    }
+                ),
+                500,
+            )
 
         # Clean up input file
         if os.path.exists(input_path):
@@ -77,15 +89,15 @@ def cut_video():
             output_path,
             as_attachment=True,
             download_name=output_filename,
-            mimetype='video/mp4'
+            mimetype="video/mp4",
         )
 
     except Exception as e:
         logger.error(f"Video cutting failed: {e}")
         # Clean up on error
-        if 'input_path' in locals() and os.path.exists(input_path):
+        if "input_path" in locals() and os.path.exists(input_path):
             os.remove(input_path)
-        if 'output_path' in locals() and os.path.exists(output_path):
+        if "output_path" in locals() and os.path.exists(output_path):
             os.remove(output_path)
         return jsonify({"error": str(e)}), 500
 
@@ -95,25 +107,27 @@ def embed_subtitles():
     """Embed subtitles into video with optional watermark."""
     try:
         # Check if video file was uploaded
-        if 'video' not in request.files:
+        if "video" not in request.files:
             return jsonify({"error": "No video file provided"}), 400
 
-        video_file = request.files['video']
-        if video_file.filename == '':
+        video_file = request.files["video"]
+        if video_file.filename == "":
             return jsonify({"error": "No video file selected"}), 400
 
         # Get subtitles (file or text)
-        srt_file = request.files.get('srt_file')
-        srt_text = request.form.get('srt_text', '')
+        srt_file = request.files.get("srt_file")
+        srt_text = request.form.get("srt_text", "")
 
         if not srt_file and not srt_text:
             return jsonify({"error": "Please provide subtitles (file or text)"}), 400
 
         # Get logo options
-        include_logo = request.form.get('include_logo', 'false').lower() == 'true'
-        logo_position = request.form.get('logo_position', 'bottom-right')
-        logo_size = request.form.get('logo_size', 'medium')
-        logo_opacity, opacity_error = safe_int(request.form.get('logo_opacity'), 40, 0, 100)
+        include_logo = request.form.get("include_logo", "false").lower() == "true"
+        logo_position = request.form.get("logo_position", "bottom-right")
+        logo_size = request.form.get("logo_size", "medium")
+        logo_opacity, opacity_error = safe_int(
+            request.form.get("logo_opacity"), 40, 0, 100
+        )
         if opacity_error:
             return jsonify({"error": f"Invalid logo_opacity: {opacity_error}"}), 400
 
@@ -121,14 +135,18 @@ def embed_subtitles():
 
         # Save uploaded video
         video_filename = secure_filename(video_file.filename)
-        input_video_path = os.path.join(config.UPLOAD_FOLDER, f"embed_input_{uuid.uuid4()}_{video_filename}")
+        input_video_path = os.path.join(
+            config.UPLOAD_FOLDER, f"embed_input_{uuid.uuid4()}_{video_filename}"
+        )
         video_file.save(input_video_path)
 
         # Handle subtitles
         if srt_file:
             # Save SRT file
             srt_filename = secure_filename(srt_file.filename)
-            srt_path = os.path.join(config.UPLOAD_FOLDER, f"srt_{uuid.uuid4()}_{srt_filename}")
+            srt_path = os.path.join(
+                config.UPLOAD_FOLDER, f"srt_{uuid.uuid4()}_{srt_filename}"
+            )
             srt_file.save(srt_path)
         else:
             # Parse text to SRT
@@ -137,10 +155,19 @@ def embed_subtitles():
             if not success:
                 if os.path.exists(input_video_path):
                     os.remove(input_video_path)
-                return jsonify({"error": "Failed to parse subtitles text. Please check the format."}), 400
+                return (
+                    jsonify(
+                        {
+                            "error": "Failed to parse subtitles text. Please check the format."
+                        }
+                    ),
+                    400,
+                )
 
         # Embed subtitles
-        temp_output_path = os.path.join(config.DOWNLOADS_FOLDER, f"with_subs_{uuid.uuid4()}_{video_filename}")
+        temp_output_path = os.path.join(
+            config.DOWNLOADS_FOLDER, f"with_subs_{uuid.uuid4()}_{video_filename}"
+        )
         success = embed_subtitles_ffmpeg(input_video_path, srt_path, temp_output_path)
 
         if not success:
@@ -152,20 +179,25 @@ def embed_subtitles():
 
         # Add watermark if requested
         if include_logo:
-            # Get logo from session or assets
-            logo_path = logo_manager.get_user_logo_path(session.get('session_id', 'default'))
+            # The user's uploaded logo is persisted by the watermark upload routes
+            # (api/video_routes.py) into the Flask session under 'custom_logo_path'
+            # — that is the app-wide contract for "this user's logo". Fall back to
+            # the configured default watermark asset.
+            logo_path = session.get("custom_logo_path")
             if not logo_path or not os.path.exists(logo_path):
-                logo_path = os.path.join(config.ASSETS_FOLDER, 'default_logo.png')
+                logo_path = config.get_watermark_path("default")
 
             if os.path.exists(logo_path):
-                final_output_path = os.path.join(config.DOWNLOADS_FOLDER, f"final_{uuid.uuid4()}_{video_filename}")
+                final_output_path = os.path.join(
+                    config.DOWNLOADS_FOLDER, f"final_{uuid.uuid4()}_{video_filename}"
+                )
                 success = add_watermark_to_video(
                     temp_output_path,
                     final_output_path,
                     logo_path,
                     logo_position,
                     logo_size,
-                    logo_opacity
+                    logo_opacity,
                 )
 
                 if success:
@@ -174,7 +206,9 @@ def embed_subtitles():
                         os.remove(temp_output_path)
                     output_path = final_output_path
                 else:
-                    logger.warning("Failed to add watermark, returning video with subtitles only")
+                    logger.warning(
+                        "Failed to add watermark, returning video with subtitles only"
+                    )
                     output_path = temp_output_path
             else:
                 logger.warning("Logo not found, returning video with subtitles only")
@@ -194,13 +228,19 @@ def embed_subtitles():
             output_path,
             as_attachment=True,
             download_name=output_filename,
-            mimetype='video/mp4'
+            mimetype="video/mp4",
         )
 
     except Exception as e:
         logger.error(f"Embed subtitles failed: {e}")
         # Clean up on error
-        for var in ['input_video_path', 'srt_path', 'temp_output_path', 'final_output_path', 'output_path']:
+        for var in [
+            "input_video_path",
+            "srt_path",
+            "temp_output_path",
+            "final_output_path",
+            "output_path",
+        ]:
             if var in locals():
                 path = locals()[var]
                 if path and os.path.exists(path):
@@ -213,8 +253,8 @@ def merge_videos():
     """Merge two videos with automatic resolution handling."""
     try:
         # Get uploaded video files
-        video1_file = request.files.get('video1')
-        video2_file = request.files.get('video2')
+        video1_file = request.files.get("video1")
+        video2_file = request.files.get("video2")
 
         if not video1_file or not video2_file:
             return jsonify({"error": "Both video files are required"}), 400
@@ -225,12 +265,16 @@ def merge_videos():
         output_id = str(uuid.uuid4())
 
         # Get file extensions
-        video1_ext = os.path.splitext(video1_file.filename)[1] or '.mp4'
-        video2_ext = os.path.splitext(video2_file.filename)[1] or '.mp4'
+        video1_ext = os.path.splitext(video1_file.filename)[1] or ".mp4"
+        video2_ext = os.path.splitext(video2_file.filename)[1] or ".mp4"
 
         # Save uploaded files
-        video1_path = os.path.join(config.UPLOAD_FOLDER, f"video1_{video1_id}{video1_ext}")
-        video2_path = os.path.join(config.UPLOAD_FOLDER, f"video2_{video2_id}{video2_ext}")
+        video1_path = os.path.join(
+            config.UPLOAD_FOLDER, f"video1_{video1_id}{video1_ext}"
+        )
+        video2_path = os.path.join(
+            config.UPLOAD_FOLDER, f"video2_{video2_id}{video2_ext}"
+        )
         output_path = os.path.join(config.DOWNLOADS_FOLDER, f"merged_{output_id}.mp4")
 
         video1_file.save(video1_path)
@@ -269,14 +313,14 @@ def merge_videos():
             output_path,
             as_attachment=True,
             download_name=output_filename,
-            mimetype='video/mp4'
+            mimetype="video/mp4",
         )
 
     except Exception as e:
         logger.error(f"Error in merge_videos endpoint: {str(e)}", exc_info=True)
 
         # Cleanup on error
-        for var in ['video1_path', 'video2_path', 'output_path']:
+        for var in ["video1_path", "video2_path", "output_path"]:
             if var in locals():
                 path = locals()[var]
                 if path and os.path.exists(path):
@@ -288,37 +332,64 @@ def merge_videos():
 def extract_audio():
     """Extract audio from a video file and return it as MP3."""
     try:
-        if 'video' not in request.files:
+        if "video" not in request.files:
             return jsonify({"error": "No video file provided"}), 400
 
-        video_file = request.files['video']
-        if video_file.filename == '':
+        video_file = request.files["video"]
+        if video_file.filename == "":
             return jsonify({"error": "No video file selected"}), 400
 
-        audio_format = request.form.get('format', 'mp3')
-        if audio_format not in ('mp3', 'wav'):
-            audio_format = 'mp3'
+        audio_format = request.form.get("format", "mp3")
+        if audio_format not in ("mp3", "wav"):
+            audio_format = "mp3"
 
         logger.info(f"Extracting audio from: {video_file.filename} as {audio_format}")
 
         # Save uploaded video
         video_filename = secure_filename(video_file.filename)
-        input_path = os.path.join(config.UPLOAD_FOLDER, f"audio_input_{uuid.uuid4()}_{video_filename}")
+        input_path = os.path.join(
+            config.UPLOAD_FOLDER, f"audio_input_{uuid.uuid4()}_{video_filename}"
+        )
         video_file.save(input_path)
 
         # Prepare output path
         base_name = os.path.splitext(video_filename)[0]
         output_filename = f"{base_name}_audio.{audio_format}"
-        output_path = os.path.join(config.DOWNLOADS_FOLDER, f"audio_{uuid.uuid4()}_{output_filename}")
+        output_path = os.path.join(
+            config.DOWNLOADS_FOLDER, f"audio_{uuid.uuid4()}_{output_filename}"
+        )
 
         # Extract audio with FFmpeg
         import subprocess
-        if audio_format == 'mp3':
-            cmd = ['ffmpeg', '-i', input_path, '-vn', '-acodec', 'libmp3lame', '-ab', '192k', '-y', output_path]
-            mimetype = 'audio/mpeg'
+
+        if audio_format == "mp3":
+            cmd = [
+                "ffmpeg",
+                "-i",
+                input_path,
+                "-vn",
+                "-acodec",
+                "libmp3lame",
+                "-ab",
+                "192k",
+                "-y",
+                output_path,
+            ]
+            mimetype = "audio/mpeg"
         else:
-            cmd = ['ffmpeg', '-i', input_path, '-vn', '-acodec', 'pcm_s16le', '-ar', '44100', '-y', output_path]
-            mimetype = 'audio/wav'
+            cmd = [
+                "ffmpeg",
+                "-i",
+                input_path,
+                "-vn",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "44100",
+                "-y",
+                output_path,
+            ]
+            mimetype = "audio/wav"
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
@@ -337,14 +408,14 @@ def extract_audio():
             output_path,
             as_attachment=True,
             download_name=output_filename,
-            mimetype=mimetype
+            mimetype=mimetype,
         )
 
     except Exception as e:
         logger.error(f"Audio extraction failed: {e}")
-        if 'input_path' in locals() and os.path.exists(input_path):
+        if "input_path" in locals() and os.path.exists(input_path):
             os.remove(input_path)
-        if 'output_path' in locals() and os.path.exists(output_path):
+        if "output_path" in locals() and os.path.exists(output_path):
             os.remove(output_path)
         return jsonify({"error": str(e)}), 500
 
@@ -354,8 +425,8 @@ def add_logo_to_video():
     """Add a logo/watermark to a video without transcription or translation."""
     try:
         # Get uploaded files
-        video_file = request.files.get('video')
-        logo_file = request.files.get('logo')
+        video_file = request.files.get("video")
+        logo_file = request.files.get("logo")
 
         if not video_file:
             return jsonify({"error": "Video file is required"}), 400
@@ -364,13 +435,15 @@ def add_logo_to_video():
             return jsonify({"error": "Logo file is required"}), 400
 
         # Get watermark settings
-        position = request.form.get('position', 'top-right')
-        size = request.form.get('size', 'medium')
-        opacity, opacity_error = safe_int(request.form.get('opacity'), 40, 0, 100)
+        position = request.form.get("position", "top-right")
+        size = request.form.get("size", "medium")
+        opacity, opacity_error = safe_int(request.form.get("opacity"), 40, 0, 100)
         if opacity_error:
             return jsonify({"error": f"Invalid opacity: {opacity_error}"}), 400
 
-        logger.info(f"Adding logo to video: {video_file.filename} with position={position}, size={size}, opacity={opacity}")
+        logger.info(
+            f"Adding logo to video: {video_file.filename} with position={position}, size={size}, opacity={opacity}"
+        )
 
         # Generate unique IDs
         video_id = str(uuid.uuid4())
@@ -378,13 +451,15 @@ def add_logo_to_video():
         output_id = str(uuid.uuid4())
 
         # Get file extensions
-        video_ext = os.path.splitext(video_file.filename)[1] or '.mp4'
-        logo_ext = os.path.splitext(logo_file.filename)[1] or '.png'
+        video_ext = os.path.splitext(video_file.filename)[1] or ".mp4"
+        logo_ext = os.path.splitext(logo_file.filename)[1] or ".png"
 
         # Save uploaded files
         video_path = os.path.join(config.UPLOAD_FOLDER, f"video_{video_id}{video_ext}")
         logo_path = os.path.join(config.UPLOAD_FOLDER, f"logo_{logo_id}{logo_ext}")
-        output_path = os.path.join(config.DOWNLOADS_FOLDER, f"with_logo_{output_id}.mp4")
+        output_path = os.path.join(
+            config.DOWNLOADS_FOLDER, f"with_logo_{output_id}.mp4"
+        )
 
         video_file.save(video_path)
         logo_file.save(logo_path)
@@ -396,7 +471,7 @@ def add_logo_to_video():
             logo_path,
             position=position,
             size=size,
-            opacity=opacity
+            opacity=opacity,
         )
 
         if not success:
@@ -426,14 +501,14 @@ def add_logo_to_video():
             output_path,
             as_attachment=True,
             download_name=output_filename,
-            mimetype='video/mp4'
+            mimetype="video/mp4",
         )
 
     except Exception as e:
         logger.error(f"Error in add_logo_to_video endpoint: {str(e)}", exc_info=True)
 
         # Cleanup on error
-        for var in ['video_path', 'logo_path', 'output_path']:
+        for var in ["video_path", "logo_path", "output_path"]:
             if var in locals():
                 path = locals()[var]
                 if path and os.path.exists(path):

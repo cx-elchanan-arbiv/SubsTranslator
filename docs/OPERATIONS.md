@@ -87,7 +87,6 @@ curl -X POST -F "file=@small_test.mp4" http://localhost:8081/upload
 | Variable | Purpose | Default | Notes |
 |----------|---------|---------|-------|
 | `REDIS_HOST` | Redis server | `redis` | Docker service name |
-| `FFMPEG_THREADS` | Video processing threads | `4` | Match CPU cores |
 | `TASK_SOFT_TIME_LIMIT` | Worker timeout (sec) | `1800` | 30 minutes |
 | `REQUIRE_DOWNLOAD_TOKEN` | Secure downloads | `False` | Set `True` in prod |
 

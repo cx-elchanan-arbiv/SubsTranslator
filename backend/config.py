@@ -23,28 +23,50 @@ class Config:
     DOWNLOADS_FOLDER = os.getenv("DOWNLOADS_FOLDER", "/app/downloads")
     WHISPER_MODELS_FOLDER = os.getenv("WHISPER_MODELS_FOLDER", "/app/whisper_models")
     ASSETS_FOLDER = os.getenv("ASSETS_FOLDER", "/app/assets")
-    
+
     # Phase A: Fast workspace for I/O operations
     FAST_WORK_DIR = os.getenv("FAST_WORK_DIR", "/app/fast_work")
-    
+
     # Phase A+ Hotfix: OpenAI batch limits and concurrency
     MAX_TOKENS_PER_BATCH = int(os.getenv("MAX_TOKENS_PER_BATCH", 5000))
-    MAX_SEGMENTS_PER_BATCH = int(os.getenv("MAX_SEGMENTS_PER_BATCH", 20))  # Reduced from 25 to 20 to prevent merge issues
-    MAX_CONCURRENT_OPENAI_REQUESTS = int(os.getenv("MAX_CONCURRENT_OPENAI_REQUESTS", 1))  # per process
-    OPENAI_REQUEST_TIMEOUT_S = int(os.getenv("OPENAI_REQUEST_TIMEOUT_S", 120))  # Increased to 2 minutes
-    MAX_OPENAI_RETRIES = int(os.getenv("MAX_OPENAI_RETRIES", 5))  # Increased retries from 3 to 5
-    ALLOW_GOOGLE_FALLBACK = os.getenv("ALLOW_GOOGLE_FALLBACK", "False").lower() == "true"  # Disabled by default
+    MAX_SEGMENTS_PER_BATCH = int(
+        os.getenv("MAX_SEGMENTS_PER_BATCH", 20)
+    )  # Reduced from 25 to 20 to prevent merge issues
+    MAX_CONCURRENT_OPENAI_REQUESTS = int(
+        os.getenv("MAX_CONCURRENT_OPENAI_REQUESTS", 1)
+    )  # per process
+    OPENAI_REQUEST_TIMEOUT_S = int(
+        os.getenv("OPENAI_REQUEST_TIMEOUT_S", 120)
+    )  # Increased to 2 minutes
+    MAX_OPENAI_RETRIES = int(
+        os.getenv("MAX_OPENAI_RETRIES", 5)
+    )  # Increased retries from 3 to 5
+    ALLOW_GOOGLE_FALLBACK = (
+        os.getenv("ALLOW_GOOGLE_FALLBACK", "False").lower() == "true"
+    )  # Disabled by default
 
     # Strict Quality Gates (Production-Grade)
-    ENABLE_SRT_EXPORT_GATE = os.getenv("ENABLE_SRT_EXPORT_GATE", "True").lower() == "true"  # Strict validation before export
-    ALLOW_TRANSLATION_FALLBACK = os.getenv("ALLOW_TRANSLATION_FALLBACK", "False").lower() == "true"  # No fallback to original text
+    ENABLE_SRT_EXPORT_GATE = (
+        os.getenv("ENABLE_SRT_EXPORT_GATE", "True").lower() == "true"
+    )  # Strict validation before export
+    ALLOW_TRANSLATION_FALLBACK = (
+        os.getenv("ALLOW_TRANSLATION_FALLBACK", "False").lower() == "true"
+    )  # No fallback to original text
     GATE_MAX_RETRIES = int(os.getenv("GATE_MAX_RETRIES", 1))  # Single automatic retry
-    FAIL_FAST_ON_GATE_ERROR = os.getenv("FAIL_FAST_ON_GATE_ERROR", "True").lower() == "true"  # Don't export on validation failure
+    FAIL_FAST_ON_GATE_ERROR = (
+        os.getenv("FAIL_FAST_ON_GATE_ERROR", "True").lower() == "true"
+    )  # Don't export on validation failure
 
     # Quality Gate Thresholds
-    MAX_CPS = float(os.getenv("MAX_CPS", 22.0))  # Characters per second (Hebrew: ~18-22 optimal)
-    MAX_CUE_DURATION_S = float(os.getenv("MAX_CUE_DURATION_S", 6.0))  # Max subtitle display time
-    MIN_CUE_GAP_MS = float(os.getenv("MIN_CUE_GAP_MS", 50.0))  # Min gap between cues to prevent overlap
+    MAX_CPS = float(
+        os.getenv("MAX_CPS", 22.0)
+    )  # Characters per second (Hebrew: ~18-22 optimal)
+    MAX_CUE_DURATION_S = float(
+        os.getenv("MAX_CUE_DURATION_S", 6.0)
+    )  # Max subtitle display time
+    MIN_CUE_GAP_MS = float(
+        os.getenv("MIN_CUE_GAP_MS", 50.0)
+    )  # Min gap between cues to prevent overlap
 
     # File Processing Limits
     MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 500 * 1024 * 1024))  # 500MB default
@@ -52,8 +74,15 @@ class Config:
     ALLOWED_EXTENSIONS: set[str] = {"mp4", "mkv", "mov", "webm", "avi", "mp3", "wav"}
 
     # Whisper Model Configuration
-    DEFAULT_WHISPER_MODEL = os.getenv("DEFAULT_WHISPER_MODEL", "base")  # Default for production (2GB RAM Worker)
-    AVAILABLE_WHISPER_MODELS: set[str] = {"base", "medium", "large", "gemini"}  # Added gemini as experimental option
+    DEFAULT_WHISPER_MODEL = os.getenv(
+        "DEFAULT_WHISPER_MODEL", "base"
+    )  # Default for production (2GB RAM Worker)
+    AVAILABLE_WHISPER_MODELS: set[str] = {
+        "base",
+        "medium",
+        "large",
+        "gemini",
+    }  # Added gemini as experimental option
 
     # Hosted Mode Configuration
     # When True: Restricts resource-intensive models (large) to PRO users only
@@ -62,17 +91,12 @@ class Config:
     # Models that require PRO subscription in hosted mode
     PRO_ONLY_MODELS: set[str] = {"large"}
     WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
-    WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float32")
 
     # Language Configuration
     DEFAULT_SOURCE_LANG = os.getenv("DEFAULT_SOURCE_LANG", "auto")
     # Import shared language configuration
-    from shared_config import (
-        DEFAULT_TARGET_LANGUAGE as DEFAULT_TARGET_LANG,
-    )
-    from shared_config import (
-        LEGACY_SUPPORTED_LANGUAGES as SUPPORTED_LANGUAGES,
-    )
+    from shared_config import DEFAULT_TARGET_LANGUAGE as DEFAULT_TARGET_LANG
+    from shared_config import LEGACY_SUPPORTED_LANGUAGES as SUPPORTED_LANGUAGES
 
     # Video Processing Configuration
     DEFAULT_LOGO_SIZE = int(os.getenv("DEFAULT_LOGO_SIZE", 80))  # Height in pixels
@@ -86,7 +110,6 @@ class Config:
     }
 
     # FFmpeg Configuration
-    FFMPEG_THREADS = int(os.getenv("FFMPEG_THREADS", 4))
     VIDEO_QUALITY = os.getenv("VIDEO_QUALITY", "medium")
     SUBTITLE_FONT_SIZE = int(os.getenv("SUBTITLE_FONT_SIZE", 18))
 
@@ -129,9 +152,17 @@ class Config:
     _celery_backend = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL)
 
     # Add SSL cert requirement for TLS connections
-    if _celery_broker and _celery_broker.startswith("rediss://") and "ssl_cert_reqs" not in _celery_broker:
+    if (
+        _celery_broker
+        and _celery_broker.startswith("rediss://")
+        and "ssl_cert_reqs" not in _celery_broker
+    ):
         _celery_broker = f"{_celery_broker}?ssl_cert_reqs=CERT_REQUIRED"
-    if _celery_backend and _celery_backend.startswith("rediss://") and "ssl_cert_reqs" not in _celery_backend:
+    if (
+        _celery_backend
+        and _celery_backend.startswith("rediss://")
+        and "ssl_cert_reqs" not in _celery_backend
+    ):
         _celery_backend = f"{_celery_backend}?ssl_cert_reqs=CERT_REQUIRED"
 
     CELERY_BROKER_URL = _celery_broker
@@ -170,10 +201,14 @@ class Config:
     YTDLP_EXTRACTOR_ARGS = {"youtube": {"player_client": YTDLP_PLAYER_CLIENT}}
 
     # yt-dlp unified options - Phase A optimized settings
-    YTDLP_SOCKET_TIMEOUT = int(os.getenv("YTDLP_SOCKET_TIMEOUT", 30))  # Reduced for faster failure
+    YTDLP_SOCKET_TIMEOUT = int(
+        os.getenv("YTDLP_SOCKET_TIMEOUT", 30)
+    )  # Reduced for faster failure
     YTDLP_RETRIES = int(os.getenv("YTDLP_RETRIES", 5))  # Reduced from 10 to 5
-    YTDLP_FRAGMENT_RETRIES = int(os.getenv("YTDLP_FRAGMENT_RETRIES", 5))  # Reduced from 10 to 5
-    
+    YTDLP_FRAGMENT_RETRIES = int(
+        os.getenv("YTDLP_FRAGMENT_RETRIES", 5)
+    )  # Reduced from 10 to 5
+
     # Phase A: Optimized format for remux-only merge (no re-encoding)
     YTDLP_OPTIMIZED_FORMAT = os.getenv(
         "YTDLP_OPTIMIZED_FORMAT",
@@ -184,10 +219,9 @@ class Config:
         # HLS with non-mp4a/m4a codecs). These come BEFORE the single-file
         # fallbacks so we prefer working HLS streams over progressive URLs that
         # some sites (e.g. TED's h264-1200k) serve but then reject with HTTP 403.
-        "bestvideo[height<=1080]+bestaudio/"
-        "bestvideo+bestaudio/"
+        "bestvideo[height<=1080]+bestaudio/" "bestvideo+bestaudio/"
         # ...single muxed file as last resort (sources with no separate streams).
-        "best[ext=mp4]/best"
+        "best[ext=mp4]/best",
     )
     YTDLP_CACHE_DIR = os.getenv("YTDLP_CACHE_DIR", "/tmp/yt-dlp")
     YTDLP_RESTRICT_FILENAMES = (
@@ -195,21 +229,6 @@ class Config:
     )
     YTDLP_CONTINUE_DL = os.getenv("YTDLP_CONTINUE_DL", "True").lower() == "true"
     YTDLP_MERGE_OUTPUT_FORMAT = os.getenv("YTDLP_MERGE_OUTPUT_FORMAT", "mp4")
-    YTDLP_FORMAT_BY_QUALITY: dict[str, str] = {
-        "low": os.getenv("YTDLP_FMT_LOW", "worst"),
-        "medium": os.getenv(
-            "YTDLP_FMT_MED",
-            "bestvideo[height<=720][vcodec*=avc1]+bestaudio[acodec*=mp4a]/bestvideo[height<=720]+bestaudio/best[height<=720]",
-        ),
-        "high": os.getenv(
-            "YTDLP_FMT_HIGH",
-            "bestvideo[height<=1080][vcodec*=avc1]+bestaudio[acodec*=mp4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-        ),
-        "best": os.getenv(
-            "YTDLP_FMT_BEST",
-            "bestvideo[height<=1080][vcodec*=avc1]+bestaudio[acodec*=mp4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-        ),
-    }
     YTDLP_FORMAT_SORT = ["res:1080", "fps", "codec:avc1:m4a", "ext:mp4"]
 
     # FFmpeg timeouts
@@ -221,15 +240,21 @@ class Config:
     LOG_FORMAT = os.getenv(
         "LOG_FORMAT", "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s"
     )
-    
+
     # Clean Logging Settings
     ENABLE_JSON_LOGGING = os.getenv("ENABLE_JSON_LOGGING", "False").lower() == "true"
-    ENABLE_PERFORMANCE_LOGGING = os.getenv("ENABLE_PERFORMANCE_LOGGING", "True").lower() == "true"
-    LOG_EXTERNAL_SERVICES = os.getenv("LOG_EXTERNAL_SERVICES", "False").lower() == "true"  # Reduce noise
-    
+    ENABLE_PERFORMANCE_LOGGING = (
+        os.getenv("ENABLE_PERFORMANCE_LOGGING", "True").lower() == "true"
+    )
+    LOG_EXTERNAL_SERVICES = (
+        os.getenv("LOG_EXTERNAL_SERVICES", "False").lower() == "true"
+    )  # Reduce noise
+
     # Progress Update Intervals (seconds)
     DOWNLOAD_PROGRESS_INTERVAL = float(os.getenv("DOWNLOAD_PROGRESS_INTERVAL", 2.0))
-    SYSTEM_RESOURCE_CHECK_INTERVAL = float(os.getenv("SYSTEM_RESOURCE_CHECK_INTERVAL", 30.0))
+    SYSTEM_RESOURCE_CHECK_INTERVAL = float(
+        os.getenv("SYSTEM_RESOURCE_CHECK_INTERVAL", 30.0)
+    )
 
     # Progress Logs Exposure (optional)
     EXPOSE_PROGRESS_LOGS = os.getenv("EXPOSE_PROGRESS_LOGS", "False").lower() == "true"
@@ -246,7 +271,9 @@ class Config:
     )
 
     # YouTube Download Feature Toggle
-    ENABLE_YOUTUBE_DOWNLOAD = os.getenv("ENABLE_YOUTUBE_DOWNLOAD", "True").lower() == "true"
+    ENABLE_YOUTUBE_DOWNLOAD = (
+        os.getenv("ENABLE_YOUTUBE_DOWNLOAD", "True").lower() == "true"
+    )
 
     # Research Recorder — full per-run archive for corpus analysis.
     # Every run writes an immutable, timestamped directory under RESEARCH_DIR: the
@@ -312,20 +339,34 @@ class Config:
 
 
 class DevelopmentConfig(Config):
-    """Development configuration"""
+    """Development configuration.
 
-    DEBUG = True
-    LOG_LEVEL = "DEBUG"
-    WORKER_CONCURRENCY = 1  # Lower for development
-    ALLOW_UNKNOWN_DOMAINS = True  # Allow unknown domains in development
-    
+    Every value here is an env-overridable *default*, never a hard override.
+    Plain class attributes (``DEBUG = True``) silently beat anything the
+    operator puts in the environment or in docker-compose, which is how
+    ``DEBUG=False`` + ``LOG_LEVEL=INFO`` in docker-compose ended up being
+    ignored. Read the env first and fall back to the development-friendly
+    value so the environment always wins.
+    """
+
+    DEBUG = os.getenv("DEBUG", "True").lower() == "true"
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG")
+    WORKER_CONCURRENCY = int(
+        os.getenv("WORKER_CONCURRENCY", 1)
+    )  # Lower for development
+    ALLOW_UNKNOWN_DOMAINS = (
+        os.getenv("ALLOW_UNKNOWN_DOMAINS", "True").lower() == "true"
+    )  # Allow unknown domains in development
+
     # Use local directories for development
     _BASE = os.path.dirname(os.path.abspath(__file__))
     UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", os.path.join(_BASE, "uploads"))
     DOWNLOADS_FOLDER = os.getenv("DOWNLOADS_FOLDER", os.path.join(_BASE, "downloads"))
-    WHISPER_MODELS_FOLDER = os.getenv("WHISPER_MODELS_FOLDER", os.path.join(_BASE, "whisper_models"))
+    WHISPER_MODELS_FOLDER = os.getenv(
+        "WHISPER_MODELS_FOLDER", os.path.join(_BASE, "whisper_models")
+    )
     ASSETS_FOLDER = os.getenv("ASSETS_FOLDER", os.path.join(_BASE, "assets"))
-    
+
     # Update watermark paths for development
     WATERMARK_PATHS: dict[str, str] = {
         "default": os.path.join(ASSETS_FOLDER, "logo.png"),
@@ -336,9 +377,14 @@ class DevelopmentConfig(Config):
 class ProductionConfig(Config):
     """Production configuration"""
 
+    # Intentionally NOT env-overridable: debug mode leaks stack traces and the
+    # interactive debugger, so production pins it off regardless of the env.
     DEBUG = False
-    LOG_LEVEL = "WARNING"
-    WORKER_CONCURRENCY = 4  # Higher for production
+    # Operational knobs: env wins, these are only defaults.
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING")
+    WORKER_CONCURRENCY = int(
+        os.getenv("WORKER_CONCURRENCY", 4)
+    )  # Higher for production
 
 
 class TestingConfig(Config):
