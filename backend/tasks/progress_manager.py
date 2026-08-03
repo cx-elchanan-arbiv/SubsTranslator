@@ -2,6 +2,7 @@
 Progress Manager for Celery tasks
 Provides step-based progress tracking for long-running tasks
 """
+
 import time
 
 

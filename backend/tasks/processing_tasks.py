@@ -2,6 +2,7 @@
 Video processing tasks for SubsTranslator
 Handles transcription, translation, and video creation
 """
+
 import os
 import shutil
 import time
@@ -15,6 +16,7 @@ from logging_config import (
     log_task_start,
 )
 from services.research_recorder import start_run
+from services.stats_service import save_video_stats
 from services.subtitle_engine import (
     absorb_dropped_time,
     drop_hallucinated_cues,
@@ -30,7 +32,6 @@ from services.subtitle_pipeline import (
     resolve_flags,
 )
 from services.subtitle_service import subtitle_service
-from services.stats_service import save_video_stats
 from services.transcription_service import (
     transcribe_and_translate_streamed,
     transcribe_video,
@@ -505,10 +506,16 @@ def process_video_task(
         # P1: Use pipeline overlap if translation is needed, otherwise use standard transcription
         elif wants_translation:
             # === P1 Pipeline Overlap: Transcribe + Translate Simultaneously ===
-            logger.info("Using P1 pipeline overlap (transcribe + translate simultaneously)")
+            logger.info(
+                "Using P1 pipeline overlap (transcribe + translate simultaneously)"
+            )
 
             # Extract YouTube URL for Gemini support (if available)
-            youtube_url = processing_info.get("user_choices", {}).get("url") if processing_info else None
+            youtube_url = (
+                processing_info.get("user_choices", {}).get("url")
+                if processing_info
+                else None
+            )
             logger.info(f"DEBUG: Extracted youtube_url = {youtube_url}")
             logger.info(f"DEBUG: whisper_model = {whisper_model}")
 
@@ -530,7 +537,9 @@ def process_video_task(
             # The corpus needs legacy runs too — a v1-vs-v2 comparison is exactly what
             # it is for. The legacy path overlaps transcription and translation, so
             # there is one combined timing and no separate pre-translation cue list.
-            recorder.update_meta(detected_language=detected_language, pipeline="legacy_p1")
+            recorder.update_meta(
+                detected_language=detected_language, pipeline="legacy_p1"
+            )
             recorder.add_timing("transcribe_and_translate", transcribe_duration)
             recorder.save_segments(segments)
 
@@ -670,21 +679,28 @@ def process_video_task(
                         recorder=recorder,
                     )
                 else:
-                    progress_manager.log("Creating video with subtitles and watermark (combined)...", step_index=5)
-
-                    video_creation_success = subtitle_service.create_video_with_subtitles_and_watermark(
-                        video_path,
-                        translated_srt_path,
-                        final_video_path_output,
-                        watermark_path,
-                        target_lang or detected_language,
-                        watermark_position=position,
-                        watermark_size_height=size_height,
-                        watermark_opacity=opacity_float,
-                        progress_callback=video_progress_callback,
+                    progress_manager.log(
+                        "Creating video with subtitles and watermark (combined)...",
+                        step_index=5,
                     )
 
-                final_video_path = final_video_path_output if video_creation_success else None
+                    video_creation_success = (
+                        subtitle_service.create_video_with_subtitles_and_watermark(
+                            video_path,
+                            translated_srt_path,
+                            final_video_path_output,
+                            watermark_path,
+                            target_lang or detected_language,
+                            watermark_position=position,
+                            watermark_size_height=size_height,
+                            watermark_opacity=opacity_float,
+                            progress_callback=video_progress_callback,
+                        )
+                    )
+
+                final_video_path = (
+                    final_video_path_output if video_creation_success else None
+                )
 
                 timing_summary["create_video_with_subtitles_and_watermark"] = (
                     f"{time.time() - video_creation_start:.1f}"
@@ -712,12 +728,14 @@ def process_video_task(
                     )
                 else:
                     # use original function
-                    video_creation_success = subtitle_service.create_video_with_subtitles(
-                        video_path,
-                        translated_srt_path,
-                        video_with_subtitles_path,
-                        target_lang or detected_language,
-                        progress_callback=video_progress_callback,
+                    video_creation_success = (
+                        subtitle_service.create_video_with_subtitles(
+                            video_path,
+                            translated_srt_path,
+                            video_with_subtitles_path,
+                            target_lang or detected_language,
+                            progress_callback=video_progress_callback,
+                        )
                     )
 
                 progress_manager.log("Finalizing video...", step_index=5)
@@ -733,7 +751,9 @@ def process_video_task(
 
                 # Check if video creation was successful before proceeding
                 if not video_creation_success:
-                    progress_manager.log("Video with subtitles creation failed...", step_index=6)
+                    progress_manager.log(
+                        "Video with subtitles creation failed...", step_index=6
+                    )
                     final_video_path = None
                     timing_summary["add_watermark"] = "0.0 (failed)"
                     progress_manager.complete_step(6)
@@ -793,7 +813,9 @@ def process_video_task(
 
         if processing_info:
             # Support both video_metadata (YouTube) and file_metadata (uploads)
-            final_result["video_metadata"] = processing_info.get("video_metadata") or processing_info.get("file_metadata", {})
+            final_result["video_metadata"] = processing_info.get(
+                "video_metadata"
+            ) or processing_info.get("file_metadata", {})
             final_result["user_choices"] = processing_info.get("user_choices", {})
 
         # The four subtitle-quality toggles are part of what the user chose, and the
@@ -826,7 +848,9 @@ def process_video_task(
                 video_size_mb = os.path.getsize(video_path) / (1024 * 1024)
 
             # Calculate transcription metrics
-            transcription_duration = transcribe_duration if 'transcribe_duration' in locals() else 0
+            transcription_duration = (
+                transcribe_duration if "transcribe_duration" in locals() else 0
+            )
             transcription_speed_ratio = 0
             if transcription_duration > 0 and video_duration > 0:
                 transcription_speed_ratio = video_duration / transcription_duration

@@ -2,19 +2,20 @@
 Status routes for SubsTranslator API v1.
 Handles task status checking and progress tracking.
 """
+
 from celery.result import AsyncResult
 from flask import Blueprint, jsonify
 
 from config import get_config
-from tasks import process_video_task
 from logging_config import get_logger
+from tasks import process_video_task
 
 # Configuration
 config = get_config()
 logger = get_logger(__name__)
 
 # Create blueprint
-status_bp = Blueprint('status', __name__)
+status_bp = Blueprint("status", __name__)
 
 
 @status_bp.route("/status/<task_id>", methods=["GET"])
@@ -62,7 +63,9 @@ def get_task_status(task_id):
                 status = "FAILURE"
                 error_info = {
                     "code": result.get("code", "TASK_FAILED"),
-                    "message": result.get("message", result.get("error", "Task failed")),
+                    "message": result.get(
+                        "message", result.get("error", "Task failed")
+                    ),
                     "user_facing_message": result.get(
                         "user_facing_message", "Processing failed. Please try again."
                     ),
@@ -96,7 +99,8 @@ def get_task_status(task_id):
                 "code": result_dict.get("code", "TASK_FAILED"),
                 "message": result_dict.get("message", "Task failed"),
                 "user_facing_message": result_dict.get(
-                    "user_facing_message", "An error occurred during processing. Please try again."
+                    "user_facing_message",
+                    "An error occurred during processing. Please try again.",
                 ),
                 "recoverable": result_dict.get("recoverable", True),
             }

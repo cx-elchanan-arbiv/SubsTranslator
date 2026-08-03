@@ -12,7 +12,6 @@ This is the entry point for "paste a page URL, not just a direct video link".
 It does NOT handle JS-rendered / signed-token pages (e.g. Maven) — those need a
 headless browser and are explicitly out of scope here (see docs/URL_PAGE_EXTRACTION_POC.md).
 """
-from typing import Any, Optional
 
 import yt_dlp
 
@@ -23,7 +22,7 @@ config = get_config()
 logger = get_logger(__name__)
 
 
-def _duration_string(seconds: Optional[float]) -> str:
+def _duration_string(seconds: float | None) -> str:
     """Format seconds as H:MM:SS / M:SS (mirrors yt-dlp's duration_string)."""
     if not seconds:
         return ""
@@ -59,7 +58,7 @@ def resolve_video_url(url: str) -> dict:
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "noplaylist": False,            # let multi-video pages reveal all entries
+        "noplaylist": False,  # let multi-video pages reveal all entries
         "extract_flat": "in_playlist",  # fast: don't deep-fetch every entry
         "socket_timeout": config.YTDLP_SOCKET_TIMEOUT,
         "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
@@ -70,9 +69,16 @@ def resolve_video_url(url: str) -> dict:
             info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as e:
         msg = str(e).lower()
-        if "log in" in msg or "logged-in" in msg or "cookies" in msg or "account" in msg:
+        if (
+            "log in" in msg
+            or "logged-in" in msg
+            or "cookies" in msg
+            or "account" in msg
+        ):
             reason = "needs_login"
-        elif "unsupported url" in msg or "unable to extract" in msg or "no video" in msg:
+        elif (
+            "unsupported url" in msg or "unable to extract" in msg or "no video" in msg
+        ):
             reason = "no_video"
         else:
             reason = "unavailable"

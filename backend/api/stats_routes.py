@@ -2,29 +2,30 @@
 Statistics routes for SubsTranslator
 Handles task statistics, daily summaries, model performance, and cost tracking
 """
+
 import os
 from datetime import datetime
+
 from flask import Blueprint, jsonify, request, send_file
 
 from logging_config import get_logger
-from utils.file_utils import safe_int
 from services.stats_service import (
-    get_stats_by_task_id,
-    get_stats_by_date,
+    get_cost_breakdown,
     get_daily_summary,
     get_model_performance,
-    get_cost_breakdown,
-    is_stats_service_available,
+    get_stats_by_task_id,
+    get_stats_count_from_file,
     get_stats_file_path,
     get_stats_file_size,
-    get_stats_count_from_file
+    is_stats_service_available,
 )
+from utils.file_utils import safe_int
 
 # Configuration
 logger = get_logger(__name__)
 
 # Create blueprint
-stats_bp = Blueprint('stats', __name__, url_prefix='/api/stats')
+stats_bp = Blueprint("stats", __name__, url_prefix="/api/stats")
 
 
 @stats_bp.route("/task/<task_id>", methods=["GET"])
@@ -52,7 +53,7 @@ def get_stats_daily():
     Example: /api/stats/daily?date=2025-01-19
     """
     try:
-        date_str = request.args.get('date')
+        date_str = request.args.get("date")
 
         # Validate date format if provided
         if date_str:
@@ -85,11 +86,16 @@ def get_stats_model(model_name):
         # Validate model name
         valid_models = ["base", "medium", "large"]
         if model_name not in valid_models:
-            return jsonify({
-                "error": f"Invalid model name. Must be one of: {', '.join(valid_models)}"
-            }), 400
+            return (
+                jsonify(
+                    {
+                        "error": f"Invalid model name. Must be one of: {', '.join(valid_models)}"
+                    }
+                ),
+                400,
+            )
 
-        days, days_error = safe_int(request.args.get('days'), 7, 1, 365)
+        days, days_error = safe_int(request.args.get("days"), 7, 1, 365)
         if days_error:
             return jsonify({"error": f"Invalid 'days' parameter: {days_error}"}), 400
         performance = get_model_performance(model_name, days)
@@ -111,8 +117,8 @@ def get_stats_costs():
     Example: /api/stats/costs?date=2025-01-19&days=30
     """
     try:
-        date_str = request.args.get('date')
-        days, days_error = safe_int(request.args.get('days'), 7, 1, 365)
+        date_str = request.args.get("date")
+        days, days_error = safe_int(request.args.get("days"), 7, 1, 365)
         if days_error:
             return jsonify({"error": f"Invalid 'days' parameter: {days_error}"}), 400
 
@@ -135,16 +141,19 @@ def get_stats_health():
     """Check if statistics service is available."""
     try:
         available = is_stats_service_available()
-        return jsonify({
-            "stats_service_available": available,
-            "message": "Stats service is operational" if available else "Stats service unavailable (Redis connection issue)"
-        }), 200 if available else 503
+        return jsonify(
+            {
+                "stats_service_available": available,
+                "message": (
+                    "Stats service is operational"
+                    if available
+                    else "Stats service unavailable (Redis connection issue)"
+                ),
+            }
+        ), (200 if available else 503)
     except Exception as e:
         logger.error(f"Error checking stats health: {e}")
-        return jsonify({
-            "stats_service_available": False,
-            "message": str(e)
-        }), 503
+        return jsonify({"stats_service_available": False, "message": str(e)}), 503
 
 
 @stats_bp.route("/download", methods=["GET"])
@@ -166,22 +175,29 @@ def download_stats_file():
         stats_file = get_stats_file_path()
 
         if not os.path.exists(stats_file):
-            return jsonify({
-                "error": "Stats file not found",
-                "message": "No statistics have been recorded yet"
-            }), 404
+            return (
+                jsonify(
+                    {
+                        "error": "Stats file not found",
+                        "message": "No statistics have been recorded yet",
+                    }
+                ),
+                404,
+            )
 
         # Get file info
         file_size = get_stats_file_size()
         entry_count = get_stats_count_from_file()
 
-        logger.info(f"📥 Downloading stats file: {entry_count} entries, {file_size / 1024:.1f}KB")
+        logger.info(
+            f"📥 Downloading stats file: {entry_count} entries, {file_size / 1024:.1f}KB"
+        )
 
         return send_file(
             stats_file,
-            mimetype='application/x-ndjson',
+            mimetype="application/x-ndjson",
             as_attachment=True,
-            download_name='video_stats.jsonl'
+            download_name="video_stats.jsonl",
         )
 
     except Exception as e:
@@ -209,7 +225,7 @@ def get_stats_file_info():
             "file_path": stats_file if exists else None,
             "file_size_bytes": get_stats_file_size() if exists else 0,
             "file_size_kb": round(get_stats_file_size() / 1024, 2) if exists else 0,
-            "entry_count": get_stats_count_from_file() if exists else 0
+            "entry_count": get_stats_count_from_file() if exists else 0,
         }
 
         return jsonify(info), 200

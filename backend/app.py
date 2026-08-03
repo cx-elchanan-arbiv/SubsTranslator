@@ -5,40 +5,19 @@ Now with asynchronous processing using Celery and Redis!
 """
 
 import os
-import shutil
-import threading
-import time
-import uuid
-import base64
-import re
 
 from dotenv import load_dotenv
 
 # Load environment variables BEFORE importing config or other modules that read env
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-import openai
-from celery.result import AsyncResult
-from flask import Flask, jsonify, request, send_file, session
+from flask import Flask, request
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from werkzeug.utils import secure_filename
-from logo_manager import LogoManager
 
 from config import get_config
-from tasks import (
-    download_and_process_youtube_task,
-    download_youtube_only_task,
-    process_video_task,
-)
-from utils.file_probe import probe_file_safe
-from utils.video_utils import (
-    cut_video_ffmpeg,
-    embed_subtitles_ffmpeg,
-    parse_text_to_srt,
-    add_watermark_to_video
-)
+from logo_manager import LogoManager
 
 # Set testing environment variables if running in CI
 if os.getenv("CI") == "true" or "pytest" in os.environ.get("_", ""):
@@ -55,17 +34,24 @@ logo_manager = LogoManager(config.ASSETS_FOLDER)
 
 # Flask app setup
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = config.MAX_FILE_SIZE  # Set file size limit
+app.config["MAX_CONTENT_LENGTH"] = config.MAX_FILE_SIZE  # Set file size limit
 # SECRET_KEY is required for session security - must be set in production
-_secret_key = os.getenv('SECRET_KEY')
-if not _secret_key or _secret_key in ('your-secret-key-change-in-production', 'changeme', 'secret'):
-    if os.getenv('FLASK_ENV') == 'production' or not os.getenv('FLASK_TESTING'):
+_secret_key = os.getenv("SECRET_KEY")
+if not _secret_key or _secret_key in (
+    "your-secret-key-change-in-production",
+    "changeme",
+    "secret",
+):
+    if os.getenv("FLASK_ENV") == "production" or not os.getenv("FLASK_TESTING"):
         import warnings
-        warnings.warn("SECRET_KEY not set or using weak default. Set a strong SECRET_KEY in production!")
-    _secret_key = 'dev-only-insecure-key-do-not-use-in-production'
-app.config['SECRET_KEY'] = _secret_key
-app.config['UPLOAD_FOLDER'] = config.UPLOAD_FOLDER
-app.config['DOWNLOADS_FOLDER'] = config.DOWNLOADS_FOLDER
+
+        warnings.warn(
+            "SECRET_KEY not set or using weak default. Set a strong SECRET_KEY in production!"
+        )
+    _secret_key = "dev-only-insecure-key-do-not-use-in-production"
+app.config["SECRET_KEY"] = _secret_key
+app.config["UPLOAD_FOLDER"] = config.UPLOAD_FOLDER
+app.config["DOWNLOADS_FOLDER"] = config.DOWNLOADS_FOLDER
 
 # CORS configuration - fully configurable via environment variable
 # Set CORS_ORIGINS to a comma-separated list of allowed origins
@@ -77,24 +63,32 @@ local_origins = [
     "http://localhost",
     "http://127.0.0.1",
     "http://localhost:3000",
-    "http://127.0.0.1:3000"
+    "http://127.0.0.1:3000",
 ]
 
 if cors_origins:
     # Use specific origins from environment variable + local origins
-    origins_list = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
+    origins_list = [
+        origin.strip() for origin in cors_origins.split(",") if origin.strip()
+    ]
     origins_list.extend(local_origins)
 else:
     # No CORS_ORIGINS set - only allow local development
     # In production, you should set CORS_ORIGINS explicitly
     origins_list = local_origins
 
-CORS(app, resources={r"/*": {
-    "origins": origins_list,
-    "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    "allow_headers": ["Content-Type", "Authorization"],
-    "supports_credentials": True
-}})
+CORS(
+    app,
+    resources={
+        r"/*": {
+            "origins": origins_list,
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "supports_credentials": True,
+        }
+    },
+)
+
 
 # Rate limiting setup - test-friendly configuration
 def get_storage_uri():
@@ -123,6 +117,7 @@ def get_storage_uri():
     # (memory:// is not ideal for multi-instance, but better than crashing)
     return "memory://"
 
+
 # Initialize rate limiter only if not disabled
 if os.getenv("DISABLE_RATE_LIMIT") != "1":
     limiter = Limiter(
@@ -137,6 +132,7 @@ else:
         def limit(self, *args, **kwargs):
             def decorator(f):
                 return f
+
             return decorator
 
         def exempt(self, f):
@@ -149,7 +145,9 @@ else:
     limiter = MockLimiter()
 
 # Create directories only if not in testing mode
-if not (os.getenv("FLASK_TESTING") == "1" or os.getenv("TESTING", "").lower() == "true"):
+if not (
+    os.getenv("FLASK_TESTING") == "1" or os.getenv("TESTING", "").lower() == "true"
+):
     os.makedirs(config.UPLOAD_FOLDER, exist_ok=True)
     os.makedirs(config.DOWNLOADS_FOLDER, exist_ok=True)
 else:
@@ -175,36 +173,43 @@ setup_logging(
 logger = get_logger(__name__)
 
 # Initialize i18n system
-from i18n.translations import init_i18n, t
+from i18n.translations import init_i18n
 
 init_i18n(app)
 
-# Register blueprints
-from api.health_routes import health_bp, _is_valid_openai_key
-from api.video_routes import video_bp
-from api.stats_routes import stats_bp
 from api.editing_routes import editing_bp
+
+# Register blueprints.
+# `_is_valid_openai_key` is re-exported on purpose: it lives in api.health_routes,
+# but `from app import _is_valid_openai_key` is the established import path for the
+# test suite (tests/unit/test_critical_security_paths.py and friends). Keep the alias
+# here so the entrypoint stays the stable surface — it is not dead code.
+from api.health_routes import _is_valid_openai_key, health_bp  # noqa: F401
+from api.stats_routes import stats_bp
 from api.summary_routes import summary_bp
 
 # Register API v1 routes (new versioned API)
 from api.v1 import v1_bp
+from api.video_routes import video_bp
 
 app.register_blueprint(health_bp)
 app.register_blueprint(video_bp)  # Legacy routes (backwards compatibility)
 app.register_blueprint(stats_bp)
 app.register_blueprint(editing_bp)
 app.register_blueprint(summary_bp)
-app.register_blueprint(v1_bp, url_prefix='/api/v1')  # Versioned API
+app.register_blueprint(v1_bp, url_prefix="/api/v1")  # Versioned API
 
 # Apply limiter exemptions to blueprint routes
 limiter.exempt(health_bp)
+
 
 # Exempt status polling endpoint from rate limiting (needs frequent polling)
 @limiter.request_filter
 def exempt_status_endpoint():
     """Exempt /status/<task_id> from rate limiting for polling"""
     # Support both legacy and v1 status endpoints
-    return request.endpoint in ('video.get_task_status', 'v1.status.get_task_status')
+    return request.endpoint in ("video.get_task_status", "v1.status.get_task_status")
+
 
 # Initialize download token service
 from services.token_service import start_cleanup_scheduler
@@ -212,15 +217,12 @@ from services.token_service import start_cleanup_scheduler
 start_cleanup_scheduler()
 
 # Import custom exceptions
-from core.exceptions import AppError, FfmpegNotInstalledError
+from core.exceptions import FfmpegNotInstalledError
 
 # Import utility functions
-from utils import check_ffmpeg, allowed_file
-
+from utils import check_ffmpeg
 
 # =================== API ENDPOINTS ===================
-
-
 
 
 # =================== SERVER STARTUP ===================

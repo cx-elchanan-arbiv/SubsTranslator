@@ -2,8 +2,8 @@
 Backend utility functions
 """
 
-import shutil
 import re
+import shutil
 
 from config import get_config
 from core.exceptions import FfmpegNotInstalledError
@@ -68,14 +68,18 @@ def sanitize_filename(filename):
     """
     # Replace unsafe characters with underscores
     unsafe_chars = r'[<>:"/\\|?*]'
-    safe_filename = re.sub(unsafe_chars, '_', filename)
+    safe_filename = re.sub(unsafe_chars, "_", filename)
 
     # Remove leading/trailing dots and spaces
-    safe_filename = safe_filename.strip('. ')
+    safe_filename = safe_filename.strip(". ")
 
     # Limit filename length to 255 characters (common filesystem limit)
     if len(safe_filename) > 255:
-        name, ext = safe_filename.rsplit('.', 1) if '.' in safe_filename else (safe_filename, '')
+        name, ext = (
+            safe_filename.rsplit(".", 1)
+            if "." in safe_filename
+            else (safe_filename, "")
+        )
         max_name_len = 255 - len(ext) - 1  # -1 for the dot
         safe_filename = f"{name[:max_name_len]}.{ext}" if ext else name[:255]
 

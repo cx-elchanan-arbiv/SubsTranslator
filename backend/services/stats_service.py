@@ -15,11 +15,12 @@ Features:
 import json
 import logging
 import os
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
 import threading
+from datetime import datetime, timedelta
+from typing import Any
 
 import redis
+
 from config import get_config
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ try:
         config.REDIS_URL,
         decode_responses=True,  # Auto-decode bytes to strings
         socket_timeout=5,
-        socket_connect_timeout=5
+        socket_connect_timeout=5,
     )
     # Test connection
     redis_client.ping()
@@ -52,7 +53,7 @@ STATS_FILE = os.path.join(STATS_DIR, "video_stats.jsonl")
 _file_lock = threading.Lock()  # Thread-safe file writing
 
 
-def append_video_stats_to_jsonl(stats: Dict[str, Any]) -> bool:
+def append_video_stats_to_jsonl(stats: dict[str, Any]) -> bool:
     """
     Append video statistics to JSONL file (one JSON per line).
     Thread-safe, persistent storage for long-term analysis.
@@ -73,10 +74,12 @@ def append_video_stats_to_jsonl(stats: Dict[str, Any]) -> bool:
 
         # Thread-safe append to file
         with _file_lock:
-            with open(STATS_FILE, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(stats, ensure_ascii=False) + '\n')
+            with open(STATS_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(stats, ensure_ascii=False) + "\n")
 
-        logger.debug(f"📝 Appended stats to JSONL: {stats.get('task_id', 'unknown')[:8]}...")
+        logger.debug(
+            f"📝 Appended stats to JSONL: {stats.get('task_id', 'unknown')[:8]}..."
+        )
         return True
 
     except Exception as e:
@@ -84,7 +87,7 @@ def append_video_stats_to_jsonl(stats: Dict[str, Any]) -> bool:
         return False
 
 
-def save_video_stats(stats: Dict[str, Any]) -> bool:
+def save_video_stats(stats: dict[str, Any]) -> bool:
     """
     Save video processing statistics to Redis with automatic indexing.
 
@@ -125,16 +128,12 @@ def save_video_stats(stats: Dict[str, Any]) -> bool:
             stats["created_at"] = datetime.now().isoformat()
 
         # Parse date for indexing
-        created_at = datetime.fromisoformat(stats["created_at"].replace('Z', '+00:00'))
+        created_at = datetime.fromisoformat(stats["created_at"].replace("Z", "+00:00"))
         date_key = created_at.strftime("%Y-%m-%d")
 
         # 1. Save main stats data
         stats_key = f"{STATS_PREFIX}:{task_id}"
-        redis_client.setex(
-            stats_key,
-            timedelta(days=STATS_TTL_DAYS),
-            json.dumps(stats)
-        )
+        redis_client.setex(stats_key, timedelta(days=STATS_TTL_DAYS), json.dumps(stats))
 
         # 2. Create indexes for fast queries
         ttl = timedelta(days=STATS_TTL_DAYS)
@@ -145,13 +144,21 @@ def save_video_stats(stats: Dict[str, Any]) -> bool:
 
         # Model index
         if "transcription_model" in stats:
-            redis_client.sadd(f"{INDEX_PREFIX}:model:{stats['transcription_model']}", task_id)
-            redis_client.expire(f"{INDEX_PREFIX}:model:{stats['transcription_model']}", ttl)
+            redis_client.sadd(
+                f"{INDEX_PREFIX}:model:{stats['transcription_model']}", task_id
+            )
+            redis_client.expire(
+                f"{INDEX_PREFIX}:model:{stats['transcription_model']}", ttl
+            )
 
         # Translation service index
         if "translation_service" in stats:
-            redis_client.sadd(f"{INDEX_PREFIX}:service:{stats['translation_service']}", task_id)
-            redis_client.expire(f"{INDEX_PREFIX}:service:{stats['translation_service']}", ttl)
+            redis_client.sadd(
+                f"{INDEX_PREFIX}:service:{stats['translation_service']}", task_id
+            )
+            redis_client.expire(
+                f"{INDEX_PREFIX}:service:{stats['translation_service']}", ttl
+            )
 
         # Status index
         if "status" in stats:
@@ -176,7 +183,7 @@ def save_video_stats(stats: Dict[str, Any]) -> bool:
             return False
 
 
-def get_stats_by_task_id(task_id: str) -> Optional[Dict[str, Any]]:
+def get_stats_by_task_id(task_id: str) -> dict[str, Any] | None:
     """
     Get statistics for a specific task.
 
@@ -199,7 +206,7 @@ def get_stats_by_task_id(task_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_stats_by_date(date_str: str) -> List[Dict[str, Any]]:
+def get_stats_by_date(date_str: str) -> list[dict[str, Any]]:
     """
     Get all statistics for a specific date.
 
@@ -227,7 +234,7 @@ def get_stats_by_date(date_str: str) -> List[Dict[str, Any]]:
         return []
 
 
-def get_stats_by_model(model: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+def get_stats_by_model(model: str, limit: int | None = None) -> list[dict[str, Any]]:
     """
     Get statistics for a specific Whisper model.
 
@@ -258,7 +265,7 @@ def get_stats_by_model(model: str, limit: Optional[int] = None) -> List[Dict[str
         return []
 
 
-def get_daily_summary(date_str: Optional[str] = None) -> Dict[str, Any]:
+def get_daily_summary(date_str: str | None = None) -> dict[str, Any]:
     """
     Get daily summary of processing statistics.
 
@@ -282,7 +289,7 @@ def get_daily_summary(date_str: Optional[str] = None) -> Dict[str, Any]:
             "total_cost_usd": 0.0,
             "total_processing_time": 0.0,
             "models_used": {},
-            "services_used": {}
+            "services_used": {},
         }
 
     # Calculate aggregations
@@ -306,17 +313,25 @@ def get_daily_summary(date_str: Optional[str] = None) -> Dict[str, Any]:
         "total_videos": len(stats_list),
         "successful": len(successful),
         "failed": len(failed),
-        "total_cost_usd": round(sum(s.get("translation_cost_usd", 0) for s in stats_list), 4),
-        "total_processing_time": round(sum(s.get("total_duration", 0) for s in stats_list), 2),
-        "avg_processing_time": round(
-            sum(s.get("total_duration", 0) for s in stats_list) / len(stats_list), 2
-        ) if stats_list else 0,
+        "total_cost_usd": round(
+            sum(s.get("translation_cost_usd", 0) for s in stats_list), 4
+        ),
+        "total_processing_time": round(
+            sum(s.get("total_duration", 0) for s in stats_list), 2
+        ),
+        "avg_processing_time": (
+            round(
+                sum(s.get("total_duration", 0) for s in stats_list) / len(stats_list), 2
+            )
+            if stats_list
+            else 0
+        ),
         "models_used": models_used,
         "services_used": services_used,
     }
 
 
-def get_model_performance(model: str, days: int = 7) -> Dict[str, Any]:
+def get_model_performance(model: str, days: int = 7) -> dict[str, Any]:
     """
     Calculate performance metrics for a specific Whisper model.
 
@@ -352,20 +367,28 @@ def get_model_performance(model: str, days: int = 7) -> Dict[str, Any]:
         }
 
     durations = [s.get("transcription_duration", 0) for s in successful]
-    speed_ratios = [s.get("transcription_speed_ratio", 0) for s in successful if s.get("transcription_speed_ratio", 0) > 0]
+    speed_ratios = [
+        s.get("transcription_speed_ratio", 0)
+        for s in successful
+        if s.get("transcription_speed_ratio", 0) > 0
+    ]
 
     return {
         "model": model,
         "total_videos": len(stats_list),
         "successful_videos": len(successful),
-        "avg_transcription_duration": round(sum(durations) / len(durations), 2) if durations else 0,
-        "avg_speed_ratio": round(sum(speed_ratios) / len(speed_ratios), 2) if speed_ratios else 0,
+        "avg_transcription_duration": (
+            round(sum(durations) / len(durations), 2) if durations else 0
+        ),
+        "avg_speed_ratio": (
+            round(sum(speed_ratios) / len(speed_ratios), 2) if speed_ratios else 0
+        ),
         "min_speed_ratio": round(min(speed_ratios), 2) if speed_ratios else 0,
         "max_speed_ratio": round(max(speed_ratios), 2) if speed_ratios else 0,
     }
 
 
-def get_cost_breakdown(date_str: Optional[str] = None, days: int = 7) -> Dict[str, Any]:
+def get_cost_breakdown(date_str: str | None = None, days: int = 7) -> dict[str, Any]:
     """
     Get cost breakdown by translation service.
 
@@ -389,11 +412,11 @@ def get_cost_breakdown(date_str: Optional[str] = None, days: int = 7) -> Dict[st
 
     if not all_stats:
         return {
-            "date_from": (current_date - timedelta(days=days-1)).strftime("%Y-%m-%d"),
+            "date_from": (current_date - timedelta(days=days - 1)).strftime("%Y-%m-%d"),
             "date_to": date_str,
             "total_cost_usd": 0.0,
             "total_tokens": 0,
-            "by_service": {}
+            "by_service": {},
         }
 
     # Calculate costs by service
@@ -401,11 +424,7 @@ def get_cost_breakdown(date_str: Optional[str] = None, days: int = 7) -> Dict[st
     for stat in all_stats:
         service = stat.get("translation_service", "unknown")
         if service not in by_service:
-            by_service[service] = {
-                "cost_usd": 0.0,
-                "tokens": 0,
-                "videos": 0
-            }
+            by_service[service] = {"cost_usd": 0.0, "tokens": 0, "videos": 0}
         by_service[service]["cost_usd"] += stat.get("translation_cost_usd", 0)
         by_service[service]["tokens"] += stat.get("translation_tokens", 0)
         by_service[service]["videos"] += 1
@@ -415,12 +434,14 @@ def get_cost_breakdown(date_str: Optional[str] = None, days: int = 7) -> Dict[st
         by_service[service]["cost_usd"] = round(by_service[service]["cost_usd"], 4)
 
     return {
-        "date_from": (current_date - timedelta(days=days-1)).strftime("%Y-%m-%d"),
+        "date_from": (current_date - timedelta(days=days - 1)).strftime("%Y-%m-%d"),
         "date_to": date_str,
-        "total_cost_usd": round(sum(s.get("translation_cost_usd", 0) for s in all_stats), 4),
+        "total_cost_usd": round(
+            sum(s.get("translation_cost_usd", 0) for s in all_stats), 4
+        ),
         "total_tokens": sum(s.get("translation_tokens", 0) for s in all_stats),
         "total_videos": len(all_stats),
-        "by_service": by_service
+        "by_service": by_service,
     }
 
 
@@ -447,7 +468,9 @@ def delete_old_stats(days: int = 30) -> int:
             data = redis_client.get(key)
             if data:
                 stat = json.loads(data)
-                created_at = datetime.fromisoformat(stat["created_at"].replace('Z', '+00:00'))
+                created_at = datetime.fromisoformat(
+                    stat["created_at"].replace("Z", "+00:00")
+                )
                 if created_at < cutoff_date:
                     redis_client.delete(key)
                     deleted += 1
@@ -474,7 +497,8 @@ def is_stats_service_available() -> bool:
 
 # =================== JSONL FILE OPERATIONS ===================
 
-def read_all_stats_from_jsonl() -> List[Dict[str, Any]]:
+
+def read_all_stats_from_jsonl() -> list[dict[str, Any]]:
     """
     Read all statistics from JSONL file.
 
@@ -487,7 +511,7 @@ def read_all_stats_from_jsonl() -> List[Dict[str, Any]]:
 
     try:
         stats_list = []
-        with open(STATS_FILE, 'r', encoding='utf-8') as f:
+        with open(STATS_FILE, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -536,7 +560,7 @@ def get_stats_count_from_file() -> int:
         return 0
 
     try:
-        with open(STATS_FILE, 'r', encoding='utf-8') as f:
+        with open(STATS_FILE, encoding="utf-8") as f:
             return sum(1 for line in f if line.strip())
     except:
         return 0

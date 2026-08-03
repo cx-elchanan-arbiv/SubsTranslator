@@ -32,6 +32,7 @@ The four flags are independent by design:
 All four default to OFF: with no flags set, nothing in this module runs and the legacy
 pipeline is untouched.
 """
+
 from __future__ import annotations
 
 import json
@@ -75,7 +76,9 @@ def parse_bool(value: Any, default: bool = False) -> bool:
         return True
     if text in _FALSE_STRINGS:
         return False
-    logger.warning("subtitle_pipeline: unparsable boolean %r — using %s", value, default)
+    logger.warning(
+        "subtitle_pipeline: unparsable boolean %r — using %s", value, default
+    )
     return default
 
 

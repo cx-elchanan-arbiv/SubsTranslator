@@ -6,14 +6,13 @@ Provides consistent logging with correlation IDs and structured data.
 import logging
 import sys
 from contextvars import ContextVar
-from typing import Optional
 
 import structlog
 
 # Context variables for request/task correlation
-task_id_var: ContextVar[Optional[str]] = ContextVar("task_id", default=None)
-request_id_var: ContextVar[Optional[str]] = ContextVar("request_id", default=None)
-user_id_var: ContextVar[Optional[str]] = ContextVar("user_id", default=None)
+task_id_var: ContextVar[str | None] = ContextVar("task_id", default=None)
+request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
+user_id_var: ContextVar[str | None] = ContextVar("user_id", default=None)
 
 
 def add_correlation_ids(logger, method_name, event_dict):
@@ -34,26 +33,26 @@ def add_correlation_ids(logger, method_name, event_dict):
 
 def setup_logging(level: str = "INFO", testing: bool = False, json_logs: bool = False):
     """Setup clean, structured logging configuration."""
-    
+
     # Clean console format for better readability
     console_format = "%(asctime)s [%(levelname)-7s] %(name)-12s: %(message)s"
-    
+
     # Configure standard library logging with clean format
     logging.basicConfig(
-        format=console_format, 
-        datefmt='%H:%M:%S',
-        stream=sys.stdout, 
-        level=getattr(logging, level.upper())
+        format=console_format,
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+        level=getattr(logging, level.upper()),
     )
-    
+
     # Reduce noise from external libraries
-    logging.getLogger('yt_dlp').setLevel(logging.WARNING)
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('requests').setLevel(logging.WARNING)
-    logging.getLogger('httpx').setLevel(logging.WARNING)
-    logging.getLogger('httpcore').setLevel(logging.WARNING)
-    logging.getLogger('openai').setLevel(logging.INFO)
-    
+    logging.getLogger("yt_dlp").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.INFO)
+
     # Configure processors
     processors = [
         add_correlation_ids,

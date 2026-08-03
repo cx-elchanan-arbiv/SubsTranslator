@@ -52,7 +52,9 @@ task_queues = (
 task_routes = {
     # Processing tasks
     "tasks.processing_tasks.process_video_task": {"queue": "processing"},
-    "tasks.processing_tasks.create_video_with_subtitles_from_segments": {"queue": "processing"},
+    "tasks.processing_tasks.create_video_with_subtitles_from_segments": {
+        "queue": "processing"
+    },
     # Download tasks (explicit names used in decorators)
     "download_and_process_youtube_task": {"queue": "processing"},
     "download_youtube_only_task": {"queue": "processing"},
@@ -74,7 +76,7 @@ beat_schedule = {
     "cleanup-old-files-daily": {
         "task": "tasks.cleanup_tasks.cleanup_old_files_task",
         "schedule": 86400.0,  # Daily (24 hours in seconds)
-        "kwargs": {"days": 14}  # Keep files for 14 days
+        "kwargs": {"days": 14},  # Keep files for 14 days
     },
 }
 

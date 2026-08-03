@@ -9,7 +9,6 @@ Now supports Gemini API for YouTube transcription!
 
 import logging
 import os
-from typing import Optional, Union
 
 import numpy as np
 from faster_whisper import WhisperModel
@@ -17,6 +16,7 @@ from faster_whisper import WhisperModel
 # Import Gemini transcription if available
 try:
     from services.gemini_transcription import transcribe_with_gemini
+
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
@@ -37,8 +37,11 @@ class SmartWhisperManager:
         try:
             os.makedirs(self.cache_dir, exist_ok=True)
         except (OSError, PermissionError) as e:
-            logger.warning(f"Could not create cache dir {self.cache_dir}: {e}. Using temp dir.")
+            logger.warning(
+                f"Could not create cache dir {self.cache_dir}: {e}. Using temp dir."
+            )
             import tempfile
+
             self.cache_dir = tempfile.mkdtemp(prefix="whisper_cache_")
         # Support for LARGE and MEDIUM models with faster-whisper 🚀
         # Plus GEMINI API for experimental YouTube transcription
@@ -86,7 +89,7 @@ class SmartWhisperManager:
     def choose_model(
         self,
         language: str = "auto",
-        duration: Optional[float] = None,
+        duration: float | None = None,
         quality_preference: str = "balanced",
         model_preference: str = None,
     ) -> str:
@@ -192,14 +195,14 @@ class SmartWhisperManager:
 
     def transcribe_smart(
         self,
-        audio_input: Union[str, np.ndarray, None],
+        audio_input: str | np.ndarray | None,
         language: str = "auto",
-        duration: Optional[float] = None,
+        duration: float | None = None,
         quality_preference: str = "balanced",
         model_preference: str = None,
         model_callback=None,
         progress_callback=None,
-        youtube_url: Optional[str] = None,  # NEW: For Gemini support
+        youtube_url: str | None = None,  # NEW: For Gemini support
     ):
         """
         Smart transcription with optimal model selection
@@ -235,7 +238,7 @@ class SmartWhisperManager:
                     result = transcribe_with_gemini(
                         youtube_url=youtube_url,
                         language=language,
-                        progress_callback=progress_callback
+                        progress_callback=progress_callback,
                     )
 
                     logger.info("✅ Gemini transcription successful!")
@@ -371,45 +374,59 @@ class SmartWhisperManager:
             audio_duration = duration
             if not audio_duration and isinstance(audio_input, np.ndarray):
                 audio_duration = len(audio_input) / 16000  # 16kHz sample rate
-            
+
             chunk_length = options.get("chunk_length", 20)
-            expected_chunks = int(audio_duration / chunk_length) if audio_duration else None
-            
+            expected_chunks = (
+                int(audio_duration / chunk_length) if audio_duration else None
+            )
+
             if progress_callback and expected_chunks:
-                logger.info(f"📊 Transcription progress: Expected ~{expected_chunks} chunks of {chunk_length}s each")
-                logger.info(f"🎙️ Starting transcription: 0s/{audio_duration:.0f}s (0.0%)")
-            
+                logger.info(
+                    f"📊 Transcription progress: Expected ~{expected_chunks} chunks of {chunk_length}s each"
+                )
+                logger.info(
+                    f"🎙️ Starting transcription: 0s/{audio_duration:.0f}s (0.0%)"
+                )
+
             # Create a progress-aware transcription wrapper
             if progress_callback and expected_chunks:
                 segments_processed = 0
                 all_segments = []
-                
+
                 # Process with progress tracking
                 segments_iter, info = model.transcribe(audio_input, **options)
-                
+
                 for segment in segments_iter:
                     all_segments.append(segment)
                     segments_processed += 1
-                    
+
                     # Estimate progress based on segment timing
-                    if hasattr(segment, 'end') and audio_duration:
+                    if hasattr(segment, "end") and audio_duration:
                         # Calculate progress: 30% to 85% (55% total range for transcription)
-                        transcription_progress = (segment.end / audio_duration) * 100  # 0-100%
-                        step_progress = 30 + int(transcription_progress * 0.55)  # 30-85%
-                        overall_progress = step_progress  # Same as step progress for this phase
-                        
+                        transcription_progress = (
+                            segment.end / audio_duration
+                        ) * 100  # 0-100%
+                        step_progress = 30 + int(
+                            transcription_progress * 0.55
+                        )  # 30-85%
+                        overall_progress = (
+                            step_progress  # Same as step progress for this phase
+                        )
+
                         progress_callback(
                             step_progress,
                             f"Transcription: {segment.end:.0f}s/{audio_duration:.0f}s",
                             overall_progress,
                             "Step 1: Whisper AI",
-                            5
+                            5,
                         )
-                        
+
                         # Log progress every ~20 seconds or at milestones
                         if segments_processed % 10 == 0 or transcription_progress >= 95:
-                            logger.info(f"🎙️ Transcription progress: {segment.end:.0f}s/{audio_duration:.0f}s ({transcription_progress:.1f}%)")
-                
+                            logger.info(
+                                f"🎙️ Transcription progress: {segment.end:.0f}s/{audio_duration:.0f}s ({transcription_progress:.1f}%)"
+                            )
+
                 segments = all_segments
             else:
                 # Standard transcription without progress

@@ -2,16 +2,17 @@
 Video utilities for video processing operations.
 """
 
-import subprocess
-import os
 import logging
+import os
 import re
-from typing import Optional
+import subprocess
 
 logger = logging.getLogger(__name__)
 
 
-def cut_video_ffmpeg(input_path: str, output_path: str, start_time: str, end_time: str) -> bool:
+def cut_video_ffmpeg(
+    input_path: str, output_path: str, start_time: str, end_time: str
+) -> bool:
     """
     Cut a video from start_time to end_time using FFmpeg with ultra-precise cutting.
 
@@ -42,46 +43,55 @@ def cut_video_ffmpeg(input_path: str, output_path: str, start_time: str, end_tim
 
         # Method 1: Ultra-precise double seeking (recommended)
         # This method is the most accurate for exact frame cutting
-        logger.info(f"Cutting video from {start_time} to {end_time} (duration: {duration}s)")
+        logger.info(
+            f"Cutting video from {start_time} to {end_time} (duration: {duration}s)"
+        )
 
         cmd = [
-            'ffmpeg',
-            '-y',  # Overwrite output
-            '-ss', start_time,  # Seek to start time (fast)
-            '-i', input_path,  # Input file
-            '-t', str(duration),  # Duration to cut
-            '-c', 'copy',  # Copy streams (fast, no re-encoding)
-            '-avoid_negative_ts', 'make_zero',  # Fix timestamp issues
-            output_path
+            "ffmpeg",
+            "-y",  # Overwrite output
+            "-ss",
+            start_time,  # Seek to start time (fast)
+            "-i",
+            input_path,  # Input file
+            "-t",
+            str(duration),  # Duration to cut
+            "-c",
+            "copy",  # Copy streams (fast, no re-encoding)
+            "-avoid_negative_ts",
+            "make_zero",  # Fix timestamp issues
+            output_path,
         ]
 
         logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
 
         result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minutes timeout
+            cmd, capture_output=True, text=True, timeout=300  # 5 minutes timeout
         )
 
         if result.returncode != 0:
-            logger.warning(f"Method 1 failed, trying Method 2 (filter-complex). Error: {result.stderr}")
+            logger.warning(
+                f"Method 1 failed, trying Method 2 (filter-complex). Error: {result.stderr}"
+            )
 
             # Method 2: Filter-complex precision (slower but more precise)
             cmd = [
-                'ffmpeg',
-                '-y',
-                '-i', input_path,
-                '-vf', f'trim=start={start_seconds}:end={end_seconds},setpts=PTS-STARTPTS',
-                '-af', f'atrim=start={start_seconds}:end={end_seconds},asetpts=PTS-STARTPTS',
-                output_path
+                "ffmpeg",
+                "-y",
+                "-i",
+                input_path,
+                "-vf",
+                f"trim=start={start_seconds}:end={end_seconds},setpts=PTS-STARTPTS",
+                "-af",
+                f"atrim=start={start_seconds}:end={end_seconds},asetpts=PTS-STARTPTS",
+                output_path,
             ]
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=600  # 10 minutes timeout for re-encoding
+                timeout=600,  # 10 minutes timeout for re-encoding
             )
 
             if result.returncode != 0:
@@ -102,7 +112,7 @@ def cut_video_ffmpeg(input_path: str, output_path: str, start_time: str, end_tim
         return True
 
     except subprocess.TimeoutExpired:
-        logger.error(f"FFmpeg command timed out")
+        logger.error("FFmpeg command timed out")
         return False
     except Exception as e:
         logger.error(f"Error cutting video: {str(e)}")
@@ -119,7 +129,7 @@ def time_to_seconds(time_str: str) -> float:
     Returns:
         Time in seconds as float
     """
-    parts = time_str.split(':')
+    parts = time_str.split(":")
     parts = [float(p) for p in parts]
 
     if len(parts) == 3:  # HH:MM:SS
@@ -132,7 +142,7 @@ def time_to_seconds(time_str: str) -> float:
         raise ValueError(f"Invalid time format: {time_str}")
 
 
-def get_video_duration(video_path: str) -> Optional[float]:
+def get_video_duration(video_path: str) -> float | None:
     """
     Get video duration in seconds using ffprobe.
 
@@ -144,19 +154,17 @@ def get_video_duration(video_path: str) -> Optional[float]:
     """
     try:
         cmd = [
-            'ffprobe',
-            '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            video_path
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            video_path,
         ]
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
         if result.returncode == 0:
             return float(result.stdout.strip())
@@ -183,25 +191,26 @@ def embed_subtitles_ffmpeg(video_path: str, srt_path: str, output_path: str) -> 
         logger.info(f"Embedding subtitles from {srt_path} into {video_path}")
 
         # Escape path for FFmpeg filter (Windows compatibility)
-        srt_path_escaped = srt_path.replace('\\', '/').replace(':', '\\:')
+        srt_path_escaped = srt_path.replace("\\", "/").replace(":", "\\:")
 
         cmd = [
-            'ffmpeg',
-            '-y',  # Overwrite output
-            '-i', video_path,  # Input video
-            '-vf', f"subtitles={srt_path_escaped}",  # Burn-in subtitles
-            '-c:a', 'copy',  # Copy audio without re-encoding
-            '-movflags', '+faststart',  # moov atom at front, so WhatsApp/players show a video preview
-            output_path
+            "ffmpeg",
+            "-y",  # Overwrite output
+            "-i",
+            video_path,  # Input video
+            "-vf",
+            f"subtitles={srt_path_escaped}",  # Burn-in subtitles
+            "-c:a",
+            "copy",  # Copy audio without re-encoding
+            "-movflags",
+            "+faststart",  # moov atom at front, so WhatsApp/players show a video preview
+            output_path,
         ]
 
         logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
 
         result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600  # 10 minutes timeout
+            cmd, capture_output=True, text=True, timeout=600  # 10 minutes timeout
         )
 
         if result.returncode != 0:
@@ -218,7 +227,9 @@ def embed_subtitles_ffmpeg(video_path: str, srt_path: str, output_path: str) -> 
             logger.error(f"Output file too small: {output_size} bytes")
             return False
 
-        logger.info(f"Subtitles embedded successfully: {output_path} ({output_size} bytes)")
+        logger.info(
+            f"Subtitles embedded successfully: {output_path} ({output_size} bytes)"
+        )
         return True
 
     except subprocess.TimeoutExpired:
@@ -248,7 +259,7 @@ def parse_text_to_srt(text: str, output_path: str) -> bool:
     try:
         import re
 
-        lines = text.strip().split('\n')
+        lines = text.strip().split("\n")
         srt_entries = []
         entry_num = 1
 
@@ -258,7 +269,10 @@ def parse_text_to_srt(text: str, output_path: str) -> bool:
                 continue
 
             # Match pattern: [time1 - time2] text
-            match = re.match(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.+)', line)
+            match = re.match(
+                r"\[(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.+)",
+                line,
+            )
 
             if match:
                 start_time = match.group(1)
@@ -279,8 +293,8 @@ def parse_text_to_srt(text: str, output_path: str) -> bool:
             return False
 
         # Write SRT file
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(srt_entries))
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(srt_entries))
 
         logger.info(f"Created SRT file with {len(srt_entries)} entries: {output_path}")
         return True
@@ -300,7 +314,7 @@ def convert_to_srt_time(time_str: str) -> str:
     Returns:
         SRT formatted time string
     """
-    parts = time_str.split(':')
+    parts = time_str.split(":")
 
     if len(parts) == 2:  # MM:SS
         return f"00:{parts[0].zfill(2)}:{parts[1].zfill(2)},000"
@@ -314,9 +328,9 @@ def add_watermark_to_video(
     video_path: str,
     output_path: str,
     logo_path: str,
-    position: str = 'bottom-right',
-    size: str = 'medium',
-    opacity: int = 40
+    position: str = "bottom-right",
+    size: str = "medium",
+    opacity: int = 40,
 ) -> bool:
     """
     Add watermark/logo to video using FFmpeg overlay filter.
@@ -336,21 +350,17 @@ def add_watermark_to_video(
         logger.info(f"Adding watermark to {video_path}")
 
         # Map size to height in pixels
-        size_map = {
-            'small': 80,
-            'medium': 120,
-            'large': 200
-        }
+        size_map = {"small": 80, "medium": 120, "large": 200}
         height = size_map.get(size, 120)
 
         # Map position to overlay coordinates
         position_map = {
-            'top-left': '10:10',
-            'top-right': 'main_w-overlay_w-10:10',
-            'bottom-left': '10:main_h-overlay_h-10',
-            'bottom-right': 'main_w-overlay_w-10:main_h-overlay_h-10'
+            "top-left": "10:10",
+            "top-right": "main_w-overlay_w-10:10",
+            "bottom-left": "10:main_h-overlay_h-10",
+            "bottom-right": "main_w-overlay_w-10:main_h-overlay_h-10",
         }
-        overlay_pos = position_map.get(position, 'main_w-overlay_w-10:10')
+        overlay_pos = position_map.get(position, "main_w-overlay_w-10:10")
 
         # Calculate opacity for FFmpeg (0.0 - 1.0)
         ffmpeg_opacity = opacity / 100.0
@@ -359,24 +369,24 @@ def add_watermark_to_video(
         filter_complex = f"[1:v]scale=-1:{height},format=rgba,colorchannelmixer=aa={ffmpeg_opacity}[logo];[0:v][logo]overlay={overlay_pos}"
 
         cmd = [
-            'ffmpeg',
-            '-y',
-            '-i', video_path,
-            '-i', logo_path,
-            '-filter_complex', filter_complex,
-            '-c:a', 'copy',  # Copy audio
-            '-movflags', '+faststart',  # moov atom at front, so WhatsApp/players show a video preview
-            output_path
+            "ffmpeg",
+            "-y",
+            "-i",
+            video_path,
+            "-i",
+            logo_path,
+            "-filter_complex",
+            filter_complex,
+            "-c:a",
+            "copy",  # Copy audio
+            "-movflags",
+            "+faststart",  # moov atom at front, so WhatsApp/players show a video preview
+            output_path,
         ]
 
         logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
         if result.returncode != 0:
             logger.error(f"FFmpeg failed: {result.stderr}")
@@ -388,7 +398,9 @@ def add_watermark_to_video(
             return False
 
         output_size = os.path.getsize(output_path)
-        logger.info(f"Watermark added successfully: {output_path} ({output_size} bytes)")
+        logger.info(
+            f"Watermark added successfully: {output_path} ({output_size} bytes)"
+        )
         return True
 
     except subprocess.TimeoutExpired:
@@ -399,11 +411,7 @@ def add_watermark_to_video(
         return False
 
 
-def merge_videos_ffmpeg(
-    video1_path: str,
-    video2_path: str,
-    output_path: str
-) -> bool:
+def merge_videos_ffmpeg(video1_path: str, video2_path: str, output_path: str) -> bool:
     """
     Merge two videos using FFmpeg concat filter.
 
@@ -423,30 +431,29 @@ def merge_videos_ffmpeg(
 
         # Method 1: Try concat demuxer (fastest, requires same codec/resolution)
         # Create concat list file
-        concat_list_path = output_path + '.concat.txt'
+        concat_list_path = output_path + ".concat.txt"
         try:
-            with open(concat_list_path, 'w', encoding='utf-8') as f:
+            with open(concat_list_path, "w", encoding="utf-8") as f:
                 f.write(f"file '{video1_path}'\n")
                 f.write(f"file '{video2_path}'\n")
 
             cmd = [
-                'ffmpeg',
-                '-y',
-                '-f', 'concat',
-                '-safe', '0',
-                '-i', concat_list_path,
-                '-c', 'copy',  # Fast copy
-                output_path
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                concat_list_path,
+                "-c",
+                "copy",  # Fast copy
+                output_path,
             ]
 
             logger.info(f"Trying fast concat method: {' '.join(cmd)}")
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=600
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
             if result.returncode == 0:
                 # Verify output
@@ -454,10 +461,14 @@ def merge_videos_ffmpeg(
                     logger.info("Fast concat succeeded")
                     os.remove(concat_list_path)  # Cleanup
                     output_size = os.path.getsize(output_path)
-                    logger.info(f"Videos merged successfully: {output_path} ({output_size} bytes)")
+                    logger.info(
+                        f"Videos merged successfully: {output_path} ({output_size} bytes)"
+                    )
                     return True
 
-            logger.warning(f"Fast concat failed, trying re-encode method. Error: {result.stderr}")
+            logger.warning(
+                f"Fast concat failed, trying re-encode method. Error: {result.stderr}"
+            )
 
         finally:
             # Cleanup concat list file
@@ -467,22 +478,31 @@ def merge_videos_ffmpeg(
         # Method 2: Re-encode with filter_complex (slower but handles different formats)
         # This scales both videos to match resolution and re-encodes
         cmd = [
-            'ffmpeg',
-            '-y',
-            '-i', video1_path,
-            '-i', video2_path,
-            '-filter_complex',
-            '[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[v0];'
-            '[1:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[v1];'
-            '[v0][0:a][v1][1:a]concat=n=2:v=1:a=1[outv][outa]',
-            '-map', '[outv]',
-            '-map', '[outa]',
-            '-c:v', 'libx264',
-            '-preset', 'medium',
-            '-crf', '23',
-            '-c:a', 'aac',
-            '-b:a', '192k',
-            output_path
+            "ffmpeg",
+            "-y",
+            "-i",
+            video1_path,
+            "-i",
+            video2_path,
+            "-filter_complex",
+            "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[v0];"
+            "[1:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[v1];"
+            "[v0][0:a][v1][1:a]concat=n=2:v=1:a=1[outv][outa]",
+            "-map",
+            "[outv]",
+            "-map",
+            "[outa]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "23",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            output_path,
         ]
 
         logger.info(f"Running re-encode concat: {' '.join(cmd)}")
@@ -491,7 +511,7 @@ def merge_videos_ffmpeg(
             cmd,
             capture_output=True,
             text=True,
-            timeout=1200  # 20 minutes for re-encoding
+            timeout=1200,  # 20 minutes for re-encoding
         )
 
         if result.returncode != 0:
@@ -574,7 +594,9 @@ def relative_energy_probe(media_path: str):
             baseline["value"] = mean_volume_db(media_path)
         if baseline["value"] is None:
             return None
-        window = mean_volume_db(media_path, start=start, duration=float(end) - float(start))
+        window = mean_volume_db(
+            media_path, start=start, duration=float(end) - float(start)
+        )
         return None if window is None else round(window - baseline["value"], 2)
 
     return probe

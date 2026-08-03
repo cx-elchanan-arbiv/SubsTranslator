@@ -5,9 +5,7 @@ Transcribes YouTube videos using Google Gemini 2.5 Flash
 """
 
 import logging
-import os
 import re
-from typing import Dict, List, Optional
 
 import yt_dlp
 from google import genai
@@ -49,7 +47,7 @@ def parse_timestamp(timestamp_str: str) -> float:
     Returns:
         float: Seconds
     """
-    parts = timestamp_str.strip().split(':')
+    parts = timestamp_str.strip().split(":")
 
     if len(parts) == 1:
         # SS
@@ -67,7 +65,7 @@ def parse_timestamp(timestamp_str: str) -> float:
         return 0.0
 
 
-def parse_gemini_response(response_text: str, video_duration: float) -> List[Dict]:
+def parse_gemini_response(response_text: str, video_duration: float) -> list[dict]:
     """
     Parse Gemini's transcription response into segments.
 
@@ -84,17 +82,13 @@ def parse_gemini_response(response_text: str, video_duration: float) -> List[Dic
         List of segments: [{"start": 0.0, "end": 5.0, "text": "..."}]
     """
     # Regex pattern to match [MM:SS] or [H:MM:SS] followed by text
-    pattern = r'\[(\d+:?\d*:?\d+)\]\s*(.+?)(?=\[|$)'
+    pattern = r"\[(\d+:?\d*:?\d+)\]\s*(.+?)(?=\[|$)"
     matches = re.findall(pattern, response_text, re.DOTALL)
 
     if not matches:
         logger.warning("No timestamp patterns found in Gemini response")
         # Fallback: return entire text as single segment
-        return [{
-            "start": 0.0,
-            "end": video_duration,
-            "text": response_text.strip()
-        }]
+        return [{"start": 0.0, "end": video_duration, "text": response_text.strip()}]
 
     segments = []
     for i, (timestamp, text) in enumerate(matches):
@@ -111,11 +105,7 @@ def parse_gemini_response(response_text: str, video_duration: float) -> List[Dic
             end = min(start + 5.0, video_duration)
 
         if text:  # Only add non-empty segments
-            segments.append({
-                "start": start,
-                "end": end,
-                "text": text
-            })
+            segments.append({"start": start, "end": end, "text": text})
 
     logger.info(f"Parsed {len(segments)} segments from Gemini response")
     return segments
@@ -132,17 +122,17 @@ def get_youtube_duration(youtube_url: str) -> float:
         float: Duration in seconds
     """
     ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': False,
-        'skip_download': True,
-        'extractor_args': config.YTDLP_EXTRACTOR_ARGS,
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": False,
+        "skip_download": True,
+        "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(youtube_url, download=False)
-            duration = info.get('duration', 0)
+            duration = info.get("duration", 0)
             logger.info(f"Video duration: {duration}s ({duration/60:.1f} minutes)")
             return duration
     except Exception as e:
@@ -153,9 +143,9 @@ def get_youtube_duration(youtube_url: str) -> float:
 def transcribe_with_gemini(
     youtube_url: str,
     language: str = "auto",
-    max_duration: Optional[int] = None,
-    progress_callback=None
-) -> Dict:
+    max_duration: int | None = None,
+    progress_callback=None,
+) -> dict:
     """
     Transcribe YouTube video using Gemini API.
 
@@ -182,7 +172,7 @@ def transcribe_with_gemini(
 
     max_duration = max_duration or config.GEMINI_MAX_DURATION
 
-    logger.info(f"🚀 === GEMINI TRANSCRIPTION START ===")
+    logger.info("🚀 === GEMINI TRANSCRIPTION START ===")
     logger.info(f"📹 YouTube URL: {youtube_url}")
     logger.info(f"🌍 Language: {language}")
     logger.info(f"⏱️ Max duration: {max_duration}s ({max_duration/60:.1f} minutes)")
@@ -190,7 +180,9 @@ def transcribe_with_gemini(
     try:
         # Step 1: Get video duration
         if progress_callback:
-            progress_callback(5, "Checking video duration...", 5, "Step 0: Gemini Check", 5)
+            progress_callback(
+                5, "Checking video duration...", 5, "Step 0: Gemini Check", 5
+            )
 
         duration = get_youtube_duration(youtube_url)
 
@@ -207,7 +199,9 @@ def transcribe_with_gemini(
 
         # Step 3: Initialize Gemini client
         if progress_callback:
-            progress_callback(10, "Connecting to Gemini API...", 10, "Step 0: Gemini Init", 5)
+            progress_callback(
+                10, "Connecting to Gemini API...", 10, "Step 0: Gemini Init", 5
+            )
 
         client = genai.Client(api_key=config.GEMINI_API_KEY)
         model = config.GEMINI_MODEL
@@ -236,54 +230,66 @@ Transcribe now:"""
 
         # Step 5: Call Gemini API
         if progress_callback:
-            progress_callback(20, "Sending request to Gemini...", 20, "Step 1: Gemini API", 5)
+            progress_callback(
+                20, "Sending request to Gemini...", 20, "Step 1: Gemini API", 5
+            )
 
-        logger.info(f"📤 Sending request to Gemini API...")
+        logger.info("📤 Sending request to Gemini API...")
 
         response = client.models.generate_content(
             model=model,
             contents=[
                 types.Part.from_uri(
                     file_uri=youtube_url,
-                    mime_type='video/*',
+                    mime_type="video/*",
                 ),
-                types.Part.from_text(text=prompt)
+                types.Part.from_text(text=prompt),
             ],
             config=types.GenerateContentConfig(
                 temperature=0.1,  # Low temperature for accuracy
                 max_output_tokens=8000,  # Gemini 2.5 Flash limit
-            )
+            ),
         )
 
         if progress_callback:
-            progress_callback(60, "Processing Gemini response...", 60, "Step 2: Parsing", 5)
+            progress_callback(
+                60, "Processing Gemini response...", 60, "Step 2: Parsing", 5
+            )
 
         # Step 6: Extract response text
         if not response or not response.text:
             raise GeminiTranscriptionError("Empty response from Gemini")
 
         response_text = response.text
-        logger.info(f"📥 Received response from Gemini ({len(response_text)} characters)")
+        logger.info(
+            f"📥 Received response from Gemini ({len(response_text)} characters)"
+        )
 
         # Always log the full response for debugging
-        logger.info(f"🔍 === FULL GEMINI RESPONSE (START) ===")
+        logger.info("🔍 === FULL GEMINI RESPONSE (START) ===")
         logger.info(response_text)
-        logger.info(f"🔍 === FULL GEMINI RESPONSE (END) ===")
+        logger.info("🔍 === FULL GEMINI RESPONSE (END) ===")
 
         # Step 7: Parse response into segments
         if progress_callback:
-            progress_callback(70, "Parsing transcription...", 70, "Step 3: Segmentation", 5)
+            progress_callback(
+                70, "Parsing transcription...", 70, "Step 3: Segmentation", 5
+            )
 
         segments = parse_gemini_response(response_text, duration)
 
         if not segments:
-            raise GeminiTranscriptionError("Failed to parse Gemini response into segments")
+            raise GeminiTranscriptionError(
+                "Failed to parse Gemini response into segments"
+            )
 
         # Step 8: Detect language (uses Gemini's built-in language detection for "auto")
         detected_language = language if language != "auto" else "unknown"
 
         if progress_callback:
-            progress_callback(85, "Transcription with Gemini completed!", 85, "Step 4: Complete", 5)
+            progress_callback(
+                85, "Transcription with Gemini completed!", 85, "Step 4: Complete", 5
+            )
 
         result = {
             "segments": segments,
@@ -293,7 +299,7 @@ Transcribe now:"""
             "duration": duration,
         }
 
-        logger.info(f"✅ === GEMINI TRANSCRIPTION COMPLETE ===")
+        logger.info("✅ === GEMINI TRANSCRIPTION COMPLETE ===")
         logger.info(f"📊 Segments: {len(segments)}")
         logger.info(f"🌍 Language: {detected_language}")
         logger.info(f"⏱️ Duration: {duration}s ({duration/60:.1f} minutes)")
@@ -301,7 +307,9 @@ Transcribe now:"""
         # Estimate cost
         estimated_input_tokens = duration * 100  # ~100 tokens/second
         estimated_output_tokens = len(response_text) * 1.3  # rough estimate
-        estimated_cost = (estimated_input_tokens / 1_000_000 * 1.0) + (estimated_output_tokens / 1_000_000 * 2.5)
+        estimated_cost = (estimated_input_tokens / 1_000_000 * 1.0) + (
+            estimated_output_tokens / 1_000_000 * 2.5
+        )
         logger.info(f"💰 Estimated cost: ${estimated_cost:.4f}")
 
         return result
@@ -329,7 +337,7 @@ def test_gemini_connection() -> bool:
         client = genai.Client(api_key=config.GEMINI_API_KEY)
         # Try listing models as a connection test
         models = client.models.list()
-        logger.info(f"✅ Gemini API connection successful")
+        logger.info("✅ Gemini API connection successful")
         logger.info(f"📋 Available models: {[m.name for m in list(models)[:3]]}...")
         return True
     except Exception as e:
