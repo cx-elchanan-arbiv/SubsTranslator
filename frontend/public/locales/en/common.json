@@ -93,6 +93,11 @@
   },
   "options": {
     "autoCreateVideo": "Create video with burned-in subtitles",
+    "subtitlePosition": "Subtitle position in the video",
+    "subtitlePositionHint": "Choose where subtitles appear in the downloadable video",
+    "subtitlePositionBottom": "Bottom",
+    "subtitlePositionTop": "Top",
+    "subtitlePositionSide": "Right side",
     "whisperModel": "Transcription Model",
     "translationService": "Translation Service",
     "watermark": "Watermark",
@@ -517,6 +522,5 @@
     "errorNoVideo2": "Please select the second video file"
   }
 }
-
 
 

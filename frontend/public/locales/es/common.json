@@ -82,6 +82,11 @@
   },
   "options": {
     "autoCreateVideo": "Crear video con subtítulos integrados",
+    "subtitlePosition": "Posición de los subtítulos en el video",
+    "subtitlePositionHint": "Elige dónde aparecerán los subtítulos en el video descargable",
+    "subtitlePositionBottom": "Abajo",
+    "subtitlePositionTop": "Arriba",
+    "subtitlePositionSide": "Lado derecho",
     "whisperModel": "Modelo de Transcripción",
     "translationService": "Servicio de Traducción",
     "watermark": "Marca de Agua"
@@ -338,6 +343,5 @@
     }
   }
 }
-
 
 

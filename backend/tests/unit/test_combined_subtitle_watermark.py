@@ -9,7 +9,8 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from services.subtitle_service import SubtitleService
+from services.subtitle_engine import ASS_ALIGNMENT
+from services.subtitle_service import SSA_ALIGNMENT, SubtitleService
 
 
 @pytest.mark.unit
@@ -121,8 +122,9 @@ Test subtitle
             self.video_path,
             self.srt_path,
             self.output_path,
-            "en",
-            None,  # progress_callback
+            target_language="en",
+            progress_callback=None,
+            subtitle_position="bottom",
         )
 
     @patch("services.subtitle_service.SubtitleService._run_ffmpeg_simple")
@@ -205,7 +207,7 @@ class TestFaststartAndMissingWatermarkParity:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     # -- helpers -------------------------------------------------------------------
-    def _invoke(self, path, watermark=None):
+    def _invoke(self, path, watermark=None, subtitle_position="bottom"):
         """Run one renderer with ffmpeg stubbed; return the argv it built."""
         captured = {}
 
@@ -227,7 +229,11 @@ class TestFaststartAndMissingWatermarkParity:
             )
             if path == "srt":
                 result = self.service.create_video_with_subtitles(
-                    self.video_path, self.srt_path, self.output_path, "he"
+                    self.video_path,
+                    self.srt_path,
+                    self.output_path,
+                    "he",
+                    subtitle_position=subtitle_position,
                 )
             elif path == "srt+watermark":
                 result = self.service.create_video_with_subtitles_and_watermark(
@@ -236,6 +242,7 @@ class TestFaststartAndMissingWatermarkParity:
                     self.output_path,
                     watermark if watermark is not None else self.watermark_path,
                     target_language="he",
+                    subtitle_position=subtitle_position,
                 )
             elif path == "ass":
                 result = self.service.create_video_with_ass(
@@ -244,6 +251,7 @@ class TestFaststartAndMissingWatermarkParity:
                     self.output_path,
                     target_language="he",
                     watermark_path=watermark,
+                    subtitle_position=subtitle_position,
                 )
             else:  # pragma: no cover - guard against a typo in a parametrisation
                 raise AssertionError(f"unknown path {path}")
@@ -270,6 +278,32 @@ class TestFaststartAndMissingWatermarkParity:
         """An ffmpeg output option after the output filename is silently ignored."""
         _result, cmd = self._invoke(path)
         assert cmd.index("-movflags") < cmd.index(self.output_path)
+
+    @pytest.mark.parametrize("position", ["bottom", "top", "side"])
+    @pytest.mark.parametrize("path", ["srt", "srt+watermark", "ass"])
+    def test_every_renderer_honours_the_subtitle_position(self, path, position):
+        """Upload/URL jobs may select either renderer; placement must match in all.
+
+        The expected number comes from the renderer's own map, NOT from a literal
+        repeated here, because the two renderers speak different alignment dialects:
+        the `.ass` file is ASS v4+ (numpad) and a `force_style` override is SSA v4.
+        Hard-coding one set of numbers for both is exactly how `top` shipped landing
+        at middle-left on the legacy path. What the numbers MEAN on screen is pinned
+        by rendering, in `test_subtitle_layout_render.TestBurnedSubtitlePosition`.
+        """
+        _result, cmd = self._invoke(path, subtitle_position=position)
+        if path == "ass":
+            ass_path = os.path.splitext(self.output_path)[0] + ".ass"
+            with open(ass_path, encoding="utf-8") as handle:
+                style = next(
+                    line for line in handle if line.startswith("Style:")
+                ).strip()
+            fields = style.split(":", 1)[1].strip().split(",")
+            assert fields[18] == str(ASS_ALIGNMENT[position])
+        else:
+            filter_flag = "-vf" if path == "srt" else "-filter_complex"
+            filter_value = cmd[cmd.index(filter_flag) + 1]
+            assert f"Alignment={SSA_ALIGNMENT[position]}" in filter_value
 
     # -- F13: a missing logo degrades, never fails ---------------------------------
     def test_legacy_path_renders_without_a_missing_watermark(self):

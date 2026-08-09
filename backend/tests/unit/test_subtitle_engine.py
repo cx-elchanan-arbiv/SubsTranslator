@@ -366,6 +366,20 @@ class TestBuildAss:
         assert fields[18] == "2"  # Alignment: bottom centre
         assert fields[21] == "86"  # MarginV: round(720 * 0.12)
 
+    @pytest.mark.parametrize(
+        "position,alignment", [("bottom", "2"), ("top", "8"), ("side", "6")]
+    )
+    def test_position_maps_to_ass_alignment(self, position, alignment):
+        ass = build_ass(self.CUES, video_w=1280, video_h=720, position=position)
+        style = next(line for line in ass.splitlines() if line.startswith("Style:"))
+        fields = style.split(":", 1)[1].strip().split(",")
+        assert fields[18] == alignment
+
+    def test_invalid_position_preserves_bottom_default(self):
+        ass = build_ass(self.CUES, video_w=1280, video_h=720, position="somewhere")
+        style = next(line for line in ass.splitlines() if line.startswith("Style:"))
+        assert style.split(":", 1)[1].strip().split(",")[18] == "2"
+
     def test_font_and_margin_scale_with_height(self):
         style = next(
             line

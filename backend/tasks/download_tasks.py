@@ -12,7 +12,7 @@ import yt_dlp
 from celery_worker import celery_app
 from config import get_config
 from logging_config import get_logger
-from services.subtitle_pipeline import resolve_flags
+from services.subtitle_pipeline import parse_subtitle_position, resolve_flags
 from services.video_processing_service import verify_and_convert_video_format
 from services.youtube_service import (
     download_youtube_video,
@@ -46,6 +46,7 @@ def download_and_process_youtube_task(
     translation_v2=False,
     translation_style="clean",
     render_v2=False,
+    subtitle_position="bottom",
 ):
     """
     Downloads a video from YouTube and then triggers the main processing task.
@@ -58,6 +59,8 @@ def download_and_process_youtube_task(
             ``process_video_task`` — it never acts on them itself. They must be forwarded
             explicitly: a flag dropped here would silently give the user the legacy
             pipeline for every YouTube job. See :mod:`services.subtitle_pipeline`.
+        subtitle_position: burned-in subtitle placement, forwarded unchanged after
+            validation. Defaults to the historical bottom-centre placement.
     """
     # One resolved copy of the four toggles: forwarded to process_video_task AND
     # reported back as user choices, so a YouTube job can be attributed to the
@@ -68,6 +71,7 @@ def download_and_process_youtube_task(
         translation_style=translation_style,
         render_v2=render_v2,
     )
+    subtitle_position = parse_subtitle_position(subtitle_position)
 
     steps_config = [
         {"label": "Downloading", "weight": 0.1},
@@ -146,6 +150,7 @@ def download_and_process_youtube_task(
                         "whisper_model": whisper_model,
                         "url": url,
                         "translation_service": translation_service,
+                        "subtitle_position": subtitle_position,
                         **subtitle_flags,
                     },
                 )
@@ -210,6 +215,7 @@ def download_and_process_youtube_task(
                 "whisper_model": whisper_model,
                 "url": url,
                 "translation_service": translation_service,
+                "subtitle_position": subtitle_position,
                 **subtitle_flags,
                 **(
                     {"start_time": start_time, "end_time": end_time}
@@ -233,7 +239,7 @@ def download_and_process_youtube_task(
                 initial_timing,
                 processing_info,
             ],
-            kwargs=dict(subtitle_flags),
+            kwargs={**subtitle_flags, "subtitle_position": subtitle_position},
             queue="processing",
         )
 

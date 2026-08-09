@@ -54,11 +54,13 @@ if backend_dir not in sys.path:
 numpy = pytest.importorskip("numpy")
 
 from services.subtitle_engine import (  # noqa: E402
+    ASS_ALIGNMENT,
     GLYPH_WIDTH_RATIO,
     MAX_LINE_CHARS,
     build_ass,
     layout_params,
 )
+from services.subtitle_service import SSA_ALIGNMENT  # noqa: E402
 
 FONTS_DIR = os.getenv("ASS_FONTS_DIR", "/usr/share/fonts/truetype/hebrew")
 
@@ -535,3 +537,103 @@ class TestLowerThirdAvoidance:
         assert (
             produced["auto"] == produced["off"]
         ), "a clear clip must render identically"
+
+
+# ======================================================================================
+@pytest.mark.integration
+class TestBurnedSubtitlePosition:
+    """Where the subtitle actually lands, for both renderers.
+
+    The bug this pins: `subtitle_position` was wired through with ONE alignment map,
+    the ASS v4+ numpad one. It is right for the `ass` filter and wrong for the legacy
+    `subtitles` + `force_style` path, which libass parses with SSA v4 semantics — so
+    `top` came out middle-LEFT and `side` came out at the TOP. Every unit test passed,
+    because they all asserted on the argv string rather than on the picture.
+
+    So these render and look. A frame is split into vertical and horizontal thirds and
+    the ink's centre of mass has to fall in the expected one.
+    """
+
+    W, H = 640, 360
+
+    @staticmethod
+    def _ink_centre(frame):
+        ys, xs = numpy.where(frame > INK_THRESHOLD)
+        assert ys.size, "nothing was drawn"
+        return xs.mean() / frame.shape[1], ys.mean() / frame.shape[0]
+
+    @staticmethod
+    def _band(fraction):
+        return (
+            "start" if fraction < 1 / 3 else ("middle" if fraction < 2 / 3 else "end")
+        )
+
+    @pytest.mark.parametrize(
+        "position,want_v,want_h",
+        [
+            ("bottom", "end", "middle"),
+            ("top", "start", "middle"),
+            ("side", "middle", "end"),
+        ],
+    )
+    def test_the_ass_renderer_puts_the_subtitle_where_asked(
+        self, tmp_path, position, want_v, want_h
+    ):
+        ass = build_ass(
+            cues_from(["שלום"]), video_w=self.W, video_h=self.H, position=position
+        )
+        frames = render_frames(write_ass(tmp_path, ass), self.W, self.H, 1)
+        x, y = self._ink_centre(frames[0])
+        assert self._band(y) == want_v, f"{position}: vertical band {y:.2f}"
+        assert self._band(x) == want_h, f"{position}: horizontal band {x:.2f}"
+
+    @pytest.mark.parametrize(
+        "position,want_v,want_h",
+        [
+            ("bottom", "end", "middle"),
+            ("top", "start", "middle"),
+            ("side", "middle", "end"),
+        ],
+    )
+    def test_the_legacy_renderer_puts_the_subtitle_where_asked(
+        self, tmp_path, position, want_v, want_h
+    ):
+        srt = tmp_path / "p.srt"
+        srt.write_text("1\n00:00:00,000 --> 00:00:02,000\nMARK\n\n", encoding="utf-8")
+        style = (
+            "FontName=Arial,FontSize=18,Bold=1,PrimaryColour=&HFFFFFF,MarginV=40,"
+            f"Alignment={SSA_ALIGNMENT[position]}"
+        )
+        raw = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=black:s={self.W}x{self.H}:r=1:d=1",
+                "-vf",
+                f"subtitles='{srt}':force_style='{style}'",
+                "-frames:v",
+                "1",
+                "-pix_fmt",
+                "gray",
+                "-f",
+                "rawvideo",
+                "-",
+            ],
+            capture_output=True,
+            check=True,
+            timeout=180,
+        ).stdout
+        frame = numpy.frombuffer(raw, dtype=numpy.uint8).reshape(self.H, self.W)
+        x, y = self._ink_centre(frame)
+        assert self._band(y) == want_v, f"{position}: vertical band {y:.2f}"
+        assert self._band(x) == want_h, f"{position}: horizontal band {x:.2f}"
+
+    def test_the_two_renderers_disagree_on_purpose(self):
+        """A guard against 'tidying up' the two maps into one shared constant."""
+        assert ASS_ALIGNMENT["bottom"] == SSA_ALIGNMENT["bottom"] == 2
+        assert ASS_ALIGNMENT["top"] != SSA_ALIGNMENT["top"]
+        assert ASS_ALIGNMENT["side"] != SSA_ALIGNMENT["side"]

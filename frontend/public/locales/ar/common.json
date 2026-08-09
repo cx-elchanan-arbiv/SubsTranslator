@@ -82,6 +82,11 @@
   },
   "options": {
     "autoCreateVideo": "إنشاء فيديو مع ترجمات مرئية مدمجة",
+    "subtitlePosition": "موضع الترجمة في الفيديو",
+    "subtitlePositionHint": "اختر مكان ظهور الترجمة في الفيديو الجاهز للتنزيل",
+    "subtitlePositionBottom": "أسفل",
+    "subtitlePositionTop": "أعلى",
+    "subtitlePositionSide": "الجانب الأيمن",
     "whisperModel": "نموذج النسخ",
     "translationService": "خدمة الترجمة",
     "watermark": "العلامة المائية"
@@ -393,6 +398,5 @@
     "errorNoVideo2": "يرجى اختيار ملف الفيديو الثاني"
   }
 }
-
 
 

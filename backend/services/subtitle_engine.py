@@ -314,6 +314,18 @@ MIN_LINE_CHARS = 8
 # so a style of ours called "Default" could lose to libass's Arial fallback.
 STYLE_NAME = "He"
 
+#: Subtitle placement -> ``Alignment`` code written into the ``.ass`` style line.
+#:
+#: ASS v4+ numbers alignment like a numeric keypad — 7 8 9 across the top, 4 5 6 across
+#: the middle, 1 2 3 across the bottom. That is what :func:`build_ass` emits and what
+#: FFmpeg's ``ass`` filter reads, and it is verified by rendering.
+#:
+#: It is deliberately NOT shared with the legacy renderer. A ``force_style`` override on
+#: FFmpeg's ``subtitles`` filter is parsed with the older SSA v4 scheme, in which the
+#: same numbers mean different places — see :data:`subtitle_service.SSA_ALIGNMENT`. Two
+#: renderers, two dialects; only ``2`` (bottom centre) means the same thing in both.
+ASS_ALIGNMENT = {"bottom": 2, "top": 8, "side": 6}
+
 
 # =============================================================================
 # layout: the one place the frame's WIDTH gets a vote
@@ -1562,12 +1574,14 @@ def build_ass(
     margin_v_frac: float = DEFAULT_MARGIN_V_FRAC,
     rtl: bool = True,
     layout: dict[str, Any] = None,
+    position: str = "bottom",
 ) -> str:
     """Render cues as an ASS v4+ subtitle script.
 
     The style is the render-tested one: Noto Sans Hebrew, bold, white on a
-    semi-transparent opaque box (``BorderStyle=4``, no drop shadow), bottom
-    centre. ``PlayResX/Y`` match the video, so ASS units are pixels.
+    semi-transparent opaque box (``BorderStyle=4``, no drop shadow). Placement is
+    bottom-centre by default, top-centre for ``top`` and middle-right for ``side``.
+    ``PlayResX/Y`` match the video, so ASS units are pixels.
 
     Every size comes from :func:`layout_params`, which reads BOTH dimensions — the
     font is a fraction of the height only for as long as the width can carry a full
@@ -1586,6 +1600,8 @@ def build_ass(
             42-character-wide text and the renderer that has to fit it must not be
             allowed to disagree. Omitted, it is derived here from ``video_w/video_h``,
             which gives the identical answer for the identical inputs.
+        position: ``bottom``, ``top`` or ``side``. Unknown values retain the historical
+            bottom-centre placement.
 
     Returns:
         The complete ``.ass`` file content. Render it with FFmpeg's ``ass``
@@ -1600,6 +1616,7 @@ def build_ass(
     margin_v = layout["margin_v"]
     margin_h = layout["margin_h"]
     max_line = layout["max_line_chars"]
+    alignment = ASS_ALIGNMENT.get(position, ASS_ALIGNMENT["bottom"])
 
     header = (
         "[Script Info]\n"
@@ -1617,7 +1634,7 @@ def build_ass(
         " Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: {STYLE_NAME},Noto Sans Hebrew,{font_size},"
         "&H00FFFFFF,&H00FFFFFF,&H00000000,&H14000000,"
-        "1,0,0,0,100,100,0,0,4,3,0,2,"
+        f"1,0,0,0,100,100,0,0,4,3,0,{alignment},"
         f"{margin_h},{margin_h},{margin_v},1\n"
         "\n"
         "[Events]\n"

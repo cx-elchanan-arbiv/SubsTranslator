@@ -4,7 +4,13 @@ import { useApi } from './hooks/useApi';
 import { useI18n } from './i18n/I18nProvider';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from './contexts/AuthContext';
-import type { WhisperModel, TranslationService, WatermarkConfig, SubtitleQualityFlags } from './types';
+import type {
+  WhisperModel,
+  TranslationService,
+  WatermarkConfig,
+  SubtitleQualityFlags,
+  SubtitlePosition,
+} from './types';
 import { DEFAULT_SUBTITLE_QUALITY_FLAGS } from './types/api';
 import LanguageSelection from './components/LanguageSelection';
 import LanguageSelector from './components/LanguageSelector';
@@ -44,6 +50,7 @@ function App() {
   const [transcriptionOnly, setTranscriptionOnly] = useState(false);
   // Experimental subtitle-quality toggles — all off by default (= legacy pipeline).
   const [subtitleFlags, setSubtitleFlags] = useState<SubtitleQualityFlags>(DEFAULT_SUBTITLE_QUALITY_FLAGS);
+  const [subtitlePosition, setSubtitlePosition] = useState<SubtitlePosition>('bottom');
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [selectedAdvancedFeature, setSelectedAdvancedFeature] = useState<string | null>(null);
   const [watermarkConfig, setWatermarkConfig] = useState<WatermarkConfig>({
@@ -257,6 +264,8 @@ function App() {
                 onTranscriptionOnlyChange={setTranscriptionOnly}
                 subtitleFlags={subtitleFlags}
                 onSubtitleFlagsChange={setSubtitleFlags}
+                subtitlePosition={subtitlePosition}
+                onSubtitlePositionChange={setSubtitlePosition}
                 disabled={isProcessing}
                 activeTab={activeTab}
               />
@@ -278,7 +287,17 @@ function App() {
                       <button
                         className="btn-primary"
                         onClick={() => {
-                          onFileUpload(selectedFile, sourceLang, transcriptionOnly ? '' : targetLang, autoCreateVideo, whisperModel, translationService, watermarkConfig, subtitleFlags);
+                          onFileUpload(
+                            selectedFile,
+                            sourceLang,
+                            transcriptionOnly ? '' : targetLang,
+                            autoCreateVideo,
+                            whisperModel,
+                            translationService,
+                            watermarkConfig,
+                            subtitleFlags,
+                            subtitlePosition,
+                          );
                           setSelectedFile(null);
                         }}
                         disabled={isProcessing}
@@ -291,7 +310,19 @@ function App() {
               )}
               {activeTab === 'youtube' && (
                 <YoutubeForm
-                  onYoutubeSubmit={(url) => onYoutubeSubmit(url, sourceLang, transcriptionOnly ? '' : targetLang, autoCreateVideo, whisperModel, translationService, watermarkConfig, undefined, undefined, subtitleFlags)}
+                  onYoutubeSubmit={(url) => onYoutubeSubmit(
+                    url,
+                    sourceLang,
+                    transcriptionOnly ? '' : targetLang,
+                    autoCreateVideo,
+                    whisperModel,
+                    translationService,
+                    watermarkConfig,
+                    undefined,
+                    undefined,
+                    subtitleFlags,
+                    subtitlePosition,
+                  )}
                   onQuickDownload={handleQuickDownload}
                   isProcessing={isProcessing}
                   sourceLang={sourceLang}

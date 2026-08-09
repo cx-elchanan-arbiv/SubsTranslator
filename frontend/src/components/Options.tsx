@@ -5,6 +5,7 @@ import type {
   WhisperModel,
   TranslationService as TranslationServiceType,
   SubtitleQualityFlags,
+  SubtitlePosition,
   TranslationStyle,
 } from '../types';
 
@@ -38,6 +39,8 @@ interface OptionsProps {
   onTranscriptionOnlyChange: (checked: boolean) => void;
   subtitleFlags: SubtitleQualityFlags;
   onSubtitleFlagsChange: (flags: SubtitleQualityFlags) => void;
+  subtitlePosition: SubtitlePosition;
+  onSubtitlePositionChange: (position: SubtitlePosition) => void;
   disabled: boolean;
   activeTab?: 'upload' | 'youtube';
 }
@@ -53,6 +56,8 @@ const Options: React.FC<OptionsProps> = ({
   onTranscriptionOnlyChange,
   subtitleFlags,
   onSubtitleFlagsChange,
+  subtitlePosition,
+  onSubtitlePositionChange,
   disabled,
   activeTab = 'youtube',
 }) => {
@@ -188,6 +193,38 @@ const Options: React.FC<OptionsProps> = ({
         />
         <label htmlFor="autoCreateVideo">{t.autoCreateVideo}</label>
       </div>
+      <fieldset
+        className={`subtitle-position-picker ${!autoCreateVideo ? 'disabled-section' : ''}`}
+        disabled={disabled || !autoCreateVideo}
+      >
+        <legend>{t('options.subtitlePosition')}</legend>
+        <p className="subtitle-position-hint">{t('options.subtitlePositionHint')}</p>
+        <div className="subtitle-position-grid">
+          {(['bottom', 'top', 'side'] as SubtitlePosition[]).map((position) => (
+            <label
+              key={position}
+              className={`subtitle-position-card ${subtitlePosition === position ? 'selected' : ''}`}
+            >
+              <input
+                type="radio"
+                name="subtitlePosition"
+                value={position}
+                checked={subtitlePosition === position}
+                onChange={() => onSubtitlePositionChange(position)}
+              />
+              <span className="subtitle-position-preview" aria-hidden="true">
+                <span className={`subtitle-position-lines ${position}`}>
+                  <span />
+                  <span />
+                </span>
+              </span>
+              <span className="subtitle-position-label">
+                {t(`options.subtitlePosition${position[0].toUpperCase()}${position.slice(1)}`)}
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
       <div className="model-selection">
         <label>{t.whisperModel}</label>
         <div className="model-controls">
