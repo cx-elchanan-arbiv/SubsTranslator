@@ -30,6 +30,21 @@ config = get_config()
 #: depending on a fontconfig cache being warm.
 ASS_FONTS_DIR = os.getenv("ASS_FONTS_DIR", "/usr/share/fonts/truetype/hebrew")
 
+#: Subtitle placement -> alignment code for the LEGACY renderer, i.e. FFmpeg's
+#: ``subtitles`` filter driven by ``force_style``.
+#:
+#: This is NOT the same numbering as :data:`subtitle_engine.ASS_ALIGNMENT`, and the
+#: difference is the whole reason this constant exists. The ``ass`` filter reads a real
+#: ``.ass`` file and uses ASS v4+ numpad codes (7 8 9 / 4 5 6 / 1 2 3). A ``force_style``
+#: override on the ``subtitles`` filter is parsed with the older SSA v4 semantics, where
+#: the code is ``horizontal + 4 for top + 8 for middle``: 1-3 bottom, 5-7 top, 9-11
+#: middle. The two schemes agree on 2 (bottom centre) and on nothing else that matters.
+#:
+#: Measured, not inferred — every value below was rendered on a black frame and the ink
+#: located (see ``test_subtitle_layout_render.TestBurnedSubtitlePosition``). Feeding the
+#: ASS codes to this path put ``top`` at middle-LEFT and ``side`` at the TOP.
+SSA_ALIGNMENT = {"bottom": 2, "top": 6, "side": 11}
+
 # ----------------------------------------------------------------------------------
 # Lower-third ("chyron") collision detection — constants
 # ----------------------------------------------------------------------------------
@@ -383,7 +398,7 @@ class SubtitleService:
             rtl_languages = ["he", "ar", "fa", "ur", "yi"]
             is_rtl = any(target_language.startswith(lang) for lang in rtl_languages)
 
-            alignment = {"bottom": 2, "top": 8, "side": 6}.get(subtitle_position, 2)
+            alignment = SSA_ALIGNMENT.get(subtitle_position, SSA_ALIGNMENT["bottom"])
 
             if is_rtl:
                 subtitle_style = (
@@ -746,7 +761,7 @@ class SubtitleService:
             rtl_languages = ["he", "ar", "fa", "ur", "yi"]
             is_rtl = any(target_language.startswith(lang) for lang in rtl_languages)
 
-            alignment = {"bottom": 2, "top": 8, "side": 6}.get(subtitle_position, 2)
+            alignment = SSA_ALIGNMENT.get(subtitle_position, SSA_ALIGNMENT["bottom"])
 
             if is_rtl:
                 subtitle_style = (

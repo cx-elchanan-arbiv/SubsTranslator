@@ -314,6 +314,18 @@ MIN_LINE_CHARS = 8
 # so a style of ours called "Default" could lose to libass's Arial fallback.
 STYLE_NAME = "He"
 
+#: Subtitle placement -> ``Alignment`` code written into the ``.ass`` style line.
+#:
+#: ASS v4+ numbers alignment like a numeric keypad — 7 8 9 across the top, 4 5 6 across
+#: the middle, 1 2 3 across the bottom. That is what :func:`build_ass` emits and what
+#: FFmpeg's ``ass`` filter reads, and it is verified by rendering.
+#:
+#: It is deliberately NOT shared with the legacy renderer. A ``force_style`` override on
+#: FFmpeg's ``subtitles`` filter is parsed with the older SSA v4 scheme, in which the
+#: same numbers mean different places — see :data:`subtitle_service.SSA_ALIGNMENT`. Two
+#: renderers, two dialects; only ``2`` (bottom centre) means the same thing in both.
+ASS_ALIGNMENT = {"bottom": 2, "top": 8, "side": 6}
+
 
 # =============================================================================
 # layout: the one place the frame's WIDTH gets a vote
@@ -1604,7 +1616,7 @@ def build_ass(
     margin_v = layout["margin_v"]
     margin_h = layout["margin_h"]
     max_line = layout["max_line_chars"]
-    alignment = {"bottom": 2, "top": 8, "side": 6}.get(position, 2)
+    alignment = ASS_ALIGNMENT.get(position, ASS_ALIGNMENT["bottom"])
 
     header = (
         "[Script Info]\n"
