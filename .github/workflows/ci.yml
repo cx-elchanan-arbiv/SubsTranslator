@@ -44,7 +44,7 @@ jobs:
         python -m pytest backend/tests/unit/ -v --tb=short -m unit --cov=backend --cov-report=xml --cov-report=term
         
     - name: 📈 Upload Coverage to Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v5
       with:
         file: ./coverage.xml
         flags: backend
@@ -74,7 +74,7 @@ jobs:
       run: npm test -- --coverage --watchAll=false --verbose
       
     - name: 📈 Upload Coverage to Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v5
       with:
         file: ./frontend/coverage/lcov.info
         flags: frontend
