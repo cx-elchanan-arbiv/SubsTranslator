@@ -45,6 +45,10 @@ const BACKEND_LABEL_TO_I18N_KEY: Record<string, string> = {
 const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progress, error, videoMetadata, fileMetadata, userChoices, initialRequest, processingType, onRetry }) => {
   const { t } = useTranslation();
   const [showLogs, setShowLogs] = useState(false);
+  const subtitlePositionLabel = userChoices?.subtitle_position
+    ? t(`options.subtitlePosition${userChoices.subtitle_position[0].toUpperCase()}${userChoices.subtitle_position.slice(1)}`)
+    : '';
+  const subtitlePositionIcon = String.fromCodePoint(0x2195, 0xfe0f);
 
   if (!isProcessing && !error) return null;
 
@@ -74,6 +78,9 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
                 <div>🔄 {t('language.target')}: {t.languages[userChoices.target_lang] || userChoices.target_lang}</div>
                 <div>🎯 {t('options.whisperModel')}: {userChoices.whisper_model}</div>
                 <div>📹 {t('options.autoCreateVideo')}: {userChoices.auto_create_video ? '✅ ' + t('actions.yes') : '❌ ' + t('actions.no')}</div>
+                {userChoices.auto_create_video && subtitlePositionLabel && (
+                  <div>{subtitlePositionIcon} {t('options.subtitlePosition')}: {subtitlePositionLabel}</div>
+                )}
               </div>
             )}
 
@@ -416,6 +423,9 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
                   <div>🔄 {t('language.target')}: {t.languages[userChoices.target_lang] || userChoices.target_lang}</div>
                   <div>🎯 {t('options.whisperModel')}: {userChoices.whisper_model}</div>
                   <div>📹 {t('options.autoCreateVideo')}: {userChoices.auto_create_video ? '✅ ' + t('actions.yes') : '❌ ' + t('actions.no')}</div>
+                  {userChoices.auto_create_video && subtitlePositionLabel && (
+                    <div>{subtitlePositionIcon} {t('options.subtitlePosition')}: {subtitlePositionLabel}</div>
+                  )}
                 </div>
               </div>
             )}
@@ -478,6 +488,9 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
                   <div>🔄 {t('language.target')}: {t.languages[userChoices.target_lang] || userChoices.target_lang}</div>
                   <div>🎯 {t('options.whisperModel')}: {userChoices.whisper_model}</div>
                   <div>📹 {t('options.autoCreateVideo')}: {userChoices.auto_create_video ? '✅ ' + t('actions.yes') : '❌ ' + t('actions.no')}</div>
+                  {userChoices.auto_create_video && subtitlePositionLabel && (
+                    <div>{subtitlePositionIcon} {t('options.subtitlePosition')}: {subtitlePositionLabel}</div>
+                  )}
                 </div>
               </div>
             )}

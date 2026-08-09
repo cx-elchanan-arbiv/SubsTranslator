@@ -294,6 +294,7 @@ class SubtitleService:
         output_path: str,
         target_language: str = "en",
         progress_callback: Callable[[int], None] | None = None,
+        subtitle_position: str = "bottom",
     ) -> bool:
         """Create video with burned-in subtitles, reporting progress.
 
@@ -303,6 +304,7 @@ class SubtitleService:
             output_path: Path where output video will be saved
             target_language: Language code for subtitle styling
             progress_callback: Optional callback for progress updates
+            subtitle_position: ``bottom``, ``top`` or ``side`` (middle-right)
 
         Returns:
             True if successful, False otherwise
@@ -381,10 +383,13 @@ class SubtitleService:
             rtl_languages = ["he", "ar", "fa", "ur", "yi"]
             is_rtl = any(target_language.startswith(lang) for lang in rtl_languages)
 
+            alignment = {"bottom": 2, "top": 8, "side": 6}.get(subtitle_position, 2)
+
             if is_rtl:
                 subtitle_style = (
                     f"FontName={hebrew_fonts[0]},FontSize=18,Bold=1,PrimaryColour=&HFFFFFF,"
-                    "OutlineColour=&H000000,BackColour=&H80000000,Outline=3,Shadow=2,MarginV=40,Alignment=2"
+                    "OutlineColour=&H000000,BackColour=&H80000000,Outline=3,Shadow=2,MarginV=40,"
+                    f"Alignment={alignment}"
                 )
                 self.logger.info(
                     "Using enhanced RTL settings",
@@ -394,7 +399,8 @@ class SubtitleService:
             else:
                 subtitle_style = (
                     f"FontName={font_fallback},FontSize=18,Bold=1,PrimaryColour=&HFFFFFF,"
-                    "OutlineColour=&H000000,BackColour=&H80000000,Outline=2,Shadow=1,MarginV=30,Alignment=2"
+                    "OutlineColour=&H000000,BackColour=&H80000000,Outline=2,Shadow=1,MarginV=30,"
+                    f"Alignment={alignment}"
                 )
 
             # Build FFmpeg command
@@ -622,6 +628,7 @@ class SubtitleService:
         watermark_opacity: float = 0.4,
         watermark_size_height: int = 80,
         progress_callback: Callable[[int], None] | None = None,
+        subtitle_position: str = "bottom",
     ) -> bool:
         """Create video with both subtitles and watermark in a single FFmpeg pass.
 
@@ -637,6 +644,7 @@ class SubtitleService:
             watermark_opacity: Watermark opacity (0.0 to 1.0)
             watermark_size_height: Watermark height in pixels
             progress_callback: Optional callback for progress updates
+            subtitle_position: ``bottom``, ``top`` or ``side`` (middle-right)
 
         Returns:
             True if successful, False otherwise
@@ -683,8 +691,9 @@ class SubtitleService:
                     video_path,
                     srt_path,
                     output_path,
-                    target_language,
-                    progress_callback,
+                    target_language=target_language,
+                    progress_callback=progress_callback,
+                    subtitle_position=subtitle_position,
                 )
 
             # Process SRT file for RTL languages (same as in create_video_with_subtitles)
@@ -737,15 +746,19 @@ class SubtitleService:
             rtl_languages = ["he", "ar", "fa", "ur", "yi"]
             is_rtl = any(target_language.startswith(lang) for lang in rtl_languages)
 
+            alignment = {"bottom": 2, "top": 8, "side": 6}.get(subtitle_position, 2)
+
             if is_rtl:
                 subtitle_style = (
                     f"FontName={hebrew_fonts[0]},FontSize=18,Bold=1,PrimaryColour=&HFFFFFF,"
-                    "OutlineColour=&H000000,BackColour=&H80000000,Outline=3,Shadow=2,MarginV=40,Alignment=2"
+                    "OutlineColour=&H000000,BackColour=&H80000000,Outline=3,Shadow=2,MarginV=40,"
+                    f"Alignment={alignment}"
                 )
             else:
                 subtitle_style = (
                     f"FontName={font_fallback},FontSize=18,Bold=1,PrimaryColour=&HFFFFFF,"
-                    "OutlineColour=&H000000,BackColour=&H80000000,Outline=2,Shadow=1,MarginV=30,Alignment=2"
+                    "OutlineColour=&H000000,BackColour=&H80000000,Outline=2,Shadow=1,MarginV=30,"
+                    f"Alignment={alignment}"
                 )
 
             # Configure watermark position
@@ -1249,6 +1262,7 @@ class SubtitleService:
         layout: "dict | None" = None,
         recorder=None,
         detect_lower_third: bool = True,
+        subtitle_position: str = "bottom",
     ) -> bool:
         """Burn in subtitles from a generated ``.ass`` file (the ``render_v2`` path).
 
@@ -1279,6 +1293,8 @@ class SubtitleService:
                 and raise the subtitle box when the band is occupied. On by default —
                 this is an automatic product behaviour, not an experiment. The parameter
                 exists so tests can pin the geometry without decoding frames.
+            subtitle_position: ``bottom``, ``top`` or ``side`` (middle-right). Lower-
+                third avoidance only applies to the bottom placement.
 
         Returns:
             True on success. The generated ``.ass`` file is kept next to the output so the
@@ -1342,7 +1358,7 @@ class SubtitleService:
             # Automatic lower-third avoidance. The owner's call: the subtitle moves
             # itself rather than asking the user to notice the collision and tick a box.
             chyron = None
-            if detect_lower_third:
+            if detect_lower_third and subtitle_position == "bottom":
                 chyron = self.detect_lower_third(video_path, layout)
                 if chyron["busy"]:
                     raised = layout_params(
@@ -1388,7 +1404,12 @@ class SubtitleService:
                 (target_language or "").startswith(lang) for lang in rtl_languages
             )
             ass_content = build_ass(
-                render_cues, video_w=video_w, video_h=video_h, rtl=is_rtl, layout=layout
+                render_cues,
+                video_w=video_w,
+                video_h=video_h,
+                rtl=is_rtl,
+                layout=layout,
+                position=subtitle_position,
             )
             with open(ass_path, "w", encoding="utf-8") as f:
                 f.write(ass_content)

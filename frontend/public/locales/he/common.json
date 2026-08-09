@@ -93,6 +93,11 @@
   },
   "options": {
     "autoCreateVideo": "יצירת וידאו עם כתוביות צרובות בתוך הסרטון",
+    "subtitlePosition": "מיקום הכתוביות בווידאו",
+    "subtitlePositionHint": "בחרו היכן הכתוביות יופיעו בווידאו המוכן להורדה",
+    "subtitlePositionBottom": "למטה",
+    "subtitlePositionTop": "למעלה",
+    "subtitlePositionSide": "בצד ימין",
     "whisperModel": "מודל תמלול",
     "translationService": "שירות תרגום",
     "watermark": "סימן מים",
@@ -517,6 +522,5 @@
     "errorNoVideo2": "יש לבחור את קובץ הוידאו השני"
   }
 }
-
 
 

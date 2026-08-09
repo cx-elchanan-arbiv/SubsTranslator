@@ -45,6 +45,15 @@ STYLE_CLEAN = "clean"
 STYLE_FAITHFUL = "faithful"
 TRANSLATION_STYLES = (STYLE_CLEAN, STYLE_FAITHFUL)
 
+SUBTITLE_POSITION_BOTTOM = "bottom"
+SUBTITLE_POSITION_TOP = "top"
+SUBTITLE_POSITION_SIDE = "side"
+SUBTITLE_POSITIONS = (
+    SUBTITLE_POSITION_BOTTOM,
+    SUBTITLE_POSITION_TOP,
+    SUBTITLE_POSITION_SIDE,
+)
+
 #: Flag name -> default. Every default is "behave exactly like today".
 FLAG_DEFAULTS: dict[str, Any] = {
     "spotting_v2": False,
@@ -92,6 +101,27 @@ def parse_translation_style(value: Any, default: str = STYLE_CLEAN) -> str:
     if text:
         logger.warning(
             "subtitle_pipeline: unknown translation_style %r — using %r", value, default
+        )
+    return default
+
+
+def parse_subtitle_position(value: Any, default: str = SUBTITLE_POSITION_BOTTOM) -> str:
+    """Return a supported burned-in subtitle position.
+
+    The API is intentionally tolerant, like the quality toggles: old clients omit the
+    field and malformed hand-written requests fall back to the historical bottom-centre
+    placement instead of failing a long-running video job.
+    """
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in SUBTITLE_POSITIONS:
+        return text
+    if text:
+        logger.warning(
+            "subtitle_pipeline: unknown subtitle_position %r — using %r",
+            value,
+            default,
         )
     return default
 

@@ -121,8 +121,9 @@ Test subtitle
             self.video_path,
             self.srt_path,
             self.output_path,
-            "en",
-            None,  # progress_callback
+            target_language="en",
+            progress_callback=None,
+            subtitle_position="bottom",
         )
 
     @patch("services.subtitle_service.SubtitleService._run_ffmpeg_simple")
@@ -205,7 +206,7 @@ class TestFaststartAndMissingWatermarkParity:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     # -- helpers -------------------------------------------------------------------
-    def _invoke(self, path, watermark=None):
+    def _invoke(self, path, watermark=None, subtitle_position="bottom"):
         """Run one renderer with ffmpeg stubbed; return the argv it built."""
         captured = {}
 
@@ -227,7 +228,11 @@ class TestFaststartAndMissingWatermarkParity:
             )
             if path == "srt":
                 result = self.service.create_video_with_subtitles(
-                    self.video_path, self.srt_path, self.output_path, "he"
+                    self.video_path,
+                    self.srt_path,
+                    self.output_path,
+                    "he",
+                    subtitle_position=subtitle_position,
                 )
             elif path == "srt+watermark":
                 result = self.service.create_video_with_subtitles_and_watermark(
@@ -236,6 +241,7 @@ class TestFaststartAndMissingWatermarkParity:
                     self.output_path,
                     watermark if watermark is not None else self.watermark_path,
                     target_language="he",
+                    subtitle_position=subtitle_position,
                 )
             elif path == "ass":
                 result = self.service.create_video_with_ass(
@@ -244,6 +250,7 @@ class TestFaststartAndMissingWatermarkParity:
                     self.output_path,
                     target_language="he",
                     watermark_path=watermark,
+                    subtitle_position=subtitle_position,
                 )
             else:  # pragma: no cover - guard against a typo in a parametrisation
                 raise AssertionError(f"unknown path {path}")
@@ -270,6 +277,28 @@ class TestFaststartAndMissingWatermarkParity:
         """An ffmpeg output option after the output filename is silently ignored."""
         _result, cmd = self._invoke(path)
         assert cmd.index("-movflags") < cmd.index(self.output_path)
+
+    @pytest.mark.parametrize(
+        "position,alignment", [("bottom", "2"), ("top", "8"), ("side", "6")]
+    )
+    @pytest.mark.parametrize("path", ["srt", "srt+watermark", "ass"])
+    def test_every_renderer_honours_the_subtitle_position(
+        self, path, position, alignment
+    ):
+        """Upload/URL jobs may select either renderer; placement must match in all."""
+        _result, cmd = self._invoke(path, subtitle_position=position)
+        if path == "ass":
+            ass_path = os.path.splitext(self.output_path)[0] + ".ass"
+            with open(ass_path, encoding="utf-8") as handle:
+                style = next(
+                    line for line in handle if line.startswith("Style:")
+                ).strip()
+            fields = style.split(":", 1)[1].strip().split(",")
+            assert fields[18] == alignment
+        else:
+            filter_flag = "-vf" if path == "srt" else "-filter_complex"
+            filter_value = cmd[cmd.index(filter_flag) + 1]
+            assert f"Alignment={alignment}" in filter_value
 
     # -- F13: a missing logo degrades, never fails ---------------------------------
     def test_legacy_path_renders_without_a_missing_watermark(self):

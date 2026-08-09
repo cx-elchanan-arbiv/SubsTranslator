@@ -41,6 +41,7 @@ export interface UserChoices {
   watermark_enabled?: boolean;
   watermark_position?: WatermarkPosition;
   watermark_size?: WatermarkSize;
+  subtitle_position?: SubtitlePosition;
 }
 
 export type WhisperModel = 'tiny' | 'base' | 'small' | 'medium' | 'large' | 'gemini';
@@ -51,6 +52,9 @@ export type TranslationService = 'openai' | 'google';
  * "faithful" keeps it, for testimony/comedy timing/verbatim reporting.
  */
 export type TranslationStyle = 'clean' | 'faithful';
+
+/** Placement of burned-in subtitles inside the video frame. */
+export type SubtitlePosition = 'bottom' | 'top' | 'side';
 
 /**
  * The four independent, experimental subtitle-quality toggles.
@@ -159,6 +163,7 @@ export interface UploadRequest {
   auto_create_video: boolean;
   whisper_model: WhisperModel;
   translation_service: TranslationService;
+  subtitle_position?: SubtitlePosition;
   watermark_enabled?: boolean;
   watermark_position?: WatermarkPosition;
   watermark_size?: WatermarkSize;
@@ -172,6 +177,7 @@ export interface YoutubeRequest {
   auto_create_video: boolean;
   whisper_model: WhisperModel;
   translation_service: TranslationService;
+  subtitle_position?: SubtitlePosition;
   watermark_enabled?: boolean;
   watermark_position?: WatermarkPosition;
   watermark_size?: WatermarkSize;

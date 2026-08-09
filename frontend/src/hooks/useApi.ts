@@ -11,6 +11,7 @@ import type {
   WhisperModel,
   TranslationService,
   SubtitleQualityFlags,
+  SubtitlePosition,
   Step,
 } from '../types';
 import { DEFAULT_SUBTITLE_QUALITY_FLAGS } from '../types/api';
@@ -570,7 +571,8 @@ export const useApi = () => {
     whisperModel: WhisperModel,
     translationService: TranslationService,
     watermarkConfig?: WatermarkConfig,
-    subtitleFlags?: SubtitleQualityFlags
+    subtitleFlags?: SubtitleQualityFlags,
+    subtitlePosition: SubtitlePosition = 'bottom'
   ) => {
     const formData = new FormData();
     formData.append('file', file);
@@ -580,6 +582,7 @@ export const useApi = () => {
     formData.append('whisper_model', whisperModel);
     formData.append('translation_service', translationService);
     appendSubtitleFlags(formData, subtitleFlags);
+    formData.append('subtitle_position', subtitlePosition);
 
     // Add watermark configuration
     if (watermarkConfig) {
@@ -624,7 +627,8 @@ export const useApi = () => {
     watermarkConfig?: WatermarkConfig,
     startTime?: string,
     endTime?: string,
-    subtitleFlags?: SubtitleQualityFlags
+    subtitleFlags?: SubtitleQualityFlags,
+    subtitlePosition: SubtitlePosition = 'bottom'
   ) => {
     // Check if we have a custom logo (either file or saved URL) - if so, use FormData
     const hasCustomLogo = watermarkConfig?.enabled && (watermarkConfig?.logoFile || watermarkConfig?.logoUrl);
@@ -639,6 +643,7 @@ export const useApi = () => {
       formData.append('whisper_model', whisperModel);
       formData.append('translation_service', translationService);
       appendSubtitleFlags(formData, subtitleFlags);
+      formData.append('subtitle_position', subtitlePosition);
 
       // Add time range if provided
       if (startTime && endTime) {
@@ -683,6 +688,7 @@ export const useApi = () => {
         whisper_model: whisperModel,
         translation_service: translationService,
         ...(subtitleFlags || DEFAULT_SUBTITLE_QUALITY_FLAGS),
+        subtitle_position: subtitlePosition,
       };
 
       // Add time range if provided

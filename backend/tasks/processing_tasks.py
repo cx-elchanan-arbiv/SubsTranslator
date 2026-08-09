@@ -29,6 +29,7 @@ from services.subtitle_pipeline import (
     flags_summary,
     normalize_cues,
     parse_glossary,
+    parse_subtitle_position,
     resolve_flags,
 )
 from services.subtitle_service import subtitle_service
@@ -81,11 +82,12 @@ def process_video_task(
     translation_v2=False,
     translation_style="clean",
     render_v2=False,
+    subtitle_position="bottom",
 ):
     """
     Celery task to process a video file, with detailed, user-facing progress updates.
 
-    The last four arguments are the independent, user-facing subtitle-quality toggles
+    The quality arguments are independent, user-facing subtitle improvements
     (see :mod:`services.subtitle_pipeline`). All four default to OFF, in which case this
     task takes exactly the legacy path it always did:
 
@@ -100,6 +102,8 @@ def process_video_task(
                           meaningful while ``translation_v2`` is on.
         render_v2         burn in from a generated ``.ass`` file via FFmpeg's ``ass``
                           filter instead of SRT + the ``subtitles`` filter.
+        subtitle_position place burned-in subtitles at the bottom, top or right side;
+                          defaults to the historical bottom-centre placement.
     """
     steps_config = [
         {
@@ -210,8 +214,9 @@ def process_video_task(
             translation_style=translation_style,
             render_v2=render_v2,
         )
+        subtitle_position = parse_subtitle_position(subtitle_position)
         logger.info(f"Subtitle quality flags [task={task_id}]: {flags_summary(flags)}")
-        recorder.update_meta(**flags)
+        recorder.update_meta(**flags, subtitle_position=subtitle_position)
 
         # Experiment read-outs. Only the translation_v2 path can fill these in.
         #
@@ -677,6 +682,7 @@ def process_video_task(
                         progress_callback=video_progress_callback,
                         layout=layout,
                         recorder=recorder,
+                        subtitle_position=subtitle_position,
                     )
                 else:
                     progress_manager.log(
@@ -695,6 +701,7 @@ def process_video_task(
                             watermark_size_height=size_height,
                             watermark_opacity=opacity_float,
                             progress_callback=video_progress_callback,
+                            subtitle_position=subtitle_position,
                         )
                     )
 
@@ -725,6 +732,7 @@ def process_video_task(
                         progress_callback=video_progress_callback,
                         layout=layout,
                         recorder=recorder,
+                        subtitle_position=subtitle_position,
                     )
                 else:
                     # use original function
@@ -735,6 +743,7 @@ def process_video_task(
                             video_with_subtitles_path,
                             target_lang or detected_language,
                             progress_callback=video_progress_callback,
+                            subtitle_position=subtitle_position,
                         )
                     )
 
@@ -824,6 +833,7 @@ def process_video_task(
         # so e.g. the gemini/spotting_v2 fallback is visible here too.
         final_result.setdefault("user_choices", {})
         final_result["user_choices"] = {**final_result["user_choices"], **flags}
+        final_result["user_choices"]["subtitle_position"] = subtitle_position
 
         # Structured logging for task completion
         duration = time.time() - start_time

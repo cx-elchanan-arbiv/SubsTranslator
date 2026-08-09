@@ -15,7 +15,7 @@ from config import get_config
 from i18n.translations import t
 from logging_config import get_logger
 from logo_manager import LogoManager
-from services.subtitle_pipeline import parse_subtitle_flags
+from services.subtitle_pipeline import parse_subtitle_flags, parse_subtitle_position
 from services.token_service import use_download_token
 from services.url_resolver_service import resolve_video_url
 from tasks import (
@@ -83,6 +83,9 @@ def upload_file_async():
         # parsing goes through parse_subtitle_flags rather than a bare truthiness check
         # (the string "false" is truthy).
         subtitle_flags = parse_subtitle_flags(request.form)
+        subtitle_position = parse_subtitle_position(
+            request.form.get("subtitle_position")
+        )
 
         # Handle watermark configuration
         watermark_enabled = (
@@ -159,6 +162,7 @@ def upload_file_async():
                 "auto_create_video": auto_create_video,
                 "whisper_model": whisper_model,
                 "translation_service": translation_service,
+                "subtitle_position": subtitle_position,
                 **subtitle_flags,
             },
         }
@@ -175,7 +179,7 @@ def upload_file_async():
                 None,  # initial_timing_summary (not applicable for uploads)
                 processing_info,  # Include metadata and user choices
             ],
-            kwargs=subtitle_flags,
+            kwargs={**subtitle_flags, "subtitle_position": subtitle_position},
             queue="processing",
         )
 
@@ -191,6 +195,7 @@ def upload_file_async():
                         "auto_create_video": auto_create_video,
                         "whisper_model": whisper_model,
                         "translation_service": translation_service,
+                        "subtitle_position": subtitle_position,
                         **subtitle_flags,
                     },
                     "initial_request": {"filename": filename, "type": "upload"},
@@ -263,6 +268,7 @@ def process_youtube_async():
         # Opt-in subtitle-quality toggles. `data` is a JSON dict (real booleans) OR a
         # FormData dict (strings); parse_subtitle_flags accepts both.
         subtitle_flags = parse_subtitle_flags(data)
+        subtitle_position = parse_subtitle_position(data.get("subtitle_position"))
 
         # Handle watermark configuration
         watermark_enabled = data.get("watermark_enabled", False)
@@ -309,7 +315,7 @@ def process_youtube_async():
                 translation_service,
                 watermark_config,
             ],
-            kwargs=subtitle_flags,
+            kwargs={**subtitle_flags, "subtitle_position": subtitle_position},
             queue="processing",
         )
 
@@ -326,6 +332,7 @@ def process_youtube_async():
                         "whisper_model": whisper_model,
                         "translation_service": translation_service,
                         "url": url,
+                        "subtitle_position": subtitle_position,
                         **subtitle_flags,
                     },
                     "initial_request": {},

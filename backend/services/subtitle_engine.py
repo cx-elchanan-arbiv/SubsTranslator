@@ -1562,12 +1562,14 @@ def build_ass(
     margin_v_frac: float = DEFAULT_MARGIN_V_FRAC,
     rtl: bool = True,
     layout: dict[str, Any] = None,
+    position: str = "bottom",
 ) -> str:
     """Render cues as an ASS v4+ subtitle script.
 
     The style is the render-tested one: Noto Sans Hebrew, bold, white on a
-    semi-transparent opaque box (``BorderStyle=4``, no drop shadow), bottom
-    centre. ``PlayResX/Y`` match the video, so ASS units are pixels.
+    semi-transparent opaque box (``BorderStyle=4``, no drop shadow). Placement is
+    bottom-centre by default, top-centre for ``top`` and middle-right for ``side``.
+    ``PlayResX/Y`` match the video, so ASS units are pixels.
 
     Every size comes from :func:`layout_params`, which reads BOTH dimensions — the
     font is a fraction of the height only for as long as the width can carry a full
@@ -1586,6 +1588,8 @@ def build_ass(
             42-character-wide text and the renderer that has to fit it must not be
             allowed to disagree. Omitted, it is derived here from ``video_w/video_h``,
             which gives the identical answer for the identical inputs.
+        position: ``bottom``, ``top`` or ``side``. Unknown values retain the historical
+            bottom-centre placement.
 
     Returns:
         The complete ``.ass`` file content. Render it with FFmpeg's ``ass``
@@ -1600,6 +1604,7 @@ def build_ass(
     margin_v = layout["margin_v"]
     margin_h = layout["margin_h"]
     max_line = layout["max_line_chars"]
+    alignment = {"bottom": 2, "top": 8, "side": 6}.get(position, 2)
 
     header = (
         "[Script Info]\n"
@@ -1617,7 +1622,7 @@ def build_ass(
         " Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: {STYLE_NAME},Noto Sans Hebrew,{font_size},"
         "&H00FFFFFF,&H00FFFFFF,&H00000000,&H14000000,"
-        "1,0,0,0,100,100,0,0,4,3,0,2,"
+        f"1,0,0,0,100,100,0,0,4,3,0,{alignment},"
         f"{margin_h},{margin_h},{margin_v},1\n"
         "\n"
         "[Events]\n"

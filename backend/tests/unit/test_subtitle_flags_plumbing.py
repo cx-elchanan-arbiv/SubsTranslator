@@ -62,11 +62,14 @@ from services.subtitle_pipeline import (  # noqa: E402
     normalize_cues,
     parse_bool,
     parse_subtitle_flags,
+    parse_subtitle_position,
     parse_translation_style,
     resolve_flags,
 )
 
 ALL_FLAG_KEYS = {"spotting_v2", "translation_v2", "translation_style", "render_v2"}
+ALL_JOB_SETTING_KEYS = ALL_FLAG_KEYS | {"subtitle_position"}
+JOB_DEFAULTS = {**FLAG_DEFAULTS, "subtitle_position": "bottom"}
 
 
 # =====================================================================================
@@ -117,6 +120,17 @@ class TestParseTranslationStyle:
     @pytest.mark.parametrize("value", [None, "", "verbatim", "literal", 7])
     def test_invalid_styles_fall_back_to_clean(self, value):
         assert parse_translation_style(value) == STYLE_CLEAN
+
+
+@pytest.mark.unit
+class TestParseSubtitlePosition:
+    @pytest.mark.parametrize("value", ["bottom", "top", "side"])
+    def test_supported_positions(self, value):
+        assert parse_subtitle_position(value) == value
+
+    @pytest.mark.parametrize("value", [None, "", "middle", "left", 7])
+    def test_missing_or_invalid_position_falls_back_to_bottom(self, value):
+        assert parse_subtitle_position(value) == "bottom"
 
 
 @pytest.mark.unit
@@ -550,7 +564,7 @@ class TestUploadRouteFlagParsing:
             content_type="multipart/form-data",
         )
         assert response.status_code == 202
-        assert _captured_kwargs(upload_route) == FLAG_DEFAULTS
+        assert _captured_kwargs(upload_route) == JOB_DEFAULTS
 
     def test_all_flags_on(self, flask_client, upload_route):
         response = flask_client.post(
@@ -572,7 +586,23 @@ class TestUploadRouteFlagParsing:
             "translation_v2": True,
             "translation_style": "faithful",
             "render_v2": True,
+            "subtitle_position": "bottom",
         }
+
+    def test_subtitle_position_is_forwarded(self, flask_client, upload_route):
+        response = flask_client.post(
+            "/upload",
+            data={
+                "file": _video_file(),
+                "target_lang": "he",
+                "whisper_model": "base",
+                "subtitle_position": "side",
+            },
+            content_type="multipart/form-data",
+        )
+        assert response.status_code == 202
+        assert _captured_kwargs(upload_route)["subtitle_position"] == "side"
+        assert response.get_json()["user_choices"]["subtitle_position"] == "side"
 
     def test_the_string_false_stays_off(self, flask_client, upload_route):
         """Regression guard: form booleans are strings, and "false" is truthy in Python."""
@@ -630,7 +660,7 @@ class TestYoutubeRouteFlagParsing:
             json={"url": self.URL, "target_lang": "he", "whisper_model": "base"},
         )
         assert response.status_code == 202
-        assert _captured_kwargs(youtube_route) == FLAG_DEFAULTS
+        assert _captured_kwargs(youtube_route) == JOB_DEFAULTS
 
     def test_json_booleans(self, flask_client, youtube_route):
         response = flask_client.post(
@@ -651,6 +681,7 @@ class TestYoutubeRouteFlagParsing:
             "translation_v2": True,
             "translation_style": "clean",
             "render_v2": True,
+            "subtitle_position": "bottom",
         }
 
     def test_json_false_stays_off(self, flask_client, youtube_route):
@@ -681,6 +712,7 @@ class TestYoutubeRouteFlagParsing:
                 "translation_v2": "false",
                 "translation_style": "faithful",
                 "render_v2": "true",
+                "subtitle_position": "side",
             },
             content_type="multipart/form-data",
         )
@@ -690,7 +722,22 @@ class TestYoutubeRouteFlagParsing:
             "translation_v2": False,
             "translation_style": "faithful",
             "render_v2": True,
+            "subtitle_position": "side",
         }
+
+    def test_subtitle_position_is_forwarded(self, flask_client, youtube_route):
+        response = flask_client.post(
+            "/youtube",
+            json={
+                "url": self.URL,
+                "target_lang": "he",
+                "whisper_model": "base",
+                "subtitle_position": "top",
+            },
+        )
+        assert response.status_code == 202
+        assert _captured_kwargs(youtube_route)["subtitle_position"] == "top"
+        assert response.get_json()["user_choices"]["subtitle_position"] == "top"
 
     def test_positional_args_are_unchanged(self, flask_client, youtube_route):
         """The flags ride in kwargs; the legacy positional contract must not shift."""
@@ -727,6 +774,7 @@ class TestTaskSignaturesAcceptTheFlags:
             assert (
                 params[flag].default == FLAG_DEFAULTS[flag]
             ), f"{name}.{flag} must default to the legacy behaviour"
+        assert params["subtitle_position"].default == "bottom"
 
     @staticmethod
     def _run_youtube_task(**task_kwargs):
@@ -796,19 +844,25 @@ class TestTaskSignaturesAcceptTheFlags:
 
         assert chained.get("kwargs"), "the processing task was never enqueued"
         assert (
-            set(chained["kwargs"]) == ALL_FLAG_KEYS
-        ), f"chained kwargs are {sorted(chained['kwargs'])}, expected exactly the flags"
+            set(chained["kwargs"]) == ALL_JOB_SETTING_KEYS
+        ), f"chained kwargs are {sorted(chained['kwargs'])}, expected exactly the settings"
         assert chained["kwargs"] == {
             "spotting_v2": True,
             "translation_v2": True,
             "translation_style": STYLE_FAITHFUL,
             "render_v2": True,
+            "subtitle_position": "bottom",
         }
 
     def test_youtube_task_forwards_the_defaults_when_nothing_is_set(self):
         """All four off is the legacy pipeline, and must survive the hop unchanged."""
         chained, _result = self._run_youtube_task()
-        assert chained["kwargs"] == FLAG_DEFAULTS
+        assert chained["kwargs"] == JOB_DEFAULTS
+
+    def test_youtube_task_forwards_the_subtitle_position(self):
+        chained, result = self._run_youtube_task(subtitle_position="side")
+        assert chained["kwargs"]["subtitle_position"] == "side"
+        assert result["user_choices"]["subtitle_position"] == "side"
 
     def test_youtube_task_normalises_flags_before_forwarding(self):
         """A flag that arrives as a string must not reach the task as a string.
