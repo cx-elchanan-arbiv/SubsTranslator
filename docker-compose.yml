@@ -25,7 +25,7 @@ services:
       - FLASK_ENV=development
       - DEBUG=False
       - LOG_LEVEL=INFO
-      - DEFAULT_WHISPER_MODEL=base
+      - DEFAULT_WHISPER_MODEL=large  # the owner's real default; base was a 2GB-prod-machine relic
       - FAST_WORK_DIR=/app/fast_work  # Phase A: Fast workspace env var
       - TRANSLATION_PARALLELISM=1  # P1: Optimal configuration (Test 1 winner)
       - TRANSLATION_BATCH_SIZE=20  # P1: Segments per translation batch
@@ -71,7 +71,7 @@ services:
       - FLASK_ENV=development
       - DEBUG=False
       - LOG_LEVEL=INFO
-      - DEFAULT_WHISPER_MODEL=base
+      - DEFAULT_WHISPER_MODEL=large  # the owner's real default; base was a 2GB-prod-machine relic
       - WORKER_CONCURRENCY=1
       - FAST_WORK_DIR=/app/fast_work  # Phase A: Fast workspace env var
       - TRANSLATION_PARALLELISM=1  # P1: Optimal configuration (Test 1 winner)

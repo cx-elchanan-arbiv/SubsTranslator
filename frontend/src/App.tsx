@@ -45,7 +45,7 @@ function App() {
   const [targetLang, setTargetLang] = useState('he');
   const [languages, setLanguages] = useState<Language>({});
   const [autoCreateVideo, setAutoCreateVideo] = useState(true);
-  const [whisperModel, setWhisperModel] = useState<WhisperModel>('base');
+  const [whisperModel, setWhisperModel] = useState<WhisperModel>('large');
   const [translationService, setTranslationService] = useState<TranslationService>('openai');
   const [transcriptionOnly, setTranscriptionOnly] = useState(false);
   // Experimental subtitle-quality toggles — all off by default (= legacy pipeline).

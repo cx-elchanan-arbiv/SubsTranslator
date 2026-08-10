@@ -75,8 +75,9 @@ class Config:
 
     # Whisper Model Configuration
     DEFAULT_WHISPER_MODEL = os.getenv(
-        "DEFAULT_WHISPER_MODEL", "base"
-    )  # Default for production (2GB RAM Worker)
+        "DEFAULT_WHISPER_MODEL", "large"
+    )  # The owner runs locally with plenty of RAM and always wants best accuracy.
+    # A constrained deployment (the old 2GB Render worker) should override via env.
     AVAILABLE_WHISPER_MODELS: set[str] = {
         "base",
         "medium",
