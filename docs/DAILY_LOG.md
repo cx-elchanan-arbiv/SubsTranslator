@@ -131,3 +131,46 @@ analysis agents against per-run research archives before commit.
 - **PR #16** opened: the full subtitle-quality branch → main, all checks green.
 
 ---
+## 2026-08-09 → 2026-08-10
+
+### Subtitle position feature — authored, audited, fixed, merged
+
+- **Feature**: user-selectable burned-in subtitle position (bottom/top/side)
+  across both renderers, FE dropdown included (`822ceb3`).
+- **Audit find**: all 32 of its tests asserted argv strings, none looked at
+  pixels — and the pixels were wrong: the legacy `subtitles`+`force_style`
+  path parses SSA v4 alignment, not ASS v4+ numpad, so `top` rendered
+  middle-LEFT and `side` at the TOP. Fixed with two deliberately separate
+  maps (`SSA_ALIGNMENT` 2/6/11 vs `ASS_ALIGNMENT` 2/8/6), each value
+  measured on a rendered frame, plus a pixel test class that asserts where
+  the ink actually lands (`deca0d8`). Merged as PR #21.
+- **Stale frontend caught**: the running nginx container predated the
+  feature by 6 days; rebuilt and verified down to the served JS bundle.
+
+### Three independent review rounds (docs/tasks, local-only)
+
+- Round 1 (full audit) → Round 2 (skeptical re-verify: refuted 6 of its own
+  claims, confirmed 10 with executed proofs) → Round 3 (audit-the-auditor
+  agents with kill-tests). Everything that survived is in
+  `docs/tasks/PLAN-2026-08-10-verified.md` with a corrected wave order.
+
+### Wave 0: the burn no longer fights libass (`2977251`)
+
+- **Deleted** the manual bracket swap (double-mirrored against libass:
+  `(בערך)` burned as `)בערך(`) and the RLO wrap (scrambled split Latin runs:
+  `I can't do it, I'll never` burned as `ll never׳t do it, I׳I can`).
+  Both hit EVERY default-path run; both reproduced and re-rendered through
+  the production chain before touching the code.
+- **Replaced** with `subtitle_engine.bidi_isolate` — the RLI/PDI treatment
+  the v2 renderer already proved in pixels — on both the burn path and
+  `create_srt_file`, so the downloaded .srt is byte-for-byte the text the
+  picture was rendered from. `clean_rtl_text` (whose pair-regex turned
+  English apostrophes into geresh) is gone from the SRT path.
+- **Research archive** now references rendered MP4s in meta.json instead of
+  duplicating them into `outputs/`.
+- Tests: 1011 passed / 5 skipped. New: control-character pins (unit) + a
+  burned-pixel band comparison against hand-authored visual-order
+  references, with a positive control proving the old treatment fails it.
+- Before/after frames: `~/Downloads/WAVE0_PROOF_2026-08-10/`.
+
+---
