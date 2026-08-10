@@ -19,8 +19,12 @@ from logging_config import get_logger, log_external_service_call
 from performance_monitor import (  # Phase A: Import performance monitoring
     performance_monitor,
 )
-from services.subtitle_engine import build_ass, hebrew_typography, layout_params
-from utils.rtl_utils import add_rtl_markers, clean_rtl_text, is_rtl_language
+from services.subtitle_engine import (
+    bidi_isolate,
+    build_ass,
+    hebrew_typography,
+    layout_params,
+)
 
 logger = get_logger(__name__)
 config = get_config()
@@ -29,6 +33,14 @@ config = get_config()
 #: names). Handed to FFmpeg's `ass` filter as `fontsdir` so libass finds it without
 #: depending on a fontconfig cache being warm.
 ASS_FONTS_DIR = os.getenv("ASS_FONTS_DIR", "/usr/share/fonts/truetype/hebrew")
+
+#: Every stateful Unicode direction control: embeddings/overrides + PDF
+#: (U+202A-U+202E), the implicit marks (U+200E/U+200F), and the isolates
+#: (U+2066-U+2069). :meth:`SubtitleService.fix_rtl_text_for_subtitles` strips these
+#: before re-isolating, so a line that already carries markers from
+#: ``rtl_utils.add_rtl_markers`` (the downloaded .srt does) reaches libass with one
+#: coherent scheme instead of two nested, disagreeing ones.
+_STATEFUL_BIDI_CONTROLS = re.compile("[\\u202a-\\u202e\\u200e\\u200f\\u2066-\\u2069]")
 
 #: Subtitle placement -> alignment code for the LEGACY renderer, i.e. FFmpeg's
 #: ``subtitles`` filter driven by ``force_style``.
@@ -236,14 +248,26 @@ class SubtitleService:
                     # burned-in picture read התנ״ך while the .srt shipped beside it read
                     # התנ"ך with an ASCII quote — the same cue, two different spellings,
                     # and the one a user can copy out of was the wrong one.
-                    # `clean_rtl_text` does not cover this: its `fix_hebrew_quotes` only
-                    # rewrites a PAIR of quotes, and an acronym mark has no partner.
                     text = hebrew_typography(text)
 
-                    # Add RTL markers for Hebrew/Arabic using enhanced rtl_utils
-                    if use_translation and is_rtl_language(language):
-                        text = clean_rtl_text(text)
-                        text = add_rtl_markers(text)
+                    # `hebrew_typography` is deliberately the ONLY quote/apostrophe
+                    # rewriter on this path. `clean_rtl_text` used to run after it, and
+                    # its `fix_hebrew_quotes` converts any PAIR of ASCII apostrophes to
+                    # geresh — on a translated line that keeps some English, `can't ...
+                    # I'll` became `can׳t ... I׳ll`: Hebrew marks inside English words,
+                    # which then split the Latin run and scrambled the burned picture.
+                    # Typography already handles the Hebrew cases and leaves English
+                    # alone, so the second pass had only the regression left to add.
+                    #
+                    # Direction is `bidi_isolate`, the same treatment the burn path
+                    # applies — NOT `rtl_utils.add_rtl_markers`, whose LRE-per-run
+                    # scheme cannot span an apostrophe, so a compliant external player
+                    # reordered `I can't do it, I'll never` exactly the way the old
+                    # burn did. One scheme, one owner: the file a user downloads is
+                    # byte-for-byte the text the picture was rendered from. Isolates
+                    # are invisible, and `bidi_isolate` self-guards, returning any
+                    # line without a strongly-RTL character untouched.
+                    text = bidi_isolate(text)
 
                     f.write(f"{i}\n{start_time} --> {end_time}\n{text}\n\n")
 
@@ -261,46 +285,29 @@ class SubtitleService:
             raise
 
     def fix_rtl_text_for_subtitles(self, text: str) -> str:
-        """Fix RTL text direction and punctuation for video subtitles.
-        Supports Hebrew, Arabic, Persian, Urdu, and other RTL languages.
+        """Prepare one subtitle line for libass's bidi pass.
 
-        Args:
-            text: Input text that may contain RTL characters
+        This used to swap bracket pairs by hand and wrap the whole line in RLO
+        (U+202E). Both fought the bidi algorithm instead of informing it: libass
+        mirrors brackets itself, so the pre-swap burned ``(בערך)`` as ``)בערך(``,
+        and under the override any Latin run split by an upstream rewrite burned
+        scrambled — ``I can't do it, I'll never`` came out
+        ``ll never׳t do it, I׳I can`` — in every default-path run.
 
-        Returns:
-            Text with proper RTL formatting and punctuation fixes
+        The correct treatment is the one the v2 engine already proved in pixels
+        (``tests/integration/test_bidi_render.py``): strip every stateful
+        direction control an upstream step may have added, then let
+        :func:`services.subtitle_engine.bidi_isolate` wrap the line in
+        ``RLI...PDI`` — required, because libass hard-defaults the paragraph
+        direction to LTR — and isolate maximal Latin/numeric runs so
+        ``Microsoft Azure``, ``3.5`` and ``COVID-19`` keep their reading order.
+        A line with no strongly-RTL character is returned bare, exactly as
+        ``bidi_isolate`` ships it.
         """
         if not text:
             return text
-
-        # Use Unicode bidirectional algorithm to detect RTL characters
-        import unicodedata
-
-        has_rtl = any(unicodedata.bidirectional(char) in ("R", "AL") for char in text)
-
-        if has_rtl:
-            # Fix parentheses direction
-            text = text.replace("(", "֮TEMP֮")
-            text = text.replace(")", "(")
-            text = text.replace("֮TEMP֮", ")")
-
-            # Fix brackets direction
-            text = text.replace("[", "֮TEMP֮")
-            text = text.replace("]", "[")
-            text = text.replace("֮TEMP֮", "]")
-
-            # Fix numbers for RTL display - don't reverse them, just add LTR markers
-            def fix_number(match):
-                number = match.group(0)
-                # Add Left-to-Right marks around numbers to preserve their direction
-                return f"\u200e{number}\u200e"
-
-            text = re.sub(r"\d[\d,\.]*", fix_number, text)
-
-            # Add RTL override markers
-            text = "\u202e" + text + "\u202c"
-
-        return text
+        text = _STATEFUL_BIDI_CONTROLS.sub("", text)
+        return bidi_isolate(text)
 
     def create_video_with_subtitles(
         self,

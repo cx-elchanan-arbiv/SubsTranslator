@@ -259,8 +259,11 @@ class TestOutputs:
         assert os.listdir(os.path.join(recorder.run_dir, "outputs")) == []
 
     def test_oversized_files_are_skipped_and_the_skip_is_recorded(self, root, tmp_path):
+        # A non-video extension on purpose: video never reaches the size check at
+        # all (see the test below), so the oversize guard is exercised on the kind
+        # of file it still applies to.
         rec = rr.ResearchRecorder("cafebabe0000", root, max_copy_mb=0)
-        big = tmp_path / "huge.mp4"
+        big = tmp_path / "huge.wav"
         big.write_bytes(b"\x00" * (2 * 1024 * 1024))
         rec.copy_output(str(big))
         rec.finish(success=True)
@@ -268,7 +271,25 @@ class TestOutputs:
         warnings = read_json(os.path.join(rec.run_dir, "meta.json"))[
             "recorder_warnings"
         ]
-        assert any("huge.mp4" in w for w in warnings)
+        assert any("huge.wav" in w for w in warnings)
+
+    def test_video_is_referenced_never_copied(self, recorder, tmp_path):
+        """The archive answers "what text did the pipeline produce and why";
+        duplicating every rendered MP4 multiplied a run's storage ~100x for a
+        file re-renderable from the archived cues. The reference in meta.json
+        keeps the archive honest about what the run produced.
+        """
+        clip = tmp_path / "clip_final.mp4"
+        clip.write_bytes(b"\x00" * 1024)
+        recorder.copy_output(str(clip))
+        recorder.finish(success=True)
+
+        assert os.listdir(os.path.join(recorder.run_dir, "outputs")) == []
+        meta = read_json(os.path.join(recorder.run_dir, "meta.json"))
+        entry = meta["outputs"]["clip_final.mp4"]
+        assert entry["archived"] is False
+        assert entry["path"] == str(clip)
+        assert entry["size_mb"] == 0.0
 
 
 # ======================================================================================

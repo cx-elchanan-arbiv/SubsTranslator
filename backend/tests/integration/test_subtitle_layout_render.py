@@ -637,3 +637,207 @@ class TestBurnedSubtitlePosition:
         assert ASS_ALIGNMENT["bottom"] == SSA_ALIGNMENT["bottom"] == 2
         assert ASS_ALIGNMENT["top"] != SSA_ALIGNMENT["top"]
         assert ASS_ALIGNMENT["side"] != SSA_ALIGNMENT["side"]
+
+
+# ======================================================================================
+@pytest.mark.integration
+class TestBurnedBidiTreatment:
+    """The default burn path renders logical-order RTL text correctly.
+
+    Pins the fix for two bugs that were burned into every default-path run:
+    ``fix_rtl_text_for_subtitles`` pre-swapped bracket pairs — libass mirrors them
+    itself, so ``(בערך)`` burned as ``)בערך(`` — and wrapped every line in RLO
+    (U+202E), under which a Latin run split by the upstream geresh rewrite burned
+    scrambled: ``I can't do it, I'll never`` came out ``ll never׳t do it, I׳I can``.
+
+    Method, borrowed from ``test_bidi_render.py``: each logical cue runs through the
+    REAL production chain (``create_srt_file`` -> ``create_video_with_subtitles``,
+    the ``subtitles`` filter with ``force_style``) and the burned frame is compared,
+    ink-band by ink-band, against the same sentence hand-authored in VISUAL order and
+    burned through the same function with the bidi treatment switched off. The
+    reference is written from the meaning of the sentence, not derived from the code
+    under test, so agreement is evidence and not a tautology. A positive control
+    shows the comparison can fail: re-applying the old RLO treatment must break it.
+    """
+
+    W, H = 640, 360
+    RLI, LRI, PDI = "\u2067", "\u2066", "\u2069"
+
+    #: Per-band mean absolute pixel difference at which two burns still count as the
+    #: same layout. In ``test_bidi_render.py``'s calibration every correct render
+    #: measured <= 1.4 and every broken one >= 8.7; identical filter + style here
+    #: should land near 0.
+    SAME_LAYOUT_MAD = 3.0
+
+    #: ``(logical cue text, the same words in the order a viewer must SEE them,
+    #: left to right on screen)``
+    CASES = [
+        ("זה (בערך) נכון", ["נכון", "(בערך)", "זה"]),
+        ("בשנת 2024 זה קרה", ["קרה", "זה", "2024", "בשנת"]),
+        (
+            "אמרתי I can't do it, I'll never ויצאתי",
+            ["ויצאתי", "I can't do it, I'll never", "אמרתי"],
+        ),
+    ]
+
+    # -- plumbing ---------------------------------------------------------------------
+
+    @pytest.fixture()
+    def black_clip(self, tmp_path):
+        path = str(tmp_path / "black.mp4")
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=black:s={self.W}x{self.H}:r=10:d=2",
+                "-c:v",
+                "libx264",
+                "-y",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        return path
+
+    @staticmethod
+    def _service(monkeypatch, treatment=None):
+        from services.subtitle_service import SubtitleService
+
+        svc = SubtitleService()
+        monkeypatch.setattr(svc.config, "USE_FAKE_YTDLP", False, raising=False)
+        if treatment is not None:
+            svc.fix_rtl_text_for_subtitles = treatment
+        return svc
+
+    @staticmethod
+    def _write_srt(tmp_path, name, line):
+        path = str(tmp_path / name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"1\n00:00:00,000 --> 00:00:02,000\n{line}\n\n")
+        return path
+
+    def _burn_and_grab(self, svc, black_clip, srt_path, out_path):
+        assert svc.create_video_with_subtitles(
+            black_clip, srt_path, out_path, target_language="he"
+        )
+        raw = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-ss",
+                "1",
+                "-i",
+                out_path,
+                "-frames:v",
+                "1",
+                "-pix_fmt",
+                "gray",
+                "-f",
+                "rawvideo",
+                "-",
+            ],
+            capture_output=True,
+            check=True,
+            timeout=120,
+        ).stdout
+        frame = numpy.frombuffer(raw, dtype=numpy.uint8).reshape(self.H, self.W)
+        return frame[int(self.H * 0.55) :, :]  # the strip the subtitle lives in
+
+    # -- comparison -------------------------------------------------------------------
+
+    @staticmethod
+    def _bands(strip):
+        """``(start, width)`` per inked column run, gaps under 4px glued shut."""
+        cols = (strip > INK_THRESHOLD).any(axis=0)
+        xs = numpy.flatnonzero(cols)
+        if xs.size == 0:
+            return []
+        groups = numpy.split(xs, numpy.flatnonzero(numpy.diff(xs) > 4) + 1)
+        return [(int(g[0]), int(g[-1] - g[0] + 1)) for g in groups]
+
+    def _layouts_agree(self, strip_a, strip_b):
+        bands_a, bands_b = self._bands(strip_a), self._bands(strip_b)
+        if not bands_a or len(bands_a) != len(bands_b):
+            return False
+        for (xa, wa), (xb, wb) in zip(bands_a, bands_b, strict=True):
+            if abs(wa - wb) > 2:
+                return False
+            width = min(wa, wb)
+            best = None
+            for dx in range(-3, 4):
+                if xb + dx < 0 or xb + dx + width > strip_b.shape[1]:
+                    continue
+                diff = numpy.abs(
+                    strip_a[:, xa : xa + width].astype(int)
+                    - strip_b[:, xb + dx : xb + dx + width].astype(int)
+                ).mean()
+                best = diff if best is None else min(best, diff)
+            if best is None or best > self.SAME_LAYOUT_MAD:
+                return False
+        return True
+
+    # -- the tests --------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "logical,visual_tokens",
+        CASES,
+        ids=["parens", "number", "english-run"],
+    )
+    def test_the_default_burn_matches_a_hand_authored_visual_reference(
+        self, tmp_path, monkeypatch, black_clip, logical, visual_tokens
+    ):
+        production = self._service(monkeypatch)
+        prod_srt = str(tmp_path / "prod.srt")
+        production.create_srt_file(
+            [{"start": 0.0, "end": 2.0, "text": "x", "translated_text": logical}],
+            prod_srt,
+            use_translation=True,
+            language="he",
+        )
+        strip_prod = self._burn_and_grab(
+            production, black_clip, prod_srt, str(tmp_path / "prod.mp4")
+        )
+
+        reference_line = " ".join(
+            self.RLI + token + self.PDI for token in visual_tokens
+        )
+        verbatim = self._service(monkeypatch, treatment=lambda t: t)
+        ref_srt = self._write_srt(tmp_path, "ref.srt", reference_line)
+        strip_ref = self._burn_and_grab(
+            verbatim, black_clip, ref_srt, str(tmp_path / "ref.mp4")
+        )
+
+        assert self._layouts_agree(strip_prod, strip_ref), (
+            f"production burn of {logical!r} does not match the hand-authored "
+            f"visual order {visual_tokens!r}: bands "
+            f"{self._bands(strip_prod)} vs {self._bands(strip_ref)}"
+        )
+
+    def test_the_old_rlo_treatment_fails_this_comparison(
+        self, tmp_path, monkeypatch, black_clip
+    ):
+        """Positive control: the pre-fix treatment must NOT pass the band compare,
+        or the comparison above proves nothing.
+        """
+        logical, visual_tokens = self.CASES[2]
+        rlo = self._service(monkeypatch, treatment=lambda t: "\u202e" + t + "\u202c")
+        srt = self._write_srt(tmp_path, "rlo.srt", logical)
+        strip_rlo = self._burn_and_grab(rlo, black_clip, srt, str(tmp_path / "rlo.mp4"))
+
+        reference_line = " ".join(
+            self.RLI + token + self.PDI for token in visual_tokens
+        )
+        verbatim = self._service(monkeypatch, treatment=lambda t: t)
+        ref_srt = self._write_srt(tmp_path, "ref.srt", reference_line)
+        strip_ref = self._burn_and_grab(
+            verbatim, black_clip, ref_srt, str(tmp_path / "ref.mp4")
+        )
+
+        assert not self._layouts_agree(strip_rlo, strip_ref)

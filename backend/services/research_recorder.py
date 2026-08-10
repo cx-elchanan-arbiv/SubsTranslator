@@ -26,7 +26,8 @@ volume that survives rebuilds:
         llm/NN_meta.json           model, tokens, latency, error
         dropped_cues.json          cues the pipeline REFUSED to ship, with the reason
                                    (absent when nothing was dropped)
-        outputs/                   copies of the SRTs, the .ass and the final MP4
+        outputs/                   copies of the SRTs and the .ass; video is only
+                                   REFERENCED in meta.json, never duplicated
     <RESEARCH_DIR>/index.jsonl     one line per run, for cheap scanning
 
 The safety contract (this is the important part)
@@ -65,6 +66,10 @@ OUTPUTS_DIR = "outputs"
 
 #: The scan index, one JSON object per line, at the root of RESEARCH_DIR.
 INDEX_FILENAME = "index.jsonl"
+
+#: Rendered video is referenced in meta.json, never duplicated into ``outputs/`` —
+#: see :meth:`ResearchRecorder.copy_output`.
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 
 _MB = 1024 * 1024
 
@@ -346,14 +351,27 @@ class ResearchRecorder:
     def copy_output(self, path: str, alias: str | None = None) -> None:
         """Copy one produced file into ``outputs/``.
 
-        Files above ``max_copy_mb`` are skipped with a WARNING rather than filling the
-        volume; the skip is recorded in meta.json so the archive never lies about what
-        it holds.
+        Video files are never copied — only referenced. The archive exists to answer
+        "what text did the pipeline produce and why"; the .srt/.ass/.json artifacts
+        answer that at a few KB each, while duplicating every rendered MP4 multiplied
+        the storage cost of a run by ~100x for a file that can always be re-rendered
+        from the archived cues. The reference (original path + size) still lands in
+        meta.json so the archive never lies about what the run produced.
+
+        Non-video files above ``max_copy_mb`` are skipped with a WARNING rather than
+        filling the volume; the skip is recorded in meta.json too.
         """
         if not path or not os.path.exists(path):
             return
         size_mb = os.path.getsize(path) / _MB
         name = alias or os.path.basename(path)
+        if os.path.splitext(name)[1].lower() in VIDEO_EXTENSIONS:
+            self._meta.setdefault("outputs", {})[name] = {
+                "path": os.path.abspath(path),
+                "size_mb": round(size_mb, 2),
+                "archived": False,
+            }
+            return
         if size_mb > self.max_copy_mb:
             logger.warning(
                 "research_recorder: %s is %.1f MB (> %d MB) — not archived",

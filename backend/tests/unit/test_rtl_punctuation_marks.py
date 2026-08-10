@@ -130,3 +130,91 @@ class TestSrtCarriesHebrewTypography:
         )
         for mark in (GERSHAYIM, GERESH):
             assert (mark in srt) == (mark in ass) is True
+
+    def test_english_apostrophes_survive_the_translated_track(self, tmp_path):
+        """`clean_rtl_text` used to run after typography on translated RTL lines,
+        and its pair-regex turned `can't ... I'll` into `can׳t ... I׳ll` — Hebrew
+        geresh inside English words, which then split the Latin run and scrambled
+        the burned picture. Typography is the only quote rewriter now.
+        """
+        segments = [
+            {
+                "start": 0.0,
+                "end": 2.0,
+                "text": "x",
+                "translated_text": "אמרתי I can't do it, I'll never ויצאתי",
+            }
+        ]
+        body = self._write(tmp_path, segments, use_translation=True, language="he")
+        assert "I can't do it, I'll never" in body
+        assert GERESH not in body
+
+    def test_the_downloaded_line_is_what_the_renderer_burns(self, tmp_path):
+        """WYSIWYG, stated as bytes: the .srt line is `bidi_isolate(typography)`,
+        and the burn's own treatment maps it to itself — one scheme, one owner.
+        """
+        from services.subtitle_engine import bidi_isolate, hebrew_typography
+        from services.subtitle_service import SubtitleService
+
+        text = "זה (בערך) נכון"
+        segments = [{"start": 0.0, "end": 2.0, "text": "x", "translated_text": text}]
+        body = self._write(tmp_path, segments, use_translation=True, language="he")
+        line = body.strip().split("\n")[2]
+        assert line == bidi_isolate(hebrew_typography(text))
+        assert SubtitleService().fix_rtl_text_for_subtitles(line) == line
+
+
+@pytest.mark.unit
+class TestBurnPathBidiTreatment:
+    """`fix_rtl_text_for_subtitles` informs libass instead of fighting it.
+
+    The old body pre-swapped bracket pairs (libass mirrors them itself, so the
+    swap double-mirrored: `(בערך)` burned as `)בערך(`) and wrapped every line in
+    RLO (U+202E), under which a split Latin run burned scrambled. The rendered
+    before/after evidence lives in
+    ``tests/integration/test_subtitle_layout_render.py`` (TestBurnedBidiTreatment);
+    these pin the emitted control characters.
+    """
+
+    @staticmethod
+    def _fix(text):
+        from services.subtitle_service import SubtitleService
+
+        return SubtitleService().fix_rtl_text_for_subtitles(text)
+
+    def test_brackets_are_not_pre_swapped(self):
+        out = self._fix("זה (בערך) נכון")
+        assert "(בערך)" in out
+        assert ")בערך(" not in out
+
+    def test_rlo_is_never_emitted(self):
+        assert "\u202e" not in self._fix("אמרתי I can't do it ויצאתי")
+
+    def test_the_line_is_isolated_not_overridden(self):
+        out = self._fix("שלום עולם")
+        assert out.startswith("\u2067") and out.endswith("\u2069")
+
+    def test_an_english_run_survives_whole_across_apostrophes(self):
+        out = self._fix("אמרתי I can't do it, I'll never ויצאתי")
+        assert "I can't do it, I'll never" in out
+
+    def test_legacy_markers_are_rewritten_into_the_one_scheme(self):
+        """A line still wearing the old `add_rtl_markers` dress (RLE/LRE/LRM soup,
+        which fragments English at every apostrophe) reaches libass identical to
+        the bare text — one coherent scheme instead of two nested disagreeing ones.
+        """
+        dressed = "\u202bאמרתי \u202aI can\u202c\u200e ויצאתי\u202c"
+        bare = "אמרתי I can ויצאתי"
+        assert self._fix(dressed) == self._fix(bare)
+
+    def test_burning_our_own_srt_is_a_fixed_point(self):
+        from services.subtitle_engine import bidi_isolate
+
+        line = bidi_isolate("זה (בערך) נכון")  # what create_srt_file writes
+        assert self._fix(line) == line
+
+    def test_a_line_with_no_rtl_is_untouched(self):
+        assert self._fix("Hello world.") == "Hello world."
+
+    def test_empty_is_empty(self):
+        assert self._fix("") == ""
