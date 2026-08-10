@@ -1044,58 +1044,103 @@ def transcribe_with_words(
 
     options = {
         "word_timestamps": True,
-        "beam_size": 2 if model_name in ["large", "medium"] else 5,
+        # `large` gets the full beam. The old `2` was a speed concession for the 2GB
+        # prod worker, and it is exactly the degraded-search condition under which the
+        # judged runs mis-decoded real speech ("work out how" -> "work hard. You've
+        # got how") and dropped the first second of a clip. Re-decoded at beam 5:
+        # both defects gone, on the same audio, same model. `medium` keeps 2 — its
+        # entire corpus evidence base (R1-R8) was built at that setting.
+        "beam_size": 2 if model_name == "medium" else 5,
         "chunk_length": 30,
         "condition_on_previous_text": ASR_CONDITION_ON_PREVIOUS_TEXT,
-        # The single most consequential line in the v2 pipeline. Without it large-v3
-        # returns some clips entirely unpunctuated and lowercase, and every stage below
-        # (sentence spotting, cue splitting, translation punctuation) is built on
-        # sentences that then do not exist. See ASR_PUNCTUATION_PRIMER.
-        "initial_prompt": asr_primer_for(source_lang),
+        # Punctuation priming is MEDIUM medicine. Without it, medium returns some
+        # clips entirely unpunctuated and every stage below (sentence spotting, cue
+        # splitting, translation punctuation) is built on sentences that then do not
+        # exist. large-v3 at beam 5 punctuates reliably on its own — measured across
+        # five judged clips — and the primer occasionally REWRITES its hearing (the
+        # "work hard" mutation above survived priming at beam 5, and vanished only
+        # when the primer was dropped). So: prime medium/base, leave large alone.
+        # See ASR_PUNCTUATION_PRIMER.
+        "initial_prompt": (
+            None if model_name == "large" else asr_primer_for(source_lang)
+        ),
     }
     if source_lang != "auto":
         options["language"] = source_lang
 
     logger.info(
         f"💾 v2 transcription settings: model={model_name}, beam_size={options['beam_size']}, "
-        f"collect_words={collect_words}, punctuation_priming=on "
-        f"(primer language={str(source_lang or 'auto').split('-')[0]}), "
+        f"collect_words={collect_words}, "
+        f"punctuation_priming={'off (large trusts its own punctuation)' if options['initial_prompt'] is None else 'on (primer language=' + str(source_lang or 'auto').split('-')[0] + ')'}, "
         f"condition_on_previous_text={ASR_CONDITION_ON_PREVIOUS_TEXT}"
     )
 
     transcription_start = time.time()
-    segments_iter, info = model.transcribe(audio_np, **options)
+
+    def _materialize(run_options):
+        segments_iter, run_info = model.transcribe(audio_np, **run_options)
+        out_segments: list[dict] = []
+        out_words: list[dict] = []
+        for segment in segments_iter:
+            out_segments.append(
+                {"start": segment.start, "end": segment.end, "text": segment.text}
+            )
+            if collect_words:
+                for word in getattr(segment, "words", None) or []:
+                    text = getattr(word, "word", None)
+                    if text is None or not str(text).strip():
+                        continue
+                    out_words.append(
+                        {
+                            "s": float(getattr(word, "start", segment.start) or 0.0),
+                            "e": float(getattr(word, "end", segment.end) or 0.0),
+                            "w": str(text),
+                        }
+                    )
+
+            if progress_callback and audio_duration:
+                step_progress = 30 + int((segment.end / audio_duration) * 100 * 0.55)
+                progress_callback(
+                    step_progress,
+                    f"Transcription: {segment.end:.0f}s/{audio_duration:.0f}s",
+                    step_progress,
+                    "Step 1: Whisper AI",
+                    5,
+                )
+        return out_segments, out_words, run_info
+
+    def _terminal_count(seg_list):
+        text = " ".join(s["text"] for s in seg_list)
+        return text, sum(text.count(mark) for mark in ".!?")
+
+    segments, words, info = _materialize(options)
     detected_language = info.language
     logger.info(f"🌍 Detected language: {detected_language}")
 
-    segments = []
-    words = []
-    for segment in segments_iter:
-        segments.append(
-            {"start": segment.start, "end": segment.end, "text": segment.text}
+    # Conditional re-prime, the reconciliation of two evidence sets. Judged runs
+    # showed the primer occasionally REWRITES large's hearing ("work out how" ->
+    # "work hard"), so large now starts unprimed; the ablation above showed some
+    # clips fall into the unpunctuated attractor without it. So: trust large first,
+    # and only when the transcript comes back with the attractor's signature —
+    # enough words to be a real transcript, zero terminal punctuation — pay for one
+    # primed re-run. Clips that punctuate cleanly (the common case at beam 5) never
+    # see the primer at all.
+    transcript, terminals = _terminal_count(segments)
+    if (
+        options["initial_prompt"] is None
+        and terminals == 0
+        and len(transcript.split()) >= 40
+    ):
+        logger.warning(
+            "⚠️ v2 transcription: unpunctuated-attractor signature on unprimed "
+            "large (%d words, 0 terminals) — re-running once with the punctuation "
+            "primer",
+            len(transcript.split()),
         )
-        if collect_words:
-            for word in getattr(segment, "words", None) or []:
-                text = getattr(word, "word", None)
-                if text is None or not str(text).strip():
-                    continue
-                words.append(
-                    {
-                        "s": float(getattr(word, "start", segment.start) or 0.0),
-                        "e": float(getattr(word, "end", segment.end) or 0.0),
-                        "w": str(text),
-                    }
-                )
-
-        if progress_callback and audio_duration:
-            step_progress = 30 + int((segment.end / audio_duration) * 100 * 0.55)
-            progress_callback(
-                step_progress,
-                f"Transcription: {segment.end:.0f}s/{audio_duration:.0f}s",
-                step_progress,
-                "Step 1: Whisper AI",
-                5,
-            )
+        options["initial_prompt"] = asr_primer_for(source_lang)
+        segments, words, info = _materialize(options)
+        detected_language = info.language
+        transcript, terminals = _terminal_count(segments)
 
     transcription_duration = time.time() - transcription_start
     performance_monitor.log_transcription_performance(
@@ -1111,22 +1156,21 @@ def transcribe_with_words(
     # Punctuation health of the transcript we actually got. This is the read-out that
     # tells a reviewer, from the job log alone, whether the attractor was avoided on
     # this clip — the numbers the ablation is scored on, measured live on every run.
-    transcript = " ".join(s["text"] for s in segments)
-    terminals = sum(transcript.count(mark) for mark in ".!?")
     commas = transcript.count(",")
     capitals = sum(1 for ch in transcript if ch.isupper())
     logger.info(
         "📝 v2 ASR punctuation health: %d terminals, %d commas, %d capitals over "
-        "%d chars (priming=on)",
+        "%d chars (priming=%s)",
         terminals,
         commas,
         capitals,
         len(transcript),
+        "off" if options["initial_prompt"] is None else "on",
     )
     if segments and terminals == 0:
         logger.warning(
-            "⚠️ v2 ASR returned ZERO terminal punctuation across %d segments DESPITE "
-            "punctuation priming — the large-v3 unpunctuated attractor was not escaped "
+            "⚠️ v2 ASR returned ZERO terminal punctuation across %d segments despite "
+            "every configured measure — the unpunctuated attractor was not escaped "
             "on this clip; downstream spotting will fall back to speech pauses",
             len(segments),
         )

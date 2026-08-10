@@ -139,6 +139,17 @@ MAX_SOURCE_CPS = 35.0
 #: real ever measured here and less than half of the fabrication.
 IMPOSSIBLE_SOURCE_CPS = 90.0
 
+#: Companion hard signal in WORDS per second, because the CPS test is calibrated on
+#: character density and English words are long enough to slip under it: the judged
+#: crosstalk fabrication packed 17 invented words into 1.52s — 11.2 w/s but only
+#: ~40 CPS, sailing past the 90 above. Real fast speech in this project's corpus
+#: peaks near 5-6 w/s; conference-record auctioneering is ~8. The fabricated cases
+#: measured 11.2 and 33 (10 words in 0.30s). 8.0 sits above anything a human said
+#: in this corpus and below everything Whisper invented. Deliberately a HARD
+#: signal: crosstalk zones are LOUD, so the audio-energy veto would rescue exactly
+#: the fabrications this exists to drop.
+IMPOSSIBLE_WORDS_PER_SEC = 8.0
+
 #: A word timestamp shorter than this is DEGENERATE: Whisper's word times are quantised
 #: to 0.02s, so anything under 0.05s is one or two ticks — the shape it produces when it
 #: has text to place and no audio to place it on.
@@ -627,11 +638,24 @@ def _can_merge(
       * ``previous`` does not already hold two sentences.
     """
     prev_text = _text_of(previous)
+    group_text = _text_of(group)
+    # The question rule, BOTH directions. Refusing question->answer has been here
+    # from the start; answer->question is its judged mirror image: a rapid-fire
+    # interview merged a complete answer with the interviewer's NEXT question at an
+    # 0.08s gap — too tight for the turn-gap detector — and the viewer read "למה?"
+    # 2.5 seconds before it was asked. A question pulled onto a COMPLETE sentence is
+    # a spoiler; a question completing its own fragment ("So what" + "do we do?")
+    # is one utterance and still merges, which is why the block requires `previous`
+    # to already end in terminal punctuation.
+    spoils_a_question = (
+        group_text.rstrip().endswith("?") and prev_text.rstrip()[-1:] in ".?!…"
+    )
     return (
-        len(prev_text) + 1 + len(_text_of(group)) <= max_chars
+        len(prev_text) + 1 + len(group_text) <= max_chars
         and (group[-1]["e"] - previous[0]["s"]) <= max_dur
         and (group[0]["s"] - previous[-1]["e"]) <= max_gap
         and not prev_text.rstrip().endswith("?")
+        and not spoils_a_question
         and not group[0].get("_turn")
         and _sentence_count(prev_text) < 2
     )
@@ -1093,6 +1117,11 @@ def drop_hallucinated_cues(
         soft: list[str] = []
         if cps > impossible_cps:
             hard.append(f"cps_impossible({cps:.1f}>{impossible_cps:.0f})")
+        words_per_sec = len(text.split()) / duration
+        if words_per_sec > IMPOSSIBLE_WORDS_PER_SEC:
+            hard.append(
+                f"wps_impossible({words_per_sec:.1f}>{IMPOSSIBLE_WORDS_PER_SEC:.0f})"
+            )
         if normalized and normalized == previous_norm:
             hard.append("duplicate_of_previous")
         if cps > max_cps:

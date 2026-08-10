@@ -442,7 +442,12 @@ def build_system_prompt(
             "phrase followed by a COMMA — your translation starts AFTER it, and the "
             'comma goes with it. "You know, like, he really got hurt." is '
             '"הוא באמת נפגע." — not "אתה יודע, הוא באמת נפגע." A question that uses the '
-            'same words as a VERB is untouched: "Do you know what that means?" keeps it.'
+            'same words as a VERB is untouched: "Do you know what that means?" keeps it.\n'
+            "   EXCEPTION, and it outranks the mechanical rule: a marker doing "
+            'interpersonal WORK is meaning, not filler. Direct address ("look, Nick" '
+            "— a parent softening what follows), a marker the sentence's warmth or "
+            "stance leans on, stays and is translated. The test: if removing it makes "
+            "the speaker colder or blunter than they were, it was not filler."
         )
     else:
         filler_rule = (
@@ -459,6 +464,15 @@ def build_system_prompt(
         "PRESERVE sentence punctuation: . , ? ! — every cue must end with proper "
         "punctuation.",
         filler_rule,
+        'PRESERVE deliberate rhetorical repetition. "a great, great honor" is a '
+        "speech pattern, not a stutter — render both words. Collapsing it to one "
+        "flattens the speaker. (Genuine stutters and false starts follow the filler "
+        "rule above instead.)",
+        "Read the WHOLE batch before translating any cue, and let the scene decide "
+        'domain terms: "gains" beside a protein shake is muscle, not profit; a word '
+        'being ARGUED ABOUT ("it\'s called X") is quoted as itself, not translated. '
+        "When the cues around a term name its world, that world wins over the "
+        "dictionary.",
         f"Maximum {max_chars_per_cue} characters per cue. Condense the meaning rather "
         "than exceed it.",
         "Numbers one to ten are spelled out in words; 11 and above stay as numerals.",
@@ -521,6 +535,14 @@ def build_system_prompt(
             f"Foreign names and loanwords take a geresh {GERESH} (U+05F3), never an "
             f"ASCII apostrophe ': ג{GERESH}ורג{GERESH}, צ{GERESH}ארלס, ג{GERESH}ז, "
             f"ז{GERESH}אנר."
+        )
+        rules.append(
+            # Each of these three was a recurring judged error, across two pipelines.
+            "Hebrew micro-grammar that machine output keeps getting wrong: (1) in a "
+            'definite construct chain only the LAST noun is definite — "לב הארגמן", '
+            'never "הלב הארגמן"; (2) military and honorific titles take the article — '
+            '"הגנרל ג\'ורג\' וושינגטון", "הנשיא"; (3) a counted noun above ten is '
+            'singular — "243 שנה", never "243 שנים".'
         )
         rules.append(
             "Grammatical gender must agree WITHIN each noun phrase, not only across "

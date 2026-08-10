@@ -64,8 +64,19 @@ class TestWordsToCuesOnRealClip:
 
     def test_no_flash_cues(self, sample_cues):
         # The defect: a 0.3s cue holding only "things." and a 0.2s "Yeah.".
-        short = [c for c in sample_cues if c["end"] - c["start"] < MIN_CUE_DUR]
-        assert short == [], f"cues shorter than {MIN_CUE_DUR}s: {short}"
+        # One documented exception: a complete sentence sitting right before a
+        # question may ship slightly under the floor, because merging it into the
+        # question is the judged spoiler defect (the viewer reads the next question
+        # while this one is being answered) and the engine refuses. Slightly under —
+        # never a flash.
+        for cue, following in zip(sample_cues, sample_cues[1:] + [None]):
+            duration = cue["end"] - cue["start"]
+            if duration >= MIN_CUE_DUR:
+                continue
+            assert duration >= 1.0, f"flash cue: {cue}"
+            assert following is not None and following["text"].rstrip().endswith(
+                "?"
+            ), f"below-floor cue not explained by the question guard: {cue}"
 
     def test_monotonic_and_non_overlapping(self, sample_cues):
         assert len(sample_cues) > 1
@@ -83,11 +94,20 @@ class TestWordsToCuesOnRealClip:
         # The answer must never share the cue with the question.
         assert sample_cues[idx + 1]["text"].startswith("Yeah, I think about it.")
 
-    def test_short_fragment_is_merged_into_its_sentence(self, sample_cues):
+    def test_complete_sentence_is_never_glued_to_the_next_question(self, sample_cues):
+        """The reversal of what this test used to pin, on judged evidence.
+
+        The old behaviour merged the 0.94s "It could complicate things." INTO
+        "Do you worry about that?" — a complete sentence glued to the question that
+        follows it. In a rapid interview that exact merge put the interviewer's NEXT
+        question on screen 2.5 seconds before it was asked. The engine now keeps the
+        statement alone (a hair under the duration floor, logged as a compromise)
+        and the question arrives when it is asked.
+        """
         texts = [c["text"] for c in sample_cues]
-        assert "It could complicate things." not in texts, "0.94s fragment left alone"
-        holder = next(t for t in texts if "complicate things." in t)
-        assert "Do you worry about that?" in holder
+        assert "It could complicate things." in texts
+        holder = next(t for t in texts if "Do you worry about that?" in t)
+        assert "complicate things" not in holder
 
     def test_netflix_line_limits(self, sample_cues):
         for cue in sample_cues:
@@ -115,8 +135,14 @@ class TestWordsToCuesOnRealClip:
 
     def test_min_gap_is_respected_between_cues(self, sample_cues):
         # Lead-out extends into dead air but leaves the default 0.08s breath.
+        # Exception mirrors test_no_flash_cues: a below-floor sentence that the
+        # question guard refused to merge takes every millisecond up to the next
+        # cue's start — duration was judged worth more than the breath there.
         for previous, following in zip(sample_cues, sample_cues[1:]):
             gap = following["start"] - previous["end"]
+            if previous["end"] - previous["start"] < MIN_CUE_DUR:
+                assert gap >= -1e-6, (previous, following, gap)
+                continue
             assert gap >= 0.08 - 1e-6, (previous, following, gap)
 
 
@@ -1136,8 +1162,15 @@ class TestMinDurationFloor:
             assert cue["end"] - cue["start"] >= MIN_CUE_DUR - self.TOL, cue
 
     def test_no_cue_below_the_floor_on_the_real_fixture(self, sample_cues):
-        for cue in sample_cues:
-            assert cue["end"] - cue["start"] >= MIN_CUE_DUR - self.TOL, cue
+        # Same single documented exception as TestWordsToCuesOnRealClip
+        # .test_no_flash_cues: the question guard may leave one complete sentence
+        # a hair under the floor rather than spoil the next question.
+        for cue, following in zip(sample_cues, sample_cues[1:] + [None]):
+            duration = cue["end"] - cue["start"]
+            if duration >= MIN_CUE_DUR - self.TOL:
+                continue
+            assert duration >= 1.0, cue
+            assert following is not None and following["text"].rstrip().endswith("?")
 
     def test_property_no_short_cues_across_many_random_transcripts(self, caplog):
         """Property test: over 200 pseudo-random transcripts, every emitted cue meets
