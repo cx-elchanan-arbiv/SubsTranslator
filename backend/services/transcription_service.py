@@ -21,6 +21,7 @@ from core.exceptions import (
 )
 from logging_config import get_logger
 from performance_monitor import performance_monitor
+from services.subtitle_engine import IMPOSSIBLE_WORDS_PER_SEC
 from services.translation_services import get_translator
 from services.whisper_smart import smart_whisper
 
@@ -149,6 +150,296 @@ def asr_primer_for(source_lang) -> str:
 #: the primer fabricate a sentence. The answer was to fix the primer (see its docstring),
 #: not to disable the mechanism carrying it.
 ASR_CONDITION_ON_PREVIOUS_TEXT = True
+
+
+# =============================================================================
+# Fabrication guards (v2 path only)
+# =============================================================================
+# Everything below is PURE — arrays and dicts in, arrays and dicts out, no model, no
+# clock, no logging. That is deliberate: these are the rules that decide what reaches
+# the viewer, and a rule you cannot unit-test is a rule you are hoping about.
+
+
+def _trim_trailing_silence(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    threshold: float = 0.004,
+    pad_s: float = 0.35,
+) -> tuple[np.ndarray, float]:
+    """Cut the dead air off the END of the audio, so Whisper has nothing to invent into.
+
+    THE MEASURED FAILURE: Whisper decodes in fixed windows, and a window holding the
+    last of the speech plus a stretch of silence is still a window it must emit tokens
+    for — so it writes something. Three judged clips, three shapes of the same defect:
+    0.72s of trailing silence produced the invented sentence "It stuck. That's what
+    it's all about."; a second clip grew an entire phantom segment sitting in digital
+    silence; a third fell into a repeat loop on the tail. The audio after the last
+    spoken word carries nothing the transcript needs, so the cheapest fix available is
+    to stop handing it to the decoder.
+
+    Only the TAIL is touched, never the head. A clip's opening is where a quiet first
+    syllable lives, and this pipeline has already lost a first second once (see the
+    beam-size note in :func:`transcribe_with_words`); trimming the front would be
+    re-buying that bug to solve a different one.
+
+    ``pad_s`` of silence is deliberately LEFT IN PLACE. Whisper needs the release of the
+    final word — an abrupt cut on the last loud sample truncates it into something else.
+
+    Args:
+        audio: mono float samples, as produced by :func:`_extract_audio_np`.
+        sample_rate: samples per second of ``audio`` (16000 on this path).
+        threshold: absolute amplitude above which a sample counts as SOUND. 0.004 is
+            roughly -48 dBFS — under room tone, over the dither floor of a silent
+            digital track.
+        pad_s: how much silence to keep after the last such sample.
+
+    Returns:
+        ``(audio, seconds_trimmed)``. The INPUT array is returned unchanged (and
+        ``0.0``) when there is nothing to do: empty input, no sample anywhere above
+        ``threshold`` (a silent or pathologically quiet track is not something to
+        truncate to nothing), or a tail already no longer than ``pad_s``.
+    """
+    if audio is None or len(audio) == 0 or sample_rate <= 0:
+        return audio, 0.0
+
+    loud = np.nonzero(np.abs(audio) > threshold)[0]
+    if loud.size == 0:
+        return audio, 0.0
+
+    keep = int(loud[-1]) + 1 + int(round(max(0.0, pad_s) * sample_rate))
+    if keep >= len(audio):
+        return audio, 0.0
+    return audio[:keep], (len(audio) - keep) / float(sample_rate)
+
+
+def _normalized_segment_text(text: str) -> str:
+    """Case- and punctuation-insensitive form, for spotting a verbatim repeat.
+
+    Mirrors ``subtitle_engine._normalized_text`` rather than importing it: that one is
+    private to the gate it serves, and these two comparisons must be free to diverge —
+    this module compares RAW ASR segments, that one compares finished cues.
+    """
+    return " ".join(
+        "".join(
+            ch for ch in str(text or "").lower() if ch.isalnum() or ch.isspace()
+        ).split()
+    )
+
+
+def _segment_suspects(segments: list[dict]) -> list[dict]:
+    """Raw ASR segments that cannot be a recording of what was said.
+
+    WHY THIS EXISTS AT SEGMENT LEVEL, when ``subtitle_engine.drop_hallucinated_cues``
+    already gates CUES: by the time a cue exists, ``words_to_cues`` has re-spotted the
+    transcript, and re-spotting DILUTES timing — it hands a cue the silence around it,
+    so a fabrication's impossible speech rate is averaged away before anything measures
+    it. Judged evidence: 9 invented words packed into 0.44s (20 words/second) sailed
+    through the cue gate intact, and elsewhere invented runs measured 7.5-7.7 w/s and
+    slid under the old 8.0 cue threshold. Measured on the RAW segment, against the
+    timestamps Whisper itself produced, both are obvious.
+
+    Two signals, both closed-form, both already paid for by the corpus:
+
+    * **impossible words per second** — over :data:`subtitle_engine.IMPOSSIBLE_WORDS_PER_SEC`,
+      a bound on the physics of speech (see that constant). A segment with text and a
+      zero or negative duration is the same claim in its purest form: words stamped on
+      no time at all.
+    * **verbatim repeat of the previous segment** — Whisper's decode loop, which emits
+      the same sentence over and over once it latches. Compared with punctuation,
+      casing and whitespace normalised away, because the loop varies those.
+
+    Blank segments are never suspect: there is no fabrication in a segment with no
+    words, and they are skipped for the repeat comparison too so two empties in a row
+    are not read as a loop.
+
+    Pure: the input list and its dicts are not mutated.
+
+    Returns:
+        Copies of the suspect segments in input order, each carrying ``suspect_reason``
+        (a short greppable string) and ``index`` (its position in ``segments``, so the
+        caller can drop exactly these and nothing that merely looks like them).
+    """
+    suspects: list[dict] = []
+    previous_norm = ""
+
+    for index, segment in enumerate(segments or []):
+        text = str((segment or {}).get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            start = float(segment.get("start", 0) or 0)
+            duration = float(segment.get("end", 0) or 0) - start
+        except (TypeError, ValueError):
+            start, duration = 0.0, 0.0
+
+        normalized = _normalized_segment_text(text)
+        reason = None
+        if duration <= 0:
+            reason = "impossible_wps(no_duration)"
+        else:
+            words_per_sec = len(text.split()) / duration
+            if words_per_sec > IMPOSSIBLE_WORDS_PER_SEC:
+                reason = (
+                    f"impossible_wps({words_per_sec:.2f}>"
+                    f"{IMPOSSIBLE_WORDS_PER_SEC:.2f})"
+                )
+        if reason is None and normalized and normalized == previous_norm:
+            reason = "repeat_of_previous"
+
+        previous_norm = normalized
+        if reason:
+            suspects.append(dict(segment, suspect_reason=reason, index=index))
+
+    return suspects
+
+
+def _choose_asr_pass(
+    unprimed_suspects: int, primed_suspects: int, *, attractor: bool
+) -> tuple[str, str]:
+    """Which of the two ASR passes to ship: ``("unprimed"|"primed", why)``.
+
+    The primed re-run exists for two different reasons and they want opposite tie-breaks,
+    so the rule is written down here once instead of being spread through the caller:
+
+    * **Fewer fabrications wins.** That is the whole point of running twice — the primer
+      is known to change what the model HEARS (it once rewrote "work out how" into
+      "work hard"), so it is neither trusted nor distrusted by default. It is measured.
+    * **A tie goes to the unprimed pass**, because the unprimed transcript is the one
+      that did not have a sentence of someone else's text prepended to it, and a
+      re-run that bought nothing should not be paid for in decode drift.
+    * **Except under the unpunctuated attractor**, where a tie goes to the PRIMED pass.
+      That re-run was triggered by a transcript with zero terminal punctuation, which
+      breaks every downstream stage (see :data:`ASR_PUNCTUATION_PRIMER`); a tie on
+      fabrications means the primer cost nothing and fixed the thing it was called for.
+
+    Pure, and takes COUNTS rather than lists so the decision can be read and tested on
+    its own.
+    """
+    if primed_suspects < unprimed_suspects:
+        return "primed", (
+            f"primed pass has fewer impossible segments "
+            f"({primed_suspects} < {unprimed_suspects})"
+        )
+    if primed_suspects > unprimed_suspects:
+        return "unprimed", (
+            f"primed pass invented more ({primed_suspects} > {unprimed_suspects}) — "
+            "keeping the first pass"
+        )
+    if attractor:
+        return "primed", (
+            f"tie on impossible segments ({unprimed_suspects}) — keeping the primed "
+            "pass, which is the one that escaped the unpunctuated attractor"
+        )
+    return "unprimed", (
+        f"tie on impossible segments ({unprimed_suspects}) — keeping the unprimed "
+        "first pass, which the primer cannot have rewritten"
+    )
+
+
+def _covers(word: dict, start: float, end: float) -> bool:
+    """Does this word entry fall inside ``[start, end]``?
+
+    Overlap, not containment: Whisper's word times and its segment times come from
+    different passes and disagree at the edges by a tick or two. The second clause
+    catches a zero-length span, where nothing can overlap anything.
+    """
+    try:
+        word_start = float(word.get("s", 0) or 0)
+        word_end = float(word.get("e", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return (word_end > start and word_start < end) or (start <= word_start <= end)
+
+
+def _drop_segments(
+    segments: list[dict], words: list[dict], suspects: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Remove suspect segments and the word entries sitting inside their time spans.
+
+    Words are removed BY TIME, not by matching text: the word list is a flat stream with
+    no segment ids on it, and leaving a dropped segment's words behind would put the
+    fabrication straight back on screen through ``words_to_cues``, which spots from
+    words alone.
+
+    Pure: new lists of the same dicts; nothing is mutated. Suspects are identified by
+    the ``index`` key :func:`_segment_suspects` annotates them with.
+    """
+    drop_at = {s["index"] for s in suspects if "index" in s}
+    if not drop_at:
+        return list(segments or []), list(words or [])
+
+    spans = []
+    for index in sorted(drop_at):
+        segment = segments[index]
+        try:
+            spans.append(
+                (float(segment.get("start", 0) or 0), float(segment.get("end", 0) or 0))
+            )
+        except (TypeError, ValueError):
+            continue
+
+    kept_segments = [s for i, s in enumerate(segments or []) if i not in drop_at]
+    kept_words = [
+        w
+        for w in (words or [])
+        if not any(_covers(w, start, end) for start, end in spans)
+    ]
+    return kept_segments, kept_words
+
+
+def _word_loss_report(
+    segments: list[dict], words: list[dict], *, min_gap: int = 2
+) -> list[dict]:
+    """Segments whose TEXT carries words the word list does not — visibility only.
+
+    THE MEASURED FAILURE: a profanity present in a segment's text was simply absent from
+    the ASR word list. ``words_to_cues`` spots from words, so the rebuilt cue silently
+    dropped it — and the delivered file said the opposite of the source, with nothing
+    anywhere in the logs to say a word had gone missing. The two outputs of one Whisper
+    pass are allowed to disagree; disagreeing SILENTLY is what made this expensive.
+
+    This filters nothing and fixes nothing. It exists so the next occurrence is one grep
+    away instead of one re-listen away.
+
+    Args:
+        min_gap: how many more whitespace tokens the segment text must have than the
+            words covering its span before it is worth a line in the log. Off-by-one is
+            routine — Whisper hyphenates and re-joins at window edges — so 2 is the
+            smallest gap that is not just tokenisation noise.
+
+    Returns:
+        ``[{"start", "end", "text_tokens", "word_tokens", "gap"}]``, in segment order.
+        Empty when there are no words at all: that is the Gemini/no-word-timestamps
+        case, which is reported elsewhere and is not a per-segment loss.
+    """
+    if not segments or not words:
+        return []
+
+    report: list[dict] = []
+    for segment in segments:
+        text = str((segment or {}).get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            start = float(segment.get("start", 0) or 0)
+            end = float(segment.get("end", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        text_tokens = len(text.split())
+        word_tokens = sum(1 for w in words if _covers(w, start, end))
+        gap = text_tokens - word_tokens
+        if gap >= min_gap:
+            report.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "text_tokens": text_tokens,
+                    "word_tokens": word_tokens,
+                    "gap": gap,
+                }
+            )
+    return report
 
 
 def transcribe_and_translate_streamed(
@@ -952,6 +1243,12 @@ def transcribe_with_words(
     ``condition_on_previous_text``) is still shared, so a v2/legacy comparison of the
     same request still isolates the flags plus this one prompt.
 
+    What this returns is not raw Whisper output. Three guards run over it, each one
+    bought with a measured defect that reached a delivered file:
+    :func:`_trim_trailing_silence` before the decode, :func:`_segment_suspects` +
+    :func:`_choose_asr_pass` + :func:`_drop_segments` after it, and
+    :func:`_word_loss_report` as a pure log. Only the third changes nothing.
+
     Args:
         collect_words: gather per-word timestamps. Whisper is asked for them either way
             (``word_timestamps=True``, as the legacy path already does), so this only
@@ -962,10 +1259,10 @@ def transcribe_with_words(
         "words": [{"s","e","w"}, ...], "language": str, "asr_primed": bool}``.
         ``words`` is EMPTY for the Gemini model, which returns no word timing — callers
         that need spotting must fall back to segment-based cues in that case.
-        ``asr_primed`` reports whether punctuation priming was actually applied (false
-        for Gemini and for FAKE mode); ``subtitle_engine.words_to_cues`` takes it so its
-        unpunctuated-ASR fallback can say whether it fired *despite* the primer, which
-        is a materially different (and much more interesting) event.
+        ``asr_primed`` reports whether the pass that was actually SHIPPED used the
+        primer (false for Gemini and for FAKE mode); ``subtitle_engine.words_to_cues``
+        takes it so its unpunctuated-ASR fallback can say whether it fired *despite* the
+        primer, which is a materially different (and much more interesting) event.
     """
     logger.info("🚀 === v2 transcription (word timestamps retained) ===")
 
@@ -1075,6 +1372,18 @@ def transcribe_with_words(
         f"condition_on_previous_text={ASR_CONDITION_ON_PREVIOUS_TEXT}"
     )
 
+    # Silence at the end of the file is the cheapest hallucination there is — see
+    # :func:`_trim_trailing_silence`. Done here, on the decoder's input only:
+    # ``audio_duration`` still describes the MEDIA, so progress and the performance
+    # log keep reporting the clip the user submitted.
+    audio_np, trimmed_s = _trim_trailing_silence(audio_np, 16000)
+    if trimmed_s >= 0.5:
+        logger.info(
+            "✂️ v2 transcription: trimmed %.2fs of trailing silence before ASR — "
+            "that is decode window Whisper would have had to emit tokens for",
+            trimmed_s,
+        )
+
     transcription_start = time.time()
 
     def _materialize(run_options):
@@ -1121,25 +1430,92 @@ def transcribe_with_words(
     # showed the primer occasionally REWRITES large's hearing ("work out how" ->
     # "work hard"), so large now starts unprimed; the ablation above showed some
     # clips fall into the unpunctuated attractor without it. So: trust large first,
-    # and only when the transcript comes back with the attractor's signature —
-    # enough words to be a real transcript, zero terminal punctuation — pay for one
-    # primed re-run. Clips that punctuate cleanly (the common case at beam 5) never
-    # see the primer at all.
+    # and pay for one primed re-run only when the first pass shows damage. Clips that
+    # come back clean (the common case at beam 5) never see the primer at all.
+    #
+    # TWO triggers now, not one. The attractor signature (enough words to be a real
+    # transcript, zero terminal punctuation) was the original. The second is
+    # FABRICATION: :func:`_segment_suspects` measuring text that cannot have been
+    # spoken in the time it is stamped on. Which pass then ships is decided by
+    # measurement, not by which one ran second — see :func:`_choose_asr_pass`.
+    chosen_primed = options["initial_prompt"] is not None
     transcript, terminals = _terminal_count(segments)
-    if (
-        options["initial_prompt"] is None
-        and terminals == 0
-        and len(transcript.split()) >= 40
-    ):
+    suspects = _segment_suspects(segments)
+    attractor = terminals == 0 and len(transcript.split()) >= 40
+
+    if not chosen_primed and (attractor or suspects):
         logger.warning(
-            "⚠️ v2 transcription: unpunctuated-attractor signature on unprimed "
-            "large (%d words, 0 terminals) — re-running once with the punctuation "
-            "primer",
+            "⚠️ v2 transcription: re-running once WITH the punctuation primer — "
+            "unprimed pass shows %s (%d words, %d terminals, %d impossible segment(s))",
+            (
+                "the unpunctuated-attractor signature and fabrication"
+                if attractor and suspects
+                else (
+                    "the unpunctuated-attractor signature"
+                    if attractor
+                    else "fabrication"
+                )
+            ),
             len(transcript.split()),
+            terminals,
+            len(suspects),
         )
-        options["initial_prompt"] = asr_primer_for(source_lang)
-        segments, words, info = _materialize(options)
-        detected_language = info.language
+        primed_options = dict(options, initial_prompt=asr_primer_for(source_lang))
+        try:
+            primed_segments, primed_words, primed_info = _materialize(primed_options)
+        except Exception as exc:  # noqa: BLE001 - a second opinion may never fail a job
+            logger.warning(
+                "⚠️ v2 transcription: the primed re-run failed (%s) — keeping the "
+                "unprimed pass",
+                exc,
+            )
+        else:
+            primed_suspects = _segment_suspects(primed_segments)
+            choice, why = _choose_asr_pass(
+                len(suspects), len(primed_suspects), attractor=attractor
+            )
+            # THE audit line: every later "why did this clip ship what it shipped?"
+            # starts here, so it carries both measurements and the rule that used them.
+            logger.info(
+                "🎚️ v2 ASR pass selection: chose the %s pass — %s "
+                "(unprimed: %d segments/%d impossible; primed: %d segments/%d impossible)",
+                choice,
+                why,
+                len(segments),
+                len(suspects),
+                len(primed_segments),
+                len(primed_suspects),
+            )
+            if choice == "primed":
+                chosen_primed = True
+                segments, words, info = primed_segments, primed_words, primed_info
+                suspects = primed_suspects
+                detected_language = info.language
+        transcript, terminals = _terminal_count(segments)
+
+    # Drop what cannot have been said. These are not "probably wrong" cues — they are
+    # words with no time to have been spoken in, and verbatim decode loops; both
+    # measured classes, both physically impossible rather than merely suspicious. Left
+    # in, they reach the viewer as invented dialogue, and (worse) as invented dialogue
+    # the translator then makes fluent.
+    if suspects:
+        for suspect in suspects:
+            logger.warning(
+                "🚫 v2 ASR: dropping fabricated segment %.2f-%.2fs [%s]: %r",
+                float(suspect.get("start", 0) or 0),
+                float(suspect.get("end", 0) or 0),
+                suspect.get("suspect_reason"),
+                str(suspect.get("text") or "").strip()[:80],
+            )
+        before_words = len(words)
+        segments, words = _drop_segments(segments, words, suspects)
+        logger.warning(
+            "🚫 v2 ASR: dropped %d fabricated segment(s) and %d of their word "
+            "timestamps — %d segments remain",
+            len(suspects),
+            before_words - len(words),
+            len(segments),
+        )
         transcript, terminals = _terminal_count(segments)
 
     transcription_duration = time.time() - transcription_start
@@ -1151,6 +1527,21 @@ def transcribe_with_words(
         logger.warning(
             "⚠️ v2 transcription: Whisper returned no word timestamps for %d segments",
             len(segments),
+        )
+
+    # Segments whose text says more than their words do — see :func:`_word_loss_report`.
+    # Nothing is filtered here; this is the log line that turns "the delivered file lost
+    # a word and inverted a sentence" from an audit finding into a grep.
+    for loss in _word_loss_report(segments, words):
+        logger.warning(
+            "⚠️ v2 ASR word loss: segment %.2f-%.2fs has %d text tokens but only %d "
+            "word timestamps (%d missing) — spotting rebuilds cues from WORDS, so "
+            "those tokens will not reach the viewer",
+            loss["start"],
+            loss["end"],
+            loss["text_tokens"],
+            loss["word_tokens"],
+            loss["gap"],
         )
 
     # Punctuation health of the transcript we actually got. This is the read-out that
@@ -1165,7 +1556,7 @@ def transcribe_with_words(
         commas,
         capitals,
         len(transcript),
-        "off" if options["initial_prompt"] is None else "on",
+        "off" if not chosen_primed else "on",
     )
     if segments and terminals == 0:
         logger.warning(
@@ -1186,10 +1577,15 @@ def transcribe_with_words(
         )
 
     return {
+        # Whether the pass that actually SHIPPED carried a primer — not whether one was
+        # configured, and not whether a primed run happened. This used to be a hardcoded
+        # True, which made it a lie on every unprimed `large` job and therefore made
+        # ``words_to_cues``'s "unpunctuated DESPITE the primer" signal — the whole reason
+        # the flag is passed down — report the opposite of what occurred.
+        "asr_primed": chosen_primed,
         "segments": segments,
         "words": words,
         "language": detected_language,
-        "asr_primed": True,
     }
 
 

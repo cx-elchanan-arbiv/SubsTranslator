@@ -44,6 +44,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 
 try:  # pinned: openai==1.35.13
@@ -386,6 +387,88 @@ def normalize_glossary(glossary) -> dict:
     return clean
 
 
+#: A Latin term worth locking: starts with a capital, ends on a letter or digit, and may
+#: carry ``&``, ``.`` or ``-`` inside (``AT&T``, ``U.S.``, ``COVID-19``). Applied to BOTH
+#: sides of a chunk, which is what makes trailing sentence punctuation harmless — "Trump."
+#: reduces to ``Trump`` in the source and in the translation alike.
+_LATIN_TERM_RE = re.compile(r"[A-Z][A-Za-z0-9&.\-]*[A-Za-z0-9]")
+
+
+def _is_lockable_term(token: str) -> bool:
+    """Is this Latin token the KIND of thing a video must spell the same way twice?
+
+    Two shapes, both chosen because they are what actually drifted: an ACRONYM (all
+    caps, 2+ characters — AIPAC, ISIS, US) and a PROPER NAME (capitalised, 3+
+    characters). Everything else — lowercase words, single letters, "A" — is ordinary
+    vocabulary, and pinning ordinary vocabulary to one rendering would freeze the
+    translator's grammar, not its terminology.
+    """
+    if not token or not token[0].isupper():
+        return False
+    letters = [ch for ch in token if ch.isalpha()]
+    if not letters:
+        return False
+    if all(ch.isupper() for ch in letters):
+        return len(token) >= 2
+    return len(token) >= 3
+
+
+def _harvest_latin_locks(
+    source_texts: list[str], translated_texts: list[str]
+) -> dict[str, str]:
+    """Terms this chunk left in Latin script, as glossary entries for the NEXT chunk.
+
+    THE MEASURED FAILURE: on a 5-minute video, AIPAC stayed Latin through chunk 1 and
+    turned into "איפא״ק" at its first appearance in chunk 2; ISIS and the spelling of
+    "אסלאם" drifted the same way. Nothing was wrong with either rendering on its own —
+    the fault is that one video used both, and each chunk is a separate request with no
+    memory of the last one's decisions.
+
+    The harvest is deliberately narrow: a term is locked ONLY when it appears in the
+    chunk's source AND survives VERBATIM in the chunk's translation. That single test
+    does the work of a whole heuristic — a term the model chose to transliterate or
+    translate is simply absent from the translation and is never locked, so this can
+    only ever say "you already kept this one in Latin, keep doing that", which is the
+    exact drift that was measured. It never pushes a rendering the model did not itself
+    produce.
+
+    Pure. Returns ``{token: token}`` (identity mappings — the lock IS "leave it alone"),
+    empty when nothing qualifies.
+    """
+    kept = set()
+    for text in translated_texts or []:
+        kept.update(_LATIN_TERM_RE.findall(str(text or "")))
+    if not kept:
+        return {}
+
+    locks: dict[str, str] = {}
+    for text in source_texts or []:
+        for token in _LATIN_TERM_RE.findall(str(text or "")):
+            if token in kept and _is_lockable_term(token):
+                locks[token] = token
+    return locks
+
+
+def _merge_locks(glossary, locks: dict) -> dict:
+    """The caller's glossary plus harvested term locks, caller's entries winning.
+
+    Order matters twice over. The caller's entries are inserted FIRST so that
+    :data:`MAX_GLOSSARY_ENTRIES` truncation on a long video drops harvested locks rather
+    than the terms a human explicitly asked for; and ``setdefault`` means a term the
+    caller pinned is never overwritten by whatever the model happened to do with it in
+    chunk 1. Locks stop being added at the cap for the same reason — so the prompt never
+    has to be built from an over-long glossary and log a warning per chunk.
+
+    Pure.
+    """
+    merged = normalize_glossary(glossary)
+    for token, rendering in (locks or {}).items():
+        if len(merged) >= MAX_GLOSSARY_ENTRIES:
+            break
+        merged.setdefault(token, rendering)
+    return merged
+
+
 def build_system_prompt(
     target_lang: str,
     style: str = "clean",
@@ -464,6 +547,17 @@ def build_system_prompt(
         "PRESERVE sentence punctuation: . , ? ! — every cue must end with proper "
         "punctuation.",
         filler_rule,
+        # Measured twice in judged rounds: "Fucking shit" came back as "איזה שטויות"
+        # ("what nonsense"), and in another run a profanity was silently deleted — the
+        # cue shipped without it and nothing said so. Both times the model was doing
+        # what it thought was a favour.
+        "PROFANITY, insults and vulgarity are MEANING, not noise. Translate them at "
+        "the SOURCE'S FULL INTENSITY, using the equivalent register in "
+        f"{lang} — an angry speaker stays angry, a crude speaker stays crude. Never "
+        "soften them into mild words, never censor or asterisk them, and never delete "
+        "them. This is not a matter of taste: a subtitle that tones a speaker down is "
+        'reporting a different person saying a different thing. The "clean" style '
+        "removes FILLER — never profanity.",
         'PRESERVE deliberate rhetorical repetition. "a great, great honor" is a '
         "speech pattern, not a stutter — render both words. Collapsing it to one "
         "flattens the speaker. (Genuine stutters and false starts follow the filler "
@@ -477,6 +571,16 @@ def build_system_prompt(
         "than exceed it.",
         "Numbers one to ten are spelled out in words; 11 and above stay as numerals.",
         "Keep proper nouns and well-known Latin acronyms as-is (ICC).",
+        # Measured on a 5-minute video: AIPAC stayed Latin for the whole of chunk 1 and
+        # became "איפא״ק" at its first occurrence in chunk 2; ISIS and the spelling of
+        # "אסלאם" drifted the same way. Each chunk is a separate request, so each one
+        # re-decides — and a viewer watching one video sees one term wearing two names.
+        "A recurring name, acronym or term must be rendered IDENTICALLY every time it "
+        "appears — throughout the WHOLE video, not merely within the cues in front of "
+        "you. Pick one rendering (one script, one spelling) and never switch to another "
+        "later. Any term list below may carry renderings ALREADY USED EARLIER IN THIS "
+        "SAME VIDEO: reuse those exactly, even where you would have chosen differently "
+        "— consistency across the video outranks your preference within this batch.",
         # "Fear Factor" came back as "פחד גורם" — two words that mean "fear" and
         # "causing", in that order, which is not a title, not a phrase and not Hebrew.
         # The same clip got "Survivor" and "The Amazing Race" right, because those two
@@ -1101,6 +1205,12 @@ def translate_cues(
         context on either side; those overlap cues are marked ``[CONTEXT-ONLY]`` and are
         not re-emitted, so every cue is translated exactly once.
 
+        Chunks are separate requests and so decide terminology separately — measured:
+        AIPAC Latin in chunk 1, "איפא״ק" in chunk 2. Every chunk therefore feeds the
+        terms it kept in Latin script forward as glossary entries for the ones after it
+        (:func:`_harvest_latin_locks`, merged by :func:`_merge_locks` with the caller's
+        glossary winning). A single-chunk job builds exactly the prompt it always did.
+
     Raises:
         TranslationV2Error: if the model omits cue ids even after one targeted retry.
             Source text is never substituted for a missing translation.
@@ -1154,6 +1264,10 @@ def translate_cues(
 
     total = len(out)
     bounds = _chunk_bounds(total)
+    # Terms this video has already committed to, harvested chunk by chunk and fed
+    # forward as glossary entries — see :func:`_harvest_latin_locks`. Empty on chunk 1,
+    # which therefore builds the byte-identical prompt it always did.
+    locks: dict[str, str] = {}
     for chunk_index, (chunk_start, chunk_end) in enumerate(bounds):
         target_ids = [
             i
@@ -1193,10 +1307,23 @@ def translate_cues(
             key=lambda item: item[0],
         )
 
+        # The term lock costs one extra prompt build per chunk and nothing else. With no
+        # locks yet (chunk 1, or a proofread) the prompt object built above is reused
+        # unchanged.
+        chunk_system = system
+        if locks:
+            chunk_system = build_prompt(
+                target_lang,
+                style,
+                max_chars_per_cue=max_chars_per_cue,
+                context_note=context_note,
+                glossary=_merge_locks(glossary, locks),
+            )
+
         translated = _request_cue_map(
             client,
             model,
-            system,
+            chunk_system,
             build_user_prompt(target_lang, items, mode=mode),
             usage,
             recorder=recorder,
@@ -1230,7 +1357,7 @@ def translate_cues(
                 retry_translations = _request_cue_map(
                     client,
                     model,
-                    system,
+                    chunk_system,
                     build_user_prompt(target_lang, retry_items, mode=mode),
                     usage,
                     recorder=recorder,
@@ -1253,6 +1380,24 @@ def translate_cues(
 
         for cue_id, text in translated.items():
             out[cue_id - 1]["translated"] = text
+
+        # Harvest AFTER the chunk is complete, so a retry's answers are included.
+        # Never in proofread mode: source and target are the same language there, so
+        # "the term survived verbatim" is true of every word and carries no information.
+        if not proofread:
+            found = _harvest_latin_locks(
+                [texts[i] for i in target_ids if i in texts],
+                [translated[i] for i in target_ids if i in translated],
+            )
+            fresh = {t: r for t, r in found.items() if t not in locks}
+            if fresh:
+                logger.info(
+                    "translation_v2: term lock — chunk %d kept %s in Latin script; "
+                    "later chunks are told to do the same",
+                    chunk_index + 1,
+                    ", ".join(sorted(fresh)),
+                )
+            locks.update(fresh)
 
         _report(
             progress_callback,
@@ -1686,6 +1831,44 @@ def _choose_candidate(original, candidates, limit):
     return best, len(best) <= limit, rejections
 
 
+#: The marks a punctuation-only edit is measured over: everything
+#: :data:`_WORD_STRIP` knows about except whitespace.
+_PUNCT_MARKS = frozenset(_WORD_STRIP) - frozenset(" \t\r\n")
+
+
+def _depunctuated(text: str) -> str:
+    """The same text with every punctuation mark removed and whitespace collapsed."""
+    return " ".join(
+        "".join(ch for ch in str(text or "") if ch not in _PUNCT_MARKS).split()
+    )
+
+
+def _punctuation_only_edit(original: str, candidate: str) -> bool:
+    """Is this "rewrite" nothing but the deletion of punctuation?
+
+    MEASURED: a re-ask came back having deleted a comma — same words, same order, one
+    character shorter. That is not a condensation; it is a cue with its clause boundary
+    removed, shipped as though the model had solved something. It saves nothing a viewer
+    can perceive and costs the reader the pause the sentence was built around, and this
+    pipeline spends real effort upstream getting that punctuation to exist at all (see
+    ``transcription_service.ASR_PUNCTUATION_PRIMER``).
+
+    Both conditions must hold: identical once punctuation is removed, AND fewer marks
+    than the original. A rewrite that ADDS or MOVES punctuation while changing the words
+    is a different (and legitimate) thing and is not caught here.
+
+    Pure.
+    """
+    original, candidate = str(original or "").strip(), str(candidate or "").strip()
+    if not original or not candidate:
+        return False
+    if _depunctuated(original) != _depunctuated(candidate):
+        return False
+    return sum(ch in _PUNCT_MARKS for ch in candidate) < sum(
+        ch in _PUNCT_MARKS for ch in original
+    )
+
+
 def enforce_cps(
     cues,
     *,
@@ -1729,7 +1912,12 @@ def enforce_cps(
     5. **Re-ask, once** — for every cue that is still over the limit *by more than the
        same margin that let it into the pass*. The re-ask is given the original text,
        the limit and the failed attempt, and the winner is chosen by
-       :func:`_choose_candidate` — the longest LEGAL candidate that fits.
+       :func:`_choose_candidate` — the longest LEGAL candidate that fits. Two guards
+       stand around that choice, both bought with measured releases: a candidate whose
+       only change is deleting punctuation is thrown out before the choice
+       (:func:`_punctuation_only_edit`), and if nothing FITS the ORIGINAL is kept rather
+       than the shortest near-miss — a rewrite that leaves the cue over budget has
+       improved nothing and can only have cost meaning.
 
     Why the floor is guidance and not a threshold: the first version of this pass had
     only a ceiling, and the model duly obeyed it by deleting whatever it liked — it cut
@@ -1741,10 +1929,10 @@ def enforce_cps(
     "איפה את" out of "איפה אתם?". Step 4 replaces the proxy with the measurement.
 
     This pass improves readability but never blocks delivery: a failed batch leaves that
-    batch's cues untouched, and a cue that cannot be fixed keeps the best available text
-    with a warning. When readability and meaning genuinely conflict, meaning wins and the
-    cue ships over budget — an over-fast correct subtitle is a readability cost, an
-    amputated one is a translation error.
+    batch's cues untouched, and a cue that cannot be fixed keeps its ORIGINAL text with a
+    warning. When readability and meaning genuinely conflict, meaning wins and the cue
+    ships over budget — an over-fast correct subtitle is a readability cost, an amputated
+    one is a translation error.
 
     Args:
         cues: cue dicts with ``start``, ``end`` and ``translated`` (as produced by
@@ -1937,11 +2125,26 @@ def enforce_cps(
 
         for cue_id, (attempt, _why) in reask.items():
             limit = budgets[cue_id]
-            best, fits, rejections = _choose_candidate(
-                originals[cue_id],
-                [attempt, (second.get(cue_id) or "").strip()],
-                limit,
-            )
+            original = originals[cue_id]
+
+            # GUARD 1, before the chooser sees them: a candidate whose only change is
+            # deleting punctuation is not a candidate — see :func:`_punctuation_only_edit`.
+            candidates = []
+            for candidate in (attempt, (second.get(cue_id) or "").strip()):
+                if not candidate:
+                    continue
+                if _punctuation_only_edit(original, candidate):
+                    refused += 1
+                    logger.warning(
+                        "translation_v2.enforce_cps: refused a candidate for cue %d "
+                        "(deletes punctuation and changes nothing else) — %r",
+                        cue_id,
+                        candidate,
+                    )
+                    continue
+                candidates.append(candidate)
+
+            best, fits, rejections = _choose_candidate(original, candidates, limit)
             for candidate, why in rejections:
                 if candidate == attempt:
                     continue  # already counted and logged when the batch produced it
@@ -1953,17 +2156,27 @@ def enforce_cps(
                     why,
                     candidate,
                 )
-            out[cue_id - 1]["translated"] = best
+
+            # GUARD 2: the re-ask is the LAST chance, so a rewrite that is still over the
+            # limit has bought nothing — it did not make the cue readable, and every
+            # rewrite carries the risk of having quietly dropped a word (measured: one
+            # was released over the limit having done exactly that). Over budget for
+            # over budget, the text nobody rewrote is the safer one.
             if not fits:
                 still_over += 1
+                out[cue_id - 1]["translated"] = original
                 logger.warning(
-                    "translation_v2.enforce_cps: cue %d still over budget after a "
-                    "re-ask (%d chars > %d) — keeping the shortest legal text",
+                    "translation_v2.enforce_cps: cue %d is STILL over budget after a "
+                    "re-ask (best candidate %d chars, budget %d) — keeping the ORIGINAL "
+                    "text, since a rewrite that does not fit only risks meaning",
                     cue_id,
                     len(best),
                     limit,
                 )
-            elif len(best) < _floor_chars(limit):
+                continue
+
+            out[cue_id - 1]["translated"] = best
+            if len(best) < _floor_chars(limit):
                 over_condensed += 1
                 logger.warning(
                     "translation_v2.enforce_cps: cue %d came back over-condensed even "

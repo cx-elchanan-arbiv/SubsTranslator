@@ -142,13 +142,33 @@ IMPOSSIBLE_SOURCE_CPS = 90.0
 #: Companion hard signal in WORDS per second, because the CPS test is calibrated on
 #: character density and English words are long enough to slip under it: the judged
 #: crosstalk fabrication packed 17 invented words into 1.52s — 11.2 w/s but only
-#: ~40 CPS, sailing past the 90 above. Real fast speech in this project's corpus
-#: peaks near 5-6 w/s; conference-record auctioneering is ~8. The fabricated cases
-#: measured 11.2 and 33 (10 words in 0.30s). 8.0 sits above anything a human said
-#: in this corpus and below everything Whisper invented. Deliberately a HARD
-#: signal: crosstalk zones are LOUD, so the audio-energy veto would rescue exactly
-#: the fabrications this exists to drop.
-IMPOSSIBLE_WORDS_PER_SEC = 8.0
+#: ~40 CPS, sailing past the 90 above. Deliberately a HARD signal: crosstalk zones are
+#: LOUD, so the audio-energy veto would rescue exactly the fabrications this exists to
+#: drop.
+#:
+#: LOWERED 8.0 -> 7.25. The 8.0 was set to clear "conference-record auctioneering",
+#: which is not this product's material and never appeared in the corpus; later judged
+#: rounds measured INVENTED runs at 7.5-7.7 w/s that slid straight under it.
+#:
+#: 7.25 and not 7.0, and the 0.25 is the whole point. The two populations in this corpus
+#: are closer together than the CPS ones:
+#:
+#:     fastest GENUINE cue     7.03 w/s — "and they were screaming and yelling at each
+#:                             other." in 1.28s, real cross-talk in an argument, pinned
+#:                             by ``test_fast_speech_alone_is_no_longer_enough`` because
+#:                             an earlier rule already deleted it once
+#:     slowest FABRICATION     7.5 w/s (invented runs measured at 7.5-7.7)
+#:
+#: 7.25 is the midpoint of that empty gap. 7.0 would sit BELOW the genuine cue and delete
+#: real dialogue on a hard signal — the exact regression this module has now been burned
+#: by twice — while buying nothing: everything between 7.0 and 7.25 that was ever
+#: measured here was spoken by a person.
+#:
+#: This is a bound on the physics of speech, not a tuning knob for one clip: no speaker
+#: in this corpus, fast standup and shouted cross-talk included, sustains more than
+#: ~7 words in a second, and text that claims to is text that was not spoken in the time
+#: it is stamped on.
+IMPOSSIBLE_WORDS_PER_SEC = 7.25
 
 #: A word timestamp shorter than this is DEGENERATE: Whisper's word times are quantised
 #: to 0.02s, so anything under 0.05s is one or two ticks — the shape it produces when it
@@ -1120,7 +1140,7 @@ def drop_hallucinated_cues(
         words_per_sec = len(text.split()) / duration
         if words_per_sec > IMPOSSIBLE_WORDS_PER_SEC:
             hard.append(
-                f"wps_impossible({words_per_sec:.1f}>{IMPOSSIBLE_WORDS_PER_SEC:.0f})"
+                f"wps_impossible({words_per_sec:.2f}>{IMPOSSIBLE_WORDS_PER_SEC:.2f})"
             )
         if normalized and normalized == previous_norm:
             hard.append("duplicate_of_previous")

@@ -609,7 +609,15 @@ class TestEnforceCps:
         assert f"max {DEFAULT_MAX_CHARS_PER_CUE} chars" in client.user_prompt()
         assert result[0]["translated"] == "סוף."
 
-    def test_still_violating_is_re_asked_once_then_the_shortest_is_kept(self):
+    def test_still_violating_is_re_asked_once_then_the_original_is_kept(self):
+        """A re-ask that lands over the limit anyway is not used at all.
+
+        This used to keep the shortest near-miss. Measured against it: a cue was
+        released still over budget by a rewrite that had quietly dropped a word. The
+        rewrite bought no readability — it is over the limit either way — so the only
+        thing it can have changed is the meaning, and the untouched text wins.
+        """
+
         def responder(kwargs, call_no):
             return {"cues": [{"id": 1, "t": cue_text(40 if call_no == 1 else 38)}]}
 
@@ -618,7 +626,7 @@ class TestEnforceCps:
 
         assert len(client.calls) == 2, "exactly one re-ask, never a loop"
         assert "TOO LONG" in client.user_prompt(1)
-        assert result[0]["translated"] == cue_text(38)
+        assert result[0]["translated"] == cue_text(60)
 
     def test_longer_reply_is_discarded_in_favour_of_original(self):
         def responder(kwargs, call_no):
@@ -815,11 +823,13 @@ class TestEnforceCpsBatching:
         result = enforce_cps(originals, client=client)
         assert [c["translated"] for c in result] == [c["translated"] for c in originals]
 
-    def test_keep_shorter_semantics_survive_batching(self):
-        """When nothing fits, the shortest of {attempts, original} is kept — per batch.
+    def test_keep_original_semantics_survive_batching(self):
+        """When nothing FITS, the original is kept — per batch, whichever way it missed.
 
         The re-ask repeats the same failure here on purpose: this test is about what
-        happens when the model simply cannot deliver, across batch boundaries.
+        happens when the model simply cannot deliver, across batch boundaries. Shorter
+        and longer are now the same answer, because neither one is readable in the time
+        the cue has and only one of them is known to say the right thing.
         """
 
         def responder(kwargs, call_no):
@@ -834,14 +844,9 @@ class TestEnforceCpsBatching:
         result = enforce_cps(originals, client=client)
 
         for index, cue in enumerate(result, 1):
-            if index % 2:
-                assert cue["translated"] == cue_text(
-                    40
-                ), "the shorter reply should be kept"
-            else:
-                assert (
-                    cue["translated"] == originals[index - 1]["translated"]
-                ), "a longer reply must be discarded in favour of the original"
+            assert (
+                cue["translated"] == originals[index - 1]["translated"]
+            ), "a reply that does not fit must be discarded in favour of the original"
 
 
 @pytest.mark.unit
@@ -1215,6 +1220,206 @@ class TestNormalizeGlossary:
         big = {f"term{i}": f"t{i}" for i in range(MAX_GLOSSARY_ENTRIES + 10)}
         out = normalize_glossary(big)
         assert len(out) == MAX_GLOSSARY_ENTRIES
+
+
+@pytest.mark.unit
+class TestHarvestLatinLocks:
+    """Chunks are separate requests, so each one re-decides how to spell a name.
+
+    MEASURED on a 5-minute video: AIPAC stayed Latin through chunk 1 and became
+    "איפא״ק" at its first occurrence in chunk 2; ISIS and the spelling of "אסלאם"
+    drifted the same way. Neither rendering is wrong — using BOTH in one video is.
+    """
+
+    def test_an_acronym_kept_in_latin_is_harvested(self):
+        from services.translation_v2 import _harvest_latin_locks
+
+        locks = _harvest_latin_locks(
+            ["AIPAC lobbies for Israel."], ["AIPAC משתדל למען ישראל."]
+        )
+        assert locks == {"AIPAC": "AIPAC"}
+
+    def test_a_term_the_model_translated_away_is_not_harvested(self):
+        """The verbatim test IS the heuristic: this can only ever say "keep doing that"."""
+        from services.translation_v2 import _harvest_latin_locks
+
+        locks = _harvest_latin_locks(["ISIS attacked."], ["דאעש תקף."])
+        assert locks == {}
+
+    def test_lowercase_words_are_never_locked(self):
+        """Pinning ordinary vocabulary would freeze the translator's grammar."""
+        from services.translation_v2 import _harvest_latin_locks
+
+        locks = _harvest_latin_locks(["the thing about it"], ["the thing about it"])
+        assert locks == {}
+
+    def test_a_two_letter_acronym_qualifies_but_a_two_letter_name_does_not(self):
+        from services.translation_v2 import _harvest_latin_locks
+
+        assert _harvest_latin_locks(["US policy"], ["US מדיניות"]) == {"US": "US"}
+        assert _harvest_latin_locks(["Al went"], ["Al הלך"]) == {}
+
+    def test_a_capitalised_proper_name_qualifies(self):
+        from services.translation_v2 import _harvest_latin_locks
+
+        assert _harvest_latin_locks(["Trump said"], ["Trump אמר"]) == {"Trump": "Trump"}
+
+    def test_internal_punctuation_survives_but_a_sentence_stop_does_not(self):
+        """Both sides are tokenised the same way, so "Trump." and "Trump" are one term."""
+        from services.translation_v2 import _harvest_latin_locks
+
+        assert _harvest_latin_locks(["AT&T called"], ["AT&T התקשרה"]) == {
+            "AT&T": "AT&T"
+        }
+        assert _harvest_latin_locks(["I met Trump."], ["פגשתי את Trump"]) == {
+            "Trump": "Trump"
+        }
+
+    def test_a_term_absent_from_the_source_is_not_harvested(self):
+        from services.translation_v2 import _harvest_latin_locks
+
+        assert _harvest_latin_locks(["he arrived"], ["AIPAC הגיע"]) == {}
+
+    def test_empty_input_is_no_locks(self):
+        from services.translation_v2 import _harvest_latin_locks
+
+        assert _harvest_latin_locks([], []) == {}
+        assert _harvest_latin_locks(["AIPAC"], []) == {}
+
+
+@pytest.mark.unit
+class TestMergeLocks:
+    """The caller's glossary is a human instruction; a lock is an observation."""
+
+    def test_the_callers_entry_wins_over_a_harvested_lock(self):
+        from services.translation_v2 import _merge_locks
+
+        merged = _merge_locks({"AIPAC": "איפא״ק"}, {"AIPAC": "AIPAC"})
+        assert merged == {"AIPAC": "איפא״ק"}
+
+    def test_locks_are_added_alongside_the_callers_entries(self):
+        from services.translation_v2 import _merge_locks
+
+        merged = _merge_locks({"Ivrit": "עִברית"}, {"AIPAC": "AIPAC"})
+        assert merged == {"Ivrit": "עִברית", "AIPAC": "AIPAC"}
+
+    def test_the_callers_entries_come_first_so_truncation_drops_locks(self):
+        """A long video must not push a human's pinned term out of its own prompt."""
+        from services.translation_v2 import MAX_GLOSSARY_ENTRIES, _merge_locks
+
+        locks = {f"Term{i}": f"Term{i}" for i in range(MAX_GLOSSARY_ENTRIES * 2)}
+        merged = _merge_locks({"Ivrit": "עִברית"}, locks)
+
+        assert len(merged) == MAX_GLOSSARY_ENTRIES
+        assert merged["Ivrit"] == "עִברית"
+
+    def test_no_locks_is_just_the_normalised_glossary(self):
+        from services.translation_v2 import _merge_locks
+
+        assert _merge_locks({"Ivrit": "עִברית"}, {}) == {"Ivrit": "עִברית"}
+        assert _merge_locks(None, {}) == {}
+
+
+@pytest.mark.unit
+class TestCrossChunkTermLock:
+    """The lock as the pipeline actually applies it: chunk 1 teaches chunk 2."""
+
+    @staticmethod
+    def _two_chunks(text):
+        return make_cues(MAX_CUES_PER_REQUEST + MIN_TAIL_CUES, text=text)
+
+    def test_a_term_kept_in_latin_in_chunk_one_is_pinned_for_chunk_two(self):
+        client = FakeClient(
+            lambda kwargs, call_no: {
+                "cues": [
+                    {"id": i, "t": f"AIPAC תרגום {i}."}
+                    for i in requested_ids(kwargs["messages"][1]["content"])
+                ]
+            }
+        )
+        translate_cues(self._two_chunks("AIPAC lobbies Congress."), "he", client=client)
+
+        assert len(client.calls) >= 2, "the fixture must span two chunks"
+        assert "GLOSSARY" not in client.system_prompt(0), "chunk 1 is unchanged"
+        assert '- "AIPAC" -> "AIPAC"' in client.system_prompt(1)
+
+    def test_a_single_chunk_job_builds_the_prompt_it_always_did(self):
+        client = FakeClient(echo_responder())
+        translate_cues(
+            make_cues(5, text="AIPAC lobbies Congress."), "he", client=client
+        )
+        assert "GLOSSARY" not in client.system_prompt(0)
+
+    def test_a_term_the_model_transliterated_is_not_pinned(self):
+        client = FakeClient(
+            lambda kwargs, call_no: {
+                "cues": [
+                    {"id": i, "t": f"איפא״ק תרגום {i}."}
+                    for i in requested_ids(kwargs["messages"][1]["content"])
+                ]
+            }
+        )
+        translate_cues(self._two_chunks("AIPAC lobbies Congress."), "he", client=client)
+        assert "AIPAC" not in client.system_prompt(1)
+
+    def test_a_caller_glossary_still_outranks_the_harvest(self):
+        client = FakeClient(
+            lambda kwargs, call_no: {
+                "cues": [
+                    {"id": i, "t": f"AIPAC תרגום {i}."}
+                    for i in requested_ids(kwargs["messages"][1]["content"])
+                ]
+            }
+        )
+        translate_cues(
+            self._two_chunks("AIPAC lobbies Congress."),
+            "he",
+            client=client,
+            glossary={"AIPAC": "איפא״ק"},
+        )
+        assert '- "AIPAC" -> "איפא״ק"' in client.system_prompt(1)
+        assert '- "AIPAC" -> "AIPAC"' not in client.system_prompt(1)
+
+    def test_proofread_mode_harvests_nothing(self):
+        """Source and target are the same language — every word survives verbatim."""
+        client = FakeClient(echo_responder())
+        translate_cues(
+            self._two_chunks("AIPAC lobbies Congress."),
+            "en",
+            client=client,
+            source_lang="en",
+        )
+        assert "GLOSSARY" not in client.system_prompt(1)
+
+    def test_the_prompt_states_the_rule_the_lock_enforces(self):
+        prompt = build_system_prompt("he")
+        assert "IDENTICALLY" in prompt
+        assert "ALREADY USED EARLIER IN THIS SAME VIDEO" in prompt
+
+
+@pytest.mark.unit
+class TestProfanityRegister:
+    """MEASURED: "Fucking shit" came back as "איזה שטויות", and elsewhere a profanity
+    was silently deleted. Both times the model was being helpful."""
+
+    def test_the_rule_is_present_in_both_styles(self):
+        for style in ("clean", "faithful"):
+            prompt = build_system_prompt("he", style=style)
+            assert "PROFANITY" in prompt
+
+    def test_it_forbids_softening_censoring_and_deleting(self):
+        prompt = build_system_prompt("he")
+        for word in ("soften", "censor", "delete"):
+            assert word in prompt.lower(), word
+
+    def test_the_clean_style_is_told_profanity_is_not_filler(self):
+        """The softening happened under "clean", which removes filler — not meaning."""
+        prompt = build_system_prompt("he", style="clean")
+        assert "removes FILLER — never profanity" in prompt
+
+    def test_every_supported_language_carries_the_rule(self):
+        for code in LANGUAGE_NAMES:
+            assert "PROFANITY" in build_system_prompt(code), code
 
 
 # --------------------------------------------------------------------------------------
@@ -1793,6 +1998,103 @@ class TestCondensationValidatorInThePass:
         from services.translation_v2 import _CPS_SYSTEM_PROMPT
 
         assert "NEVER delete the LAST meaningful word" in _CPS_SYSTEM_PROMPT
+
+
+@pytest.mark.unit
+class TestReaskGuards:
+    """The re-ask is the LAST chance, so what comes back is checked twice more.
+
+    Two measured releases: a cue was shipped still over its limit by a rewrite that had
+    quietly dropped a word, and a re-ask "condensed" a cue by deleting a comma.
+    """
+
+    def _cue(self, text, dur=2.0):
+        return [{"start": 0.0, "end": dur, "translated": text}]
+
+    def test_a_rewrite_that_only_deletes_punctuation_is_refused(self):
+        from services.translation_v2 import _punctuation_only_edit
+
+        assert _punctuation_only_edit("הוא הגיע, ואז הלך.", "הוא הגיע ואז הלך.")
+
+    def test_a_real_condensation_is_not_mistaken_for_one(self):
+        from services.translation_v2 import _punctuation_only_edit
+
+        assert not _punctuation_only_edit("הוא הגיע, ואז הלך.", "הוא הגיע והלך.")
+
+    def test_identical_text_is_not_a_punctuation_deletion(self):
+        """Nothing was removed, so there is nothing to refuse — the caller's other
+        rules decide what to do with a reply that changed nothing."""
+        from services.translation_v2 import _punctuation_only_edit
+
+        assert not _punctuation_only_edit("הוא הגיע.", "הוא הגיע.")
+
+    def test_adding_punctuation_is_not_caught(self):
+        from services.translation_v2 import _punctuation_only_edit
+
+        assert not _punctuation_only_edit("הוא הגיע ואז הלך.", "הוא הגיע, ואז הלך.")
+
+    def test_a_dropped_geresh_counts_as_deleted_punctuation(self):
+        """ג׳ורג׳ without its gereshim is a different spelling, not a shorter cue."""
+        from services.translation_v2 import GERESH, _punctuation_only_edit
+
+        assert _punctuation_only_edit(f"ג{GERESH}ורג{GERESH} הגיע.", "גורג הגיע.")
+
+    def test_blank_input_is_never_a_punctuation_deletion(self):
+        from services.translation_v2 import _punctuation_only_edit
+
+        assert not _punctuation_only_edit("", "הוא הגיע.")
+        assert not _punctuation_only_edit("הוא הגיע.", "")
+
+    def test_a_punctuation_deleting_reask_is_refused_even_when_it_fits(self):
+        """The isolating case: the rewrite is legal, is short enough, and is still wrong.
+
+        Deleting commas is the one "condensation" that always succeeds on the character
+        count and never condenses anything — same words, same order, the clause
+        boundaries gone. Without the guard this reply would simply be accepted.
+        """
+        original = "א, ב, ג, ד, ה, ו, ז, ח, ט, י."
+        stripped = original.replace(", ", " ")
+
+        def responder(kwargs, call_no):
+            # call 1 is too long, so it is re-asked; call 2 only deletes the commas.
+            return {
+                "cues": [{"id": 1, "t": cue_text(90) if call_no == 1 else stripped}]
+            }
+
+        client = FakeClient(responder)
+        # 1.45s -> floor(17 * 1.45) == 24: the original (29) is over it, the
+        # comma-stripped reply (20) would fit.
+        result = enforce_cps(
+            self._cue(original, dur=1.45), client=client, time_relief=False
+        )
+
+        assert len(stripped) <= 24 < len(original), "the fixture stopped isolating"
+        assert len(client.calls) == 2
+        assert result[0]["translated"] == original
+
+    def test_a_rewrite_still_over_the_limit_loses_to_the_original(self):
+        """It did not make the cue readable, so it can only have cost meaning."""
+
+        def responder(kwargs, call_no):
+            return {"cues": [{"id": 1, "t": cue_text(50 if call_no == 1 else 45)}]}
+
+        client = FakeClient(responder)
+        # 2s -> a 34-char budget; both replies are shorter than the 60-char original
+        # and both are still over it.
+        result = enforce_cps(self._cue(cue_text(60)), client=client, time_relief=False)
+
+        assert len(client.calls) == 2
+        assert result[0]["translated"] == cue_text(60)
+
+    def test_a_rewrite_that_does_fit_is_still_accepted(self):
+        """The guards must not turn the pass off — a legal reply that fits is used."""
+
+        def responder(kwargs, call_no):
+            return {"cues": [{"id": 1, "t": cue_text(50 if call_no == 1 else 30)}]}
+
+        client = FakeClient(responder)
+        result = enforce_cps(self._cue(cue_text(60)), client=client, time_relief=False)
+        assert result[0]["translated"] == cue_text(30)
 
 
 # --------------------------------------------------------------------------------------

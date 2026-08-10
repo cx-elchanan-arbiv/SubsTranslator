@@ -909,6 +909,32 @@ class TestDropHallucinatedCues:
         assert (10.06 - 8.78) and len(real["text"]) / (10.06 - 8.78) > 35
         assert kept == [real] and dropped == []
 
+    def test_the_words_per_second_bound_sits_between_the_two_populations(self):
+        """LOWERED 8.0 -> 7.25, and the exact value is the evidence, not a preference.
+
+        Invented runs were measured at 7.5-7.7 w/s and walked straight under the old
+        8.0. The corpus's fastest GENUINE cue is the cross-talk line above at 7.03 w/s,
+        which a hard signal must never touch — it deletes on its own, with no
+        audio-energy veto to rescue it. The constant therefore has to live strictly
+        inside (7.03, 7.5], and this test is what stops a later round rounding it to a
+        nicer number in either direction.
+        """
+        from services.subtitle_engine import IMPOSSIBLE_WORDS_PER_SEC
+
+        fastest_genuine = 9 / (10.06 - 8.78)  # 7.03 w/s, real cross-talk
+        slowest_fabrication = 7.5
+        assert fastest_genuine < IMPOSSIBLE_WORDS_PER_SEC <= slowest_fabrication
+
+    def test_an_invented_run_at_seven_and_a_half_words_a_second_is_dropped(self):
+        """The measured fabrication rate that used to slide under the old 8.0."""
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        text = " ".join(f"word{i}" for i in range(15))  # 15 words in 2s = 7.5 w/s
+        kept, dropped = drop_hallucinated_cues([self._cue(text, 0.0, 2.0)])
+
+        assert kept == []
+        assert any(s.startswith("wps_impossible") for s in dropped[0]["signals"])
+
     def test_two_soft_signals_together_do_drop(self):
         from services.subtitle_engine import drop_hallucinated_cues
 
