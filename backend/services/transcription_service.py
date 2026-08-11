@@ -478,6 +478,17 @@ COVERAGE_MIN_UNCOVERED_S = 1.0
 #: tail and stays silent on the other 8.
 COVERAGE_MAX_QUIET_DB = -20.0
 
+#: Fewest words a tail re-decode may carry and still be appended.
+#:
+#: Not a tuned number: it is the line between a phrase and a fragment. Six firings
+#: were measured across eight clips — the single genuine recovery carried 11 words,
+#: and every useless one carried one or two ("more", "Uh-huh.", "country."). A
+#: decoder handed a window it cannot read emits the shortest thing that terminates,
+#: so a fragment cannot be told apart from an artefact by looking at it. Four is
+#: simply "more than an interjection"; the exact value hardly matters because the
+#: two populations are 1-2 against 11.
+RECOVERY_MIN_WORDS = 4
+
 
 def _relative_db(region: np.ndarray, whole: np.ndarray) -> float | None:
     """Level of ``region`` in dB RELATIVE to ``whole``'s RMS. ``None`` if unmeasurable.
@@ -569,14 +580,69 @@ def _shifted(items: list[dict], offset: float, keys: tuple) -> list[dict]:
     return out
 
 
-def _recovery_is_new(recovered: list[dict], previous_text: str) -> tuple[bool, str]:
+def _dominant_script(text: str) -> str | None:
+    """The Unicode script most of ``text``'s letters belong to, coarsely.
+
+    Coarse on purpose: the only question asked of it is "is this the same kind of
+    writing as the rest of the transcript", so Hebrew/Arabic/Cyrillic/Greek/Latin/CJK
+    buckets are enough and no dependency is needed for them.
+    """
+    buckets = {
+        "latin": 0,
+        "hebrew": 0,
+        "arabic": 0,
+        "cyrillic": 0,
+        "greek": 0,
+        "cjk": 0,
+    }
+    for ch in text or "":
+        code = ord(ch)
+        if not ch.isalpha():
+            continue
+        if code < 0x0250:
+            buckets["latin"] += 1
+        elif 0x0370 <= code <= 0x03FF or 0x1F00 <= code <= 0x1FFF:
+            buckets["greek"] += 1
+        elif 0x0400 <= code <= 0x04FF:
+            buckets["cyrillic"] += 1
+        elif 0x0590 <= code <= 0x05FF:
+            buckets["hebrew"] += 1
+        elif 0x0600 <= code <= 0x06FF:
+            buckets["arabic"] += 1
+        elif 0x3040 <= code <= 0x9FFF:
+            buckets["cjk"] += 1
+    top = max(buckets, key=buckets.get)
+    return top if buckets[top] else None
+
+
+def _recovery_is_new(
+    recovered: list[dict],
+    previous_text: str,
+    *,
+    transcript_text: str = "",
+    primer: str = "",
+) -> tuple[bool, str]:
     """Is a tail re-decode worth appending? ``(yes, why_not)``.
 
-    Two ways a recovery is worse than nothing, and both have been seen from Whisper on
-    short windows: an EMPTY result (a window with nothing to say still has to emit
-    tokens, and sometimes emits none), and a verbatim REPEAT of the segment before the
-    gap, which is the decode loop reaching across the seam. Either one would put a
-    duplicate line on screen in the name of completeness.
+    A short window is the condition under which Whisper is least reliable, so the
+    thing this mechanism decodes is exactly the thing it must not trust blindly.
+    Measured across eight clips, before these checks existed, five recoveries came
+    back and four were manufactured:
+
+    * ``"It is not that simple."`` and ``"I think it depends."`` — both of them
+      fragments of :data:`ASR_PUNCTUATION_PRIMER`. A primer is text to CONTINUE,
+      and on a window with little to hear, continuing the prompt is the cheapest
+      thing the decoder can do. (The primer is no longer passed at all; this check
+      is the belt to that braces, because the same shape can arrive from a stray
+      prompt anywhere.)
+    * ``"Σας ευχαριστώ."`` on a HEBREW news bulletin — Greek, burned into the video.
+      A few ambiguous seconds re-detect as any language when none is pinned.
+    * A one-word repeat of the last word already on screen.
+
+    So four rejections, in order of how badly each was needed:
+    empty; a verbatim repeat of the segment before the gap; text whose SCRIPT is not
+    the transcript's; and text contained in the primer. None of them is a list of
+    banned phrases — each is a statement about where the text came from.
 
     Pure.
     """
@@ -585,6 +651,41 @@ def _recovery_is_new(recovered: list[dict], previous_text: str) -> tuple[bool, s
         return False, "the re-decode returned no text"
     if _normalized_segment_text(text) == _normalized_segment_text(previous_text):
         return False, "the re-decode repeated the segment before the gap verbatim"
+
+    # A recovery has to be a PHRASE. Measured over six firings across eight clips:
+    # the one genuine recovery was 11 words ("if you enjoyed the video, don't forget
+    # to like and subscribe"); the five useless ones were "more", "Uh-huh.",
+    # "country.", "It is not that simple." and "Σας ευχαριστώ." — one or two tokens
+    # each. That is not a coincidence of this corpus, it is what a decoder does with
+    # a window it cannot read: it emits the shortest thing that terminates. A
+    # fragment is therefore indistinguishable from an artefact, and the cost of the
+    # two failures is not symmetric — skipping a genuine one-word tail loses an
+    # interjection, while appending an invented one puts words in a speaker's mouth
+    # and burns them into the video.
+    if len(text.split()) < RECOVERY_MIN_WORDS:
+        return False, (
+            f"the re-decode returned a {len(text.split())}-word fragment, not a "
+            f"phrase: {text[:60]!r}"
+        )
+
+    if transcript_text.strip():
+        want = _dominant_script(transcript_text)
+        got = _dominant_script(text)
+        if want and got and want != got:
+            return False, (
+                f"the re-decode came back in {got} while the transcript is {want} — "
+                f"a few ambiguous seconds re-detected as another language: {text[:60]!r}"
+            )
+
+    if primer:
+        normalized_primer = _normalized_segment_text(primer)
+        normalized_text = _normalized_segment_text(text)
+        if normalized_text and normalized_text in normalized_primer:
+            return False, (
+                f"the re-decode returned the punctuation primer back to us: "
+                f"{text[:60]!r}"
+            )
+
     return True, ""
 
 
@@ -1755,10 +1856,28 @@ def transcribe_with_words(
         )
         try:
             region = audio_np[int(gap["start"] * 16000) :]
-            # No conditioning: the region is decoded on its own, so there is no
-            # previous output to carry a loop or a style across the seam into it.
+            # THE OPTIONS MATTER MORE THAN THE REGION, and getting them wrong made
+            # this mechanism manufacture text instead of recovering it. Measured
+            # across eight clips, five recoveries: "It is not that simple." and
+            # "I think it depends." — both of them fragments of
+            # ASR_PUNCTUATION_PRIMER itself — plus "Σας ευχαριστώ." on a Hebrew news
+            # bulletin. An `initial_prompt` is text the decoder CONTINUES, so on a
+            # short region with little to hear the cheapest continuation IS the
+            # prompt; and with no language pinned, a few seconds of ambiguous audio
+            # re-detects as anything at all.
+            #
+            # So the recovery decodes bare: no primer, no conditioning, and the
+            # language the main pass already established. A recovery is only worth
+            # having if it is the audio speaking, not the configuration.
+            recovery_options = dict(
+                chosen_options,
+                condition_on_previous_text=False,
+                initial_prompt=None,
+            )
+            if detected_language:
+                recovery_options["language"] = detected_language
             tail_segments, tail_words, _tail_info = _materialize(
-                dict(chosen_options, condition_on_previous_text=False),
+                recovery_options,
                 audio=region,
             )
         except Exception as exc:  # noqa: BLE001 - a recovery may never fail a job
@@ -1768,7 +1887,12 @@ def transcribe_with_words(
             )
         else:
             previous_text = str(segments[-1].get("text") or "") if segments else ""
-            usable, why_not = _recovery_is_new(tail_segments, previous_text)
+            usable, why_not = _recovery_is_new(
+                tail_segments,
+                previous_text,
+                transcript_text=" ".join(str(s.get("text") or "") for s in segments),
+                primer=asr_primer_for(source_lang),
+            )
             if not usable:
                 logger.warning(f"🕳️ v2 ASR coverage: nothing appended — {why_not}")
             else:

@@ -398,18 +398,25 @@ def _is_lockable_term(token: str) -> bool:
     """Is this Latin token the KIND of thing a video must spell the same way twice?
 
     Two shapes, both chosen because they are what actually drifted: an ACRONYM (all
-    caps, 2+ characters — AIPAC, ISIS, US) and a PROPER NAME (capitalised, 3+
-    characters). Everything else — lowercase words, single letters, "A" — is ordinary
-    vocabulary, and pinning ordinary vocabulary to one rendering would freeze the
-    translator's grammar, not its terminology.
+    caps) and a PROPER NAME (capitalised). Everything else — lowercase words, single
+    letters, "A" — is ordinary vocabulary, and pinning ordinary vocabulary to one
+    rendering would freeze the translator's grammar, not its terminology.
+
+    Both shapes require **3 characters**. The acronym rule used to accept 2, which
+    swept in US, EU, TV, UN, AI — the acronyms most likely to HAVE an established
+    target rendering (ארה״ב, האיחוד האירופי, טלוויזיה, האו״ם). Locking those is the
+    opposite of the intent: whichever way chunk 1 happened to render one of them
+    would become law for the whole video, so a mechanism built to stop drift would
+    be pinning an accident instead. A 3-character floor is not a stop-list of
+    specific words — it is the length below which a Latin token in this corpus is
+    almost always a common abbreviation rather than a name, and it costs nothing:
+    every term measured drifting (AIPAC, ISIS, NATO, JCPOA) is longer.
     """
     if not token or not token[0].isupper():
         return False
     letters = [ch for ch in token if ch.isalpha()]
     if not letters:
         return False
-    if all(ch.isupper() for ch in letters):
-        return len(token) >= 2
     return len(token) >= 3
 
 
@@ -683,7 +690,25 @@ def build_system_prompt(
         "are NOT a contrast: subtitle fonts do not draw them, so two spellings that "
         "differ only in diacritics are one word on screen and a cue built on the "
         "difference between them says nothing. Rescuing such a cue with diacritics is "
-        "not a solution; keeping one of the two names in Latin script is."
+        "not a solution; keeping one of the two names in Latin script is.\n"
+        "WHICH one stays in Latin: the name being REJECTED, or the one being NAMED "
+        "rather than used. Translate the other, so the cue still reads as a "
+        f"correction in {lang} instead of as a contradiction.\n"
+        "THE SAME TREATMENT APPLIES TO EVERY FRAME LISTED ABOVE — they are one problem "
+        "in different syntax, and a model that fixes only the frame it was shown "
+        "leaves the rest contradicting themselves. Worked through on a pair that has "
+        "nothing to do with your material:\n"
+        '   "They don\'t call it Greece, they call it Hellas."   -> "Greece" stays '
+        f'Latin, "Hellas" goes into {lang}\n'
+        '   "It is called Hellas, not Greece."                  -> the same two words, '
+        "the same treatment\n"
+        f'   "What is the {lang} word for Greece?"              -> "Greece" stays '
+        "Latin; rendering it in the target as well turns the question into its own "
+        "answer\n"
+        '   "How do you say Greece in Greek?"                   -> the LANGUAGE name is '
+        "translated, the WORD being asked about stays Latin\n"
+        "TEST YOUR OWN OUTPUT: if a cue denies and asserts the same string, this rule "
+        "applies to it and you have not applied it."
     )
     rules.append(
         f'A cue that begins with the dialogue dash "{DIALOGUE_DASH}" MUST begin with '

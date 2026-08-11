@@ -1253,11 +1253,26 @@ class TestHarvestLatinLocks:
         locks = _harvest_latin_locks(["the thing about it"], ["the thing about it"])
         assert locks == {}
 
-    def test_a_two_letter_acronym_qualifies_but_a_two_letter_name_does_not(self):
+    def test_two_letter_tokens_do_not_qualify_at_all(self):
+        """Reversed on evidence: locking two-letter acronyms pinned an accident.
+
+        US, EU, TV, UN, AI are exactly the acronyms most likely to HAVE an
+        established target rendering (ארה״ב, האיחוד האירופי, טלוויזיה). Locking
+        whichever way chunk 1 happened to render one of them made a mechanism built
+        to stop drift enforce a coin flip instead. Every term measured drifting —
+        AIPAC, ISIS, NATO, JCPOA — is longer than two characters, so the floor costs
+        nothing it was there to buy.
+        """
         from services.translation_v2 import _harvest_latin_locks
 
-        assert _harvest_latin_locks(["US policy"], ["US מדיניות"]) == {"US": "US"}
+        assert _harvest_latin_locks(["US policy"], ["US מדיניות"]) == {}
         assert _harvest_latin_locks(["Al went"], ["Al הלך"]) == {}
+
+    def test_three_letter_acronyms_still_qualify(self):
+        """The floor removes the ambiguous class, not the mechanism."""
+        from services.translation_v2 import _harvest_latin_locks
+
+        assert _harvest_latin_locks(["NATO met"], ["NATO נפגשו"]) == {"NATO": "NATO"}
 
     def test_a_capitalised_proper_name_qualifies(self):
         from services.translation_v2 import _harvest_latin_locks

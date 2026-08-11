@@ -674,7 +674,14 @@ class TestCoverageRecoveryWiring:
         model = _FakeModel(
             [
                 [_FakeSegment(0.0, 10.0, "First.", [_FakeWord(0.0, 1.0, "First.")])],
-                [_FakeSegment(0.0, 3.0, "Second.", [_FakeWord(0.5, 1.5, "Second.")])],
+                [
+                    _FakeSegment(
+                        0.0,
+                        3.0,
+                        "and then the second thing happened.",
+                        [_FakeWord(0.5, 1.5, "and")],
+                    )
+                ],
             ]
         )
         svc = self._install(monkeypatch, model)
@@ -684,6 +691,27 @@ class TestCoverageRecoveryWiring:
         assert result["segments"][1]["start"] == pytest.approx(10.0)
         assert result["segments"][1]["end"] == pytest.approx(13.0)
         assert result["words"][1]["s"] == pytest.approx(10.5)
+
+    def test_a_one_word_recovery_is_refused(self, monkeypatch):
+        """Measured: six firings, one genuine (11 words), five fragments.
+
+        "more", "Uh-huh.", "country." — a decoder handed a window it cannot read
+        emits the shortest thing that terminates, so a fragment cannot be told from
+        an artefact. Skipping a real interjection is cheap; burning an invented one
+        into the video is not.
+        """
+        model = _FakeModel(
+            [
+                [_FakeSegment(0.0, 10.0, "First.", [_FakeWord(0.0, 1.0, "First.")])],
+                [_FakeSegment(0.0, 3.0, "more", [_FakeWord(0.5, 1.5, "more")])],
+            ]
+        )
+        svc = self._install(monkeypatch, model)
+
+        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
+
+        assert len(result["segments"]) == 1
+        assert "more" not in result["segments"][0]["text"]
 
     def test_the_re_decode_is_not_conditioned_on_the_previous_output(self, monkeypatch):
         """A region decoded on its own has no earlier output to carry a loop across."""
