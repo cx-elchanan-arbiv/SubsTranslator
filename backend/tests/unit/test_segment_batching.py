@@ -180,8 +180,17 @@ class TestSegmentBatching:
                 assert len(result) == 50
                 assert all(r.startswith("translated_") for r in result)
 
-    def test_mismatch_handling(self):
-        """Test handling of length mismatches in translations."""
+    def test_a_short_response_raises_instead_of_padding_with_english(self):
+        """Reversed on evidence: a partial answer is a failure, not a result.
+
+        The old branch filled the missing translations with the SOURCE text and
+        returned normally, so the job went green while some lines shipped in English
+        under the label of the service the user chose. Google is the default
+        translator on the upload route, so this was the common path rather than an
+        edge case. A failure the user can see beats a success they cannot check.
+        """
+        from core.exceptions import TranslationServiceError
+
         # Mock the correct import path - DeepGoogleTranslator is the alias used in the code
         with patch(
             "services.translation_services.DeepGoogleTranslator"
@@ -202,17 +211,9 @@ class TestSegmentBatching:
             with patch("services.translation_services.config", mock_config):
                 translator = GoogleTranslator()
 
-                # Try to translate 5 segments
                 texts = ["Text 1", "Text 2", "Text 3", "Text 4", "Text 5"]
-                result = translator.translate_batch(texts, "he")
-
-                # Should return 5 results (padded with originals)
-                assert len(result) == 5
-                assert result[0] == "תרגום 1"
-                assert result[1] == "תרגום 2"
-                assert result[2] == "Text 3"  # Original text
-                assert result[3] == "Text 4"  # Original text
-                assert result[4] == "Text 5"  # Original text
+                with pytest.raises(TranslationServiceError):
+                    translator.translate_batch(texts, "he")
 
 
 if __name__ == "__main__":

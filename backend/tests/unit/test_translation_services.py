@@ -14,26 +14,18 @@ def _import_from_backend(module_name: str, backend_dir: str):
     return importlib.import_module(module_name)
 
 
-def test_google_translator_batch_success(monkeypatch):
-    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    ts = _import_from_backend("services.translation_services", backend_dir)
+def test_google_translator_raises_instead_of_returning_the_source(monkeypatch):
+    """Reversed on evidence: a failed translation must not look like a translation.
 
-    class DummyGT:
-        def __init__(self, source=None, target=None):
-            self.source = source
-            self.target = target
+    Returning the input text made a network error indistinguishable from a real
+    pass-through, and the job reported success with English on screen. Google is
+    the default translator on the upload route, so this was the path most users
+    took.
+    """
+    import pytest
 
-        def translate_batch(self, texts):
-            return [f"{t}-he" for t in texts]
+    from core.exceptions import TranslationServiceError
 
-    monkeypatch.setattr(ts, "DeepGoogleTranslator", DummyGT, raising=True)
-
-    tr = ts.get_translator("google")
-    out = tr.translate_batch(["a", "b", "c"], "he")
-    assert out == ["a-he", "b-he", "c-he"]
-
-
-def test_google_translator_fallback_on_exception(monkeypatch):
     backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     ts = _import_from_backend("services.translation_services", backend_dir)
 
@@ -47,10 +39,8 @@ def test_google_translator_fallback_on_exception(monkeypatch):
     monkeypatch.setattr(ts, "DeepGoogleTranslator", DummyGT, raising=True)
 
     tr = ts.get_translator("google")
-    inputs = ["x", "y"]
-    out = tr.translate_batch(inputs, "he")
-    # Fallback returns original texts
-    assert out == inputs
+    with pytest.raises(TranslationServiceError):
+        tr.translate_batch(["x", "y"], "he")
 
 
 # NOTE: The old mismatch fallback test was removed because it conflicts with the new

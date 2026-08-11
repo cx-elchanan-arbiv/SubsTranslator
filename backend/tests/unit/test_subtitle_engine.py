@@ -1051,25 +1051,46 @@ class TestDropHallucinatedCues:
         kept, dropped = drop_hallucinated_cues([cue])
         assert kept == [cue] and dropped == []
 
-    def test_an_exact_repeat_of_the_previous_cue_is_dropped(self):
+    def test_an_exact_repeat_alone_is_no_longer_enough_to_drop(self):
+        """Demoted from hard to soft, because repetition is speech as often as loop.
+
+        Two speakers answering "No." / "No." lost the second one on the live gate,
+        and so would any chant, chorus, insistence or drilled phrase. A decode loop
+        is real, so the signal stays — it just has to be corroborated now, like
+        every other text-shaped observation in this module.
+        """
         from services.subtitle_engine import drop_hallucinated_cues
 
         first = self._cue("That was some day we had together, though.", 105.62, 107.96)
         loop = self._cue("that was some day we had together though", 108.12, 109.94)
         kept, dropped = drop_hallucinated_cues([first, loop])
-        assert kept == [first]
-        assert dropped[0]["signals"] == ["duplicate_of_previous"]
+        assert kept == [first, loop]
+        assert dropped == []
 
-    def test_a_duplicate_is_not_handed_back_as_context(self):
-        """Its text is by definition still in the cue that was kept."""
+    def test_a_repeat_that_is_also_impossibly_fast_is_dropped(self):
+        """Two soft signals corroborate each other; that is the corroboration rule."""
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        first = self._cue("z" * 60, 0.0, 2.5)
+        loop = self._cue("z" * 60, 2.6, 3.6)  # same text, 60 CPS -> also cps_fast
+        kept, dropped = drop_hallucinated_cues([first, loop])
+        assert kept == [first]
+        assert "duplicate_of_previous" in dropped[0]["signals"]
+
+    def test_a_dropped_duplicate_is_not_handed_back_as_context(self):
+        """When a duplicate IS dropped, its text is still in the cue that was kept.
+
+        Reaching a drop now takes corroboration (the repeat signal was demoted to
+        soft), so the cue is built to trip a second signal as well.
+        """
         from services.subtitle_engine import drop_hallucinated_cues
 
         cues = [
-            self._cue("Thank you very much.", 0.0, 1.5),
-            self._cue("Thank you very much.", 1.6, 3.0),
+            self._cue("z" * 60, 0.0, 2.5),
+            self._cue("z" * 60, 2.6, 3.6),  # same text AND over the CPS ceiling
         ]
         _kept, dropped = drop_hallucinated_cues(cues)
-        assert dropped[0]["context_only"] is False
+        assert dropped and dropped[0]["context_only"] is False
 
     def test_a_dropped_cue_is_offered_to_the_translator_as_context(self):
         from services.subtitle_engine import drop_hallucinated_cues
@@ -1101,11 +1122,36 @@ class TestDropHallucinatedCues:
         assert kept == []
         assert dropped[0]["energy_db"] == -14.9
 
-    def test_the_veto_cannot_save_a_hard_signal(self):
+    def test_the_veto_now_covers_hard_signals_too(self):
+        """Reversed on evidence: the audio outranks the text's shape, always.
+
+        The old rule was `verdict and not hard`, so a hard signal deleted a cue
+        without the audio ever being consulted — reproduced on the live gate, where
+        a 120 CPS cue was dropped and the probe was never called once. Every other
+        signal in this module is a suspicion that the audio settles; there is no
+        reason for these two to be exempt. If someone is audibly speaking in that
+        window, the cue stays however impossible the text looks.
+        """
         from services.subtitle_engine import drop_hallucinated_cues
 
         cue = self._cue("z" * 200, 0.0, 1.0)  # 200 CPS
         kept, _dropped = drop_hallucinated_cues([cue], energy_probe=lambda s, e: 3.0)
+        assert kept == [cue], "loud audio did not save an impossible-looking cue"
+
+    def test_a_hard_signal_over_silence_is_still_dropped(self):
+        """The veto is evidence, not an amnesty."""
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cue = self._cue("z" * 200, 0.0, 1.0)
+        kept, dropped = drop_hallucinated_cues([cue], energy_probe=lambda s, e: -60.0)
+        assert kept == [] and len(dropped) == 1
+
+    def test_a_hard_signal_with_no_probe_is_still_dropped(self):
+        """With no audio available the text's shape is all there is."""
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cue = self._cue("z" * 200, 0.0, 1.0)
+        kept, _dropped = drop_hallucinated_cues([cue])
         assert kept == []
 
     def test_the_probe_is_only_consulted_for_candidates(self):

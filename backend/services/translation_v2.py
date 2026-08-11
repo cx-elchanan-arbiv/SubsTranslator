@@ -694,19 +694,14 @@ def build_system_prompt(
         "WHICH one stays in Latin: the name being REJECTED, or the one being NAMED "
         "rather than used. Translate the other, so the cue still reads as a "
         f"correction in {lang} instead of as a contradiction.\n"
-        "THE SAME TREATMENT APPLIES TO EVERY FRAME LISTED ABOVE — they are one problem "
-        "in different syntax, and a model that fixes only the frame it was shown "
-        "leaves the rest contradicting themselves. Worked through on a pair that has "
-        "nothing to do with your material:\n"
-        '   "They don\'t call it Greece, they call it Hellas."   -> "Greece" stays '
-        f'Latin, "Hellas" goes into {lang}\n'
-        '   "It is called Hellas, not Greece."                  -> the same two words, '
-        "the same treatment\n"
-        f'   "What is the {lang} word for Greece?"              -> "Greece" stays '
-        "Latin; rendering it in the target as well turns the question into its own "
-        "answer\n"
-        '   "How do you say Greece in Greek?"                   -> the LANGUAGE name is '
-        "translated, the WORD being asked about stays Latin\n"
+        # A worked example per syntactic frame was tried here and MEASURED: the clip
+        # that turns on this rule applied none of the four, and the extra text moved
+        # translations in clips that contain no contrast at all. Demonstrating more
+        # frames did not teach the rule, it only added prompt. One example, and the
+        # frame list above carries the generality.
+        '   "They don\'t call it Greece, they call it Hellas."  ->  "Greece" stays '
+        f'in Latin, "Hellas" goes into {lang}; two different strings on screen, and '
+        "the correction survives.\n"
         "TEST YOUR OWN OUTPUT: if a cue denies and asserts the same string, this rule "
         "applies to it and you have not applied it."
     )

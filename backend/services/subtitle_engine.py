@@ -1295,9 +1295,21 @@ def drop_hallucinated_cues(
         hard: list[str] = []
         soft: list[str] = []
         if cps > impossible_cps:
+            # HARD, and it is the only one left that is. 90 CPS is 35% above the
+            # fastest line ever measured here and less than half of the measured
+            # fabrication, so it is a statement about what a human mouth can do in a
+            # second rather than about how the text looks. It is still subject to the
+            # audio veto below — see the `verdict` block.
             hard.append(f"cps_impossible({cps:.1f}>{impossible_cps:.0f})")
         if normalized and normalized == previous_norm:
-            hard.append("duplicate_of_previous")
+            # SOFT, demoted from hard. A verbatim repeat is a decode loop often
+            # enough to be worth a signal, and speech often enough that deleting on
+            # it alone was wrong: two speakers answering "No." / "No." lost the
+            # second one, and so does any chant, chorus, insistence or drilled
+            # phrase. Reproduced on the live gate. It now needs corroboration and it
+            # is subject to the audio veto, which is what the module already decided
+            # for every other text-shaped signal.
+            soft.append("duplicate_of_previous")
         if cps > max_cps:
             soft.append(f"cps_fast({cps:.1f}>{max_cps:.0f})")
         # Below RATE_SIGNAL_MIN_DUR the rate measures Whisper's 0.02s timestamp
@@ -1311,7 +1323,14 @@ def drop_hallucinated_cues(
 
         verdict = bool(hard) or len(soft) >= 2
         energy_db = None
-        if verdict and not hard and energy_probe is not None:
+        # THE VETO NOW COVERS EVERY DROP, hard signals included. It used to be
+        # `verdict and not hard`, so the two hard signals deleted a cue without the
+        # audio ever being consulted — measured: a 120 CPS cue was dropped and the
+        # probe was never called once. That is the exact rule this module rejects
+        # everywhere else: the text's shape is a suspicion, the audio is the
+        # evidence. If someone is audibly speaking in that window, the cue stays,
+        # however the text looks.
+        if verdict and energy_probe is not None:
             try:
                 measured = energy_probe(start, start + duration)
             except Exception as exc:  # noqa: BLE001 - a probe may never fail a job
@@ -1342,7 +1361,11 @@ def drop_hallucinated_cues(
         record["cps"] = round(cps, 2)
         record["signals"] = hard + soft
         record["energy_db"] = energy_db
-        record["context_only"] = "duplicate_of_previous" not in hard
+        # Keyed on the signal, not on its severity: the point is that a duplicate's
+        # text is by definition still present in the cue that was kept, so handing it
+        # back as context would show the same line twice. That stays true now that
+        # the signal has been demoted from hard to soft.
+        record["context_only"] = "duplicate_of_previous" not in (hard + soft)
         record["drop_reason"] = (
             "hard signal: " if hard else "corroborated signals: "
         ) + ", ".join(hard + soft)

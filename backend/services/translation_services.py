@@ -8,6 +8,7 @@ import openai
 from deep_translator import GoogleTranslator as DeepGoogleTranslator
 
 from config import get_config
+from core.exceptions import TranslationServiceError
 from openai_rate_limiter import rate_limiter  # Phase A+: Advanced rate limiting
 
 # Get config and API key
@@ -120,17 +121,20 @@ class GoogleTranslator(Translator):
                 batch_translations = translator.translate_batch(batch)
 
                 if not batch_translations or len(batch_translations) != len(batch):
-                    logger.error(
-                        f"❌ Google Translate batch {batch_num} mismatch: "
-                        f"expected {len(batch)}, got {len(batch_translations) if batch_translations else 0}"
+                    # NEVER pad with the source. The old branch filled a short or
+                    # missing response with the ENGLISH it was asked to translate,
+                    # and the caller had no way to tell: the job went green and the
+                    # user got a .srt in which some lines were simply not translated,
+                    # under the label of the service they chose. Google is the
+                    # DEFAULT translator on the upload route, so this was the common
+                    # path, not an edge case. A failure the user can see beats a
+                    # success they cannot check.
+                    raise TranslationServiceError(
+                        "google",
+                        f"batch {batch_num} returned "
+                        f"{len(batch_translations) if batch_translations else 0} "
+                        f"translations for {len(batch)} segments",
                     )
-                    # Handle mismatch: pad with original texts
-                    if batch_translations is None:
-                        batch_translations = batch
-                    elif len(batch_translations) < len(batch):
-                        batch_translations.extend(batch[len(batch_translations) :])
-                    else:
-                        batch_translations = batch_translations[: len(batch)]
 
                 all_translations.extend(batch_translations)
 
@@ -138,10 +142,15 @@ class GoogleTranslator(Translator):
                 if i + max_segments < len(texts):
                     time.sleep(0.2)
 
+            except TranslationServiceError:
+                raise
             except Exception as e:
+                # Same reasoning as the mismatch branch above: substituting the
+                # source text turns a translation failure into an invisible one.
                 logger.error(f"Google Translate batch {batch_num} failed: {e}")
-                # In case of failure, use original texts for this batch
-                all_translations.extend(batch)
+                raise TranslationServiceError(
+                    "google", f"batch {batch_num} failed: {e}"
+                ) from e
 
         logger.info(
             f"Google Translate completed: {len(all_translations)} segments translated"
