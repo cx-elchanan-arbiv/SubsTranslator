@@ -129,7 +129,10 @@ class TestFailureScenarios:
         from services.youtube_service import download_youtube_video
 
         monkeypatch.setattr(
-            youtube_service.config, "FAST_WORK_DIR", str(tmp_path / "work"), raising=False
+            youtube_service.config,
+            "FAST_WORK_DIR",
+            str(tmp_path / "work"),
+            raising=False,
         )
         monkeypatch.setattr(
             youtube_service, "DOWNLOADS_FOLDER", str(tmp_path / "out"), raising=False
