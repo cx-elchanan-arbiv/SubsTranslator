@@ -64,19 +64,13 @@ class TestWordsToCuesOnRealClip:
 
     def test_no_flash_cues(self, sample_cues):
         # The defect: a 0.3s cue holding only "things." and a 0.2s "Yeah.".
-        # One documented exception: a complete sentence sitting right before a
-        # question may ship slightly under the floor, because merging it into the
-        # question is the judged spoiler defect (the viewer reads the next question
-        # while this one is being answered) and the engine refuses. Slightly under —
-        # never a flash.
-        for cue, following in zip(sample_cues, sample_cues[1:] + [None]):
-            duration = cue["end"] - cue["start"]
-            if duration >= MIN_CUE_DUR:
-                continue
-            assert duration >= 1.0, f"flash cue: {cue}"
-            assert following is not None and following["text"].rstrip().endswith(
-                "?"
-            ), f"below-floor cue not explained by the question guard: {cue}"
+        # NO exceptions. This test was once relaxed to let a complete sentence sitting
+        # in front of a question ship under the floor, because the question guard
+        # refuses to merge the two. That was fitting the test to the code: the guard is
+        # right and the floor is right, and the cue takes the silence BEHIND it instead
+        # (subtitle_engine.LEAD_IN_MAX).
+        short = [c for c in sample_cues if c["end"] - c["start"] < MIN_CUE_DUR]
+        assert short == [], f"cues shorter than {MIN_CUE_DUR}s: {short}"
 
     def test_monotonic_and_non_overlapping(self, sample_cues):
         assert len(sample_cues) > 1
@@ -101,8 +95,9 @@ class TestWordsToCuesOnRealClip:
         "Do you worry about that?" — a complete sentence glued to the question that
         follows it. In a rapid interview that exact merge put the interviewer's NEXT
         question on screen 2.5 seconds before it was asked. The engine now keeps the
-        statement alone (a hair under the duration floor, logged as a compromise)
-        and the question arrives when it is asked.
+        statement alone, gives it the duration floor out of the silence BEHIND it
+        (see :data:`subtitle_engine.LEAD_IN_MAX`), and the question arrives when it is
+        asked. Nothing is traded away: not the floor, not the gap, not the guard.
         """
         texts = [c["text"] for c in sample_cues]
         assert "It could complicate things." in texts
@@ -135,14 +130,11 @@ class TestWordsToCuesOnRealClip:
 
     def test_min_gap_is_respected_between_cues(self, sample_cues):
         # Lead-out extends into dead air but leaves the default 0.08s breath.
-        # Exception mirrors test_no_flash_cues: a below-floor sentence that the
-        # question guard refused to merge takes every millisecond up to the next
-        # cue's start — duration was judged worth more than the breath there.
+        # No exception: the breath is never spent to buy a crowded cue its duration.
+        # The lead-in pays for that out of the silence behind the cue instead, and it
+        # is bounded by this same gap on BOTH sides.
         for previous, following in zip(sample_cues, sample_cues[1:]):
             gap = following["start"] - previous["end"]
-            if previous["end"] - previous["start"] < MIN_CUE_DUR:
-                assert gap >= -1e-6, (previous, following, gap)
-                continue
             assert gap >= 0.08 - 1e-6, (previous, following, gap)
 
 
@@ -759,14 +751,63 @@ class TestReflowDanglingConnectors:
         reflow_dangling_connectors(cues)
         assert cues == before
 
-    def test_only_one_token_moves_per_cue(self):
+    def test_a_prefix_that_would_swallow_an_article_is_not_moved(self):
+        """This used to pin the output "בהבית", which is not a Hebrew word.
+
+        ב/ל/כ absorb a following definite article (ב + הבית = בבית), so plain
+        concatenation is wrong — and dropping the ה is wrong just as often,
+        because an initial ה may belong to the word (ל + הרים = להרים, never
+        לרים). The join is genuinely ambiguous without morphology, so it is
+        refused: both words stay intact and readable.
+        """
         cues = self._cues("הוא הלך ו ב", "הבית")
         out = reflow_dangling_connectors(cues)
-        assert out[0]["translated_text"] == "הוא הלך ו"
-        assert out[1]["translated_text"] == "בהבית"
+        assert out[0]["translated_text"] == "הוא הלך ו ב"
+        assert out[1]["translated_text"] == "הבית"
 
     def test_empty_input(self):
         assert reflow_dangling_connectors([]) == []
+
+
+@pytest.mark.unit
+class TestArticleAmbiguityIsRefused:
+    """The reflow never invents a word it cannot spell correctly.
+
+    Cue boundaries fall between a preposition and a definite noun constantly, so
+    this is not an edge case — it is one of the commonest joins the step sees.
+    """
+
+    @staticmethod
+    def _cues(first, second):
+        return [
+            {"start": 0.0, "end": 1.0, "translated_text": first},
+            {"start": 1.05, "end": 2.0, "translated_text": second},
+        ]
+
+    @pytest.mark.parametrize("prefix", ["ב", "ל", "כ"])
+    def test_assimilating_prefix_before_he_is_left_alone(self, prefix):
+        out = reflow_dangling_connectors(self._cues(f"הוא היה {prefix}", "הבית"))
+        assert out[0]["translated_text"] == f"הוא היה {prefix}"
+        assert out[1]["translated_text"] == "הבית"
+
+    @pytest.mark.parametrize("prefix", ["ב", "ל", "כ"])
+    def test_the_same_prefix_still_joins_an_indefinite_word(self, prefix):
+        """Only the ambiguous case is refused; the step keeps doing its job."""
+        out = reflow_dangling_connectors(self._cues(f"הוא היה {prefix}", "בית"))
+        assert out[1]["translated_text"] == f"{prefix}בית"
+
+    @pytest.mark.parametrize(
+        "prefix,expected",
+        [("ו", "והבית"), ("מ", "מהבית"), ("ש", "שהבית")],
+    )
+    def test_non_assimilating_prefixes_join_normally(self, prefix, expected):
+        """ו/מ/ש keep the article, so their join is unambiguous and proceeds."""
+        out = reflow_dangling_connectors(self._cues(f"הוא היה {prefix}", "הבית"))
+        assert out[1]["translated_text"] == expected
+
+    def test_latin_maqaf_is_unaffected(self):
+        out = reflow_dangling_connectors(self._cues("הם עברו ב", "2026"))
+        assert out[1]["translated_text"] == "ב-2026"
 
 
 # =============================================================================
@@ -909,31 +950,77 @@ class TestDropHallucinatedCues:
         assert (10.06 - 8.78) and len(real["text"]) / (10.06 - 8.78) > 35
         assert kept == [real] and dropped == []
 
-    def test_the_words_per_second_bound_sits_between_the_two_populations(self):
-        """LOWERED 8.0 -> 7.25, and the exact value is the evidence, not a preference.
+    def test_the_words_per_second_bound_clears_the_fastest_genuine_speech(self):
+        """RAISED 7.25 -> 9.0, and the margin is the point.
 
-        Invented runs were measured at 7.5-7.7 w/s and walked straight under the old
-        8.0. The corpus's fastest GENUINE cue is the cross-talk line above at 7.03 w/s,
-        which a hard signal must never touch — it deletes on its own, with no
-        audio-energy veto to rescue it. The constant therefore has to live strictly
-        inside (7.03, 7.5], and this test is what stops a later round rounding it to a
-        nicer number in either direction.
+        7.25 sat 3% above the fastest genuine cue on record here (7.03 w/s, the
+        cross-talk line above) and deleted on that 3%. Whisper's output is chaotically
+        input-sensitive — one sample in 624,153 changed by a single LSB flips 11 words,
+        reproduced 3/3 — so a 3% margin is measurement noise wearing a threshold's
+        clothes. 9.0 is 28% clear of anything a person has been recorded saying here.
         """
-        from services.subtitle_engine import IMPOSSIBLE_WORDS_PER_SEC
+        from services.subtitle_engine import MAX_SOURCE_WORDS_PER_SEC
 
         fastest_genuine = 9 / (10.06 - 8.78)  # 7.03 w/s, real cross-talk
-        slowest_fabrication = 7.5
-        assert fastest_genuine < IMPOSSIBLE_WORDS_PER_SEC <= slowest_fabrication
+        assert MAX_SOURCE_WORDS_PER_SEC >= fastest_genuine * 1.25
 
-    def test_an_invented_run_at_seven_and_a_half_words_a_second_is_dropped(self):
-        """The measured fabrication rate that used to slide under the old 8.0."""
+    #: 25 one-character words in 2.5s: 10.0 w/s (over the bound) at 19.6 CPS (under
+    #: both CPS signals), so the words-per-second signal is the ONLY one in play.
+    FAST_RATE_TEXT = " ".join(["a"] * 25)
+
+    def test_the_old_hard_threshold_no_longer_even_registers(self):
+        """15 words in 2s is 7.5 w/s — the rate 7.25 was tuned to DELETE. Now: nothing."""
         from services.subtitle_engine import drop_hallucinated_cues
 
-        text = " ".join(f"word{i}" for i in range(15))  # 15 words in 2s = 7.5 w/s
-        kept, dropped = drop_hallucinated_cues([self._cue(text, 0.0, 2.0)])
+        text = " ".join(["a"] * 15)
+        cue = self._cue(text, 0.0, 2.0)
+        assert len(text.split()) / 2.0 == 7.5
+        kept, dropped = drop_hallucinated_cues([cue])
+        assert kept == [cue] and dropped == []
+
+    def test_a_fast_rate_alone_never_deletes_a_cue(self):
+        """The whole demotion in one assertion: rate is a suspicion, not a verdict."""
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cue = self._cue(self.FAST_RATE_TEXT, 0.0, 2.5)
+        kept, dropped = drop_hallucinated_cues([cue])
+        assert kept == [cue] and dropped == []
+
+    def test_a_fast_rate_corroborated_by_degenerate_words_does_drop(self):
+        """Two soft signals agreeing is still a verdict."""
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cue = self._cue(self.FAST_RATE_TEXT, 0.0, 2.5, word_stats=self._stats(run=6))
+        kept, dropped = drop_hallucinated_cues([cue])
 
         assert kept == []
-        assert any(s.startswith("wps_impossible") for s in dropped[0]["signals"])
+        assert any(s.startswith("wps_fast") for s in dropped[0]["signals"])
+
+    def test_loud_audio_vetoes_a_fast_rate(self):
+        """Crosstalk is LOUD, and it is exactly what the old HARD signal deleted."""
+        from services.subtitle_engine import drop_hallucinated_cues
+
+        cue = self._cue(self.FAST_RATE_TEXT, 0.0, 2.5, word_stats=self._stats(run=6))
+        kept, dropped = drop_hallucinated_cues([cue], energy_probe=lambda s, e: -0.1)
+
+        assert kept == [cue] and dropped == []
+
+    def test_the_rate_is_not_computed_below_the_duration_floor(self):
+        """Under RATE_SIGNAL_MIN_DUR the number describes the quantiser, not the speaker.
+
+        Same cue, same corroborating degenerate run, but 0.9s long instead of 2.5s: the
+        rate is even HIGHER (11.1 w/s) and must not count, because Whisper's timestamp
+        error is roughly constant in absolute time and therefore dominates a short span.
+        Without the floor these two soft signals would agree and delete real speech.
+        """
+        from services.subtitle_engine import RATE_SIGNAL_MIN_DUR, drop_hallucinated_cues
+
+        assert RATE_SIGNAL_MIN_DUR == 2.0
+        text = " ".join(["a"] * 10)  # 11.1 w/s, 21.1 CPS
+        cue = self._cue(text, 10.0, 10.9, word_stats=self._stats(run=6))
+        kept, dropped = drop_hallucinated_cues([cue])
+
+        assert kept == [cue] and dropped == []
 
     def test_two_soft_signals_together_do_drop(self):
         from services.subtitle_engine import drop_hallucinated_cues
@@ -1188,15 +1275,11 @@ class TestMinDurationFloor:
             assert cue["end"] - cue["start"] >= MIN_CUE_DUR - self.TOL, cue
 
     def test_no_cue_below_the_floor_on_the_real_fixture(self, sample_cues):
-        # Same single documented exception as TestWordsToCuesOnRealClip
-        # .test_no_flash_cues: the question guard may leave one complete sentence
-        # a hair under the floor rather than spoil the next question.
-        for cue, following in zip(sample_cues, sample_cues[1:] + [None]):
-            duration = cue["end"] - cue["start"]
-            if duration >= MIN_CUE_DUR - self.TOL:
-                continue
-            assert duration >= 1.0, cue
-            assert following is not None and following["text"].rstrip().endswith("?")
+        # No exceptions — see TestWordsToCuesOnRealClip.test_no_flash_cues. The
+        # question guard and the floor are both correct; what was wrong was the
+        # interaction, and the lead-in fixes it.
+        for cue in sample_cues:
+            assert cue["end"] - cue["start"] >= MIN_CUE_DUR - self.TOL, cue
 
     def test_property_no_short_cues_across_many_random_transcripts(self, caplog):
         """Property test: over 200 pseudo-random transcripts, every emitted cue meets
@@ -1508,6 +1591,144 @@ class TestLeadOutCap:
         ]
         tight = words_to_cues(words, lead_out_max=0.2)
         assert tight[0]["end"] <= 4.0 + 0.2 + 1e-6
+
+
+@pytest.mark.unit
+class TestLeadIn:
+    """The question guard refusing a merge must not be paid for by the duration floor.
+
+    ``_can_merge`` will not glue a complete sentence to a following QUESTION — the judged
+    spoiler defect, measured at 2.5s early on a rapid interview. When the question starts
+    less than ``min_dur`` after the statement begins, that refusal used to be settled by
+    shipping the statement under the floor and relaxing the floor's own tests. Both rules
+    are right; the INTERACTION was wrong. The statement takes the silence behind it.
+    """
+
+    def test_the_measured_fixture_cue_gets_its_full_floor(self, sample_cues):
+        from services.subtitle_engine import MIN_CUE_DUR
+
+        cue = next(c for c in sample_cues if c["text"] == "It could complicate things.")
+        assert cue["end"] - cue["start"] >= MIN_CUE_DUR
+
+    def test_it_appears_before_its_own_first_word(self, sample_cues, sample_words):
+        """That is the whole mechanism: the cue is on screen a moment early."""
+        cue = next(c for c in sample_cues if c["text"] == "It could complicate things.")
+        first_word = next(w for w in sample_words if w["w"].strip() == "It")
+        assert cue["start"] < first_word["s"]
+
+    def test_the_question_still_starts_exactly_when_it_is_asked(
+        self, sample_cues, sample_words
+    ):
+        """Nothing is bought by moving the question — that is the defect being avoided."""
+        cue = next(c for c in sample_cues if "Do you worry about that?" in c["text"])
+        first_word = next(w for w in sample_words if w["w"].strip() == "Do")
+        assert cue["start"] == pytest.approx(first_word["s"], abs=1e-3)
+
+    def test_a_lead_in_never_covers_the_previous_cue_s_own_speech(self):
+        """It may only take SILENCE and lead-out — never a word somebody said."""
+        from services.subtitle_engine import MIN_CUE_GAP, words_to_cues
+
+        # Both merges are refused by the question rule, so the middle cue is crowded
+        # and has only the silence behind it to work with.
+        words = [
+            {"s": 0.0, "e": 3.0, "w": "Is that right?"},
+            {"s": 3.6, "e": 4.1, "w": "Short one."},
+            {"s": 4.6, "e": 5.5, "w": "Really?"},
+        ]
+        cues = words_to_cues(words)
+
+        assert [c["text"] for c in cues] == ["Is that right?", "Short one.", "Really?"]
+        assert cues[1]["start"] >= 3.0 + MIN_CUE_GAP - 1e-6, "it ate real speech"
+        assert cues[1]["start"] < 3.6, "no lead-in was taken at all"
+        for previous, following in zip(cues, cues[1:]):
+            assert following["start"] - previous["end"] >= MIN_CUE_GAP - 1e-6
+
+    def test_a_lead_in_never_pushes_the_previous_cue_under_the_floor(self, caplog):
+        """Every cue meets the floor, or the engine said out loud that it could not."""
+        from services.subtitle_engine import MIN_CUE_DUR, words_to_cues
+
+        words = [
+            {"s": 0.0, "e": 0.4, "w": "One."},
+            {"s": 0.5, "e": 0.9, "w": "Two."},
+            {"s": 1.0, "e": 1.4, "w": "Three?"},
+        ]
+        with caplog.at_level("WARNING"):
+            cues = words_to_cues(words)
+
+        for cue in cues:
+            if cue["end"] - cue["start"] < MIN_CUE_DUR - 2e-3:
+                assert "cannot be merged" in caplog.text, cue
+
+    def test_the_cap_bounds_how_early_a_cue_may_appear(self):
+        from services.subtitle_engine import LEAD_IN_MAX, _lead_in_start
+
+        moved = _lead_in_start(
+            10.0, 10.5, 0.0, 1.0, min_dur=1.2, min_gap=0.08, lead_in_max=LEAD_IN_MAX
+        )
+        assert moved == pytest.approx(10.0 - LEAD_IN_MAX)
+
+    def test_a_cue_with_room_ahead_of_it_is_left_alone(self):
+        from services.subtitle_engine import _lead_in_start
+
+        assert (
+            _lead_in_start(
+                10.0, 20.0, 0.0, 1.0, min_dur=1.2, min_gap=0.08, lead_in_max=0.5
+            )
+            == 10.0
+        )
+
+    def test_a_crowded_previous_cue_blocks_the_lead_in_entirely(self):
+        """Fixing one cue by pushing another under the floor is not a fix."""
+        from services.subtitle_engine import _lead_in_start
+
+        assert (
+            _lead_in_start(
+                10.0, 10.5, 9.5, 10.0, min_dur=1.2, min_gap=0.08, lead_in_max=0.5
+            )
+            == 10.0
+        )
+
+    def test_the_first_cue_may_lead_in_but_never_before_zero(self):
+        from services.subtitle_engine import _lead_in_start
+
+        assert (
+            _lead_in_start(
+                0.2, 0.9, None, None, min_dur=1.2, min_gap=0.08, lead_in_max=0.5
+            )
+            == 0.0
+        )
+
+    def test_the_residue_is_still_reported_when_the_lead_in_cannot_close_the_gap(
+        self, caplog
+    ):
+        from services.subtitle_engine import words_to_cues
+
+        long_a = " ".join(["word"] * 12) + "."
+        long_b = " ".join(["other"] * 12) + "?"
+        words, t = [], 0.0
+        for token in long_a.split():
+            words.append({"s": round(t, 3), "e": round(t + 0.02, 3), "w": token})
+            t += 0.03
+        t = 0.5
+        for token in long_b.split():
+            words.append({"s": round(t, 3), "e": round(t + 0.02, 3), "w": token})
+            t += 0.03
+
+        with caplog.at_level("WARNING"):
+            cues = words_to_cues(words)
+        if any(c["end"] - c["start"] < 1.2 - 2e-3 for c in cues):
+            assert "cannot be merged" in caplog.text
+
+    def test_a_clean_transcript_produces_no_compromise_warning(self, caplog):
+        """The warning now describes what SHIPPED, not what step 3c predicted."""
+        with caplog.at_level("WARNING"):
+            words_to_cues(
+                [
+                    {"s": 0.0, "e": 2.0, "w": "A sentence with plenty of room."},
+                    {"s": 4.0, "e": 6.0, "w": "And another one, also roomy."},
+                ]
+            )
+        assert "cannot be merged" not in caplog.text
 
 
 @pytest.mark.unit

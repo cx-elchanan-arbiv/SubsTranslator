@@ -21,9 +21,9 @@ from core.exceptions import (
 )
 from logging_config import get_logger
 from performance_monitor import performance_monitor
-from services.subtitle_engine import IMPOSSIBLE_WORDS_PER_SEC
+from services.subtitle_engine import MAX_SOURCE_WORDS_PER_SEC, RATE_SIGNAL_MIN_DUR
 from services.translation_services import get_translator
-from services.whisper_smart import smart_whisper
+from services.whisper_smart import resolve_model, smart_whisper
 
 # Configuration
 config = get_config()
@@ -160,11 +160,39 @@ ASR_CONDITION_ON_PREVIOUS_TEXT = True
 # the viewer, and a rule you cannot unit-test is a rule you are hoping about.
 
 
+#: How far below the file's OWN RMS a sample must sit before it counts as silence
+#: rather than sound, for the trailing-silence trim.
+#:
+#: This used to be an absolute amplitude, 0.004 (~-48 dBFS), and an absolute threshold
+#: is a claim about the recording LEVEL that nothing in this pipeline controls. On a
+#: broadcast-levelled track (-23 LUFS is ~0.07 RMS linear) 0.004 sits 26 dB below the
+#: programme, which is what it was tuned against and where it behaves well. On a quietly
+#: recorded interview peaking at 0.01 it sits 8 dB below the PEAK — i.e. inside the
+#: speech — and the trim eats the last word.
+#:
+#: So the same ratio, measured against the file's own level: -26 dB relative to the
+#: whole file's RMS. That reproduces the old behaviour byte-for-byte on the material the
+#: old number was tuned on and rescales it for everything else. It mirrors
+#: :data:`subtitle_engine.ENERGY_VETO_DB`, which is relative for exactly this reason.
+TRAILING_SILENCE_REL_DB = -26.0
+
+#: Absolute floor under the relative threshold above, in linear amplitude.
+#:
+#: Two LSBs of 16-bit PCM. A digitally silent tail is not mathematically zero — it
+#: carries dither at ±1 LSB (1/32768) — and on a very quiet file the relative threshold
+#: alone can fall UNDER that dither, at which point the trim finds "sound" everywhere
+#: and never fires. This is measured, not theoretical: a ±1-LSB change is inaudible (it
+#: is below the noise floor of any microphone) and is exactly the perturbation that was
+#: shown to flip Whisper's transcript, which is why silence has to be recognised as
+#: silence even when the file is quiet.
+DITHER_FLOOR = 2.0 / 32768.0
+
+
 def _trim_trailing_silence(
     audio: np.ndarray,
     sample_rate: int,
     *,
-    threshold: float = 0.004,
+    silence_rel_db: float = TRAILING_SILENCE_REL_DB,
     pad_s: float = 0.35,
 ) -> tuple[np.ndarray, float]:
     """Cut the dead air off the END of the audio, so Whisper has nothing to invent into.
@@ -178,6 +206,13 @@ def _trim_trailing_silence(
     spoken word carries nothing the transcript needs, so the cheapest fix available is
     to stop handing it to the decoder.
 
+    Silence is RELATIVE to the file's own level, never an absolute amplitude — see
+    :data:`TRAILING_SILENCE_REL_DB` for the quiet-interview case an absolute threshold
+    got wrong, and :data:`DITHER_FLOOR` for the bound underneath it. This is the same
+    choice :data:`subtitle_engine.ENERGY_VETO_DB` makes: this pipeline does not control
+    the recording level of what it is handed, so every level test it applies has to be
+    expressed against the material in front of it.
+
     Only the TAIL is touched, never the head. A clip's opening is where a quiet first
     syllable lives, and this pipeline has already lost a first second once (see the
     beam-size note in :func:`transcribe_with_words`); trimming the front would be
@@ -189,19 +224,21 @@ def _trim_trailing_silence(
     Args:
         audio: mono float samples, as produced by :func:`_extract_audio_np`.
         sample_rate: samples per second of ``audio`` (16000 on this path).
-        threshold: absolute amplitude above which a sample counts as SOUND. 0.004 is
-            roughly -48 dBFS — under room tone, over the dither floor of a silent
-            digital track.
+        silence_rel_db: dB below the file's own RMS at which a sample stops counting as
+            sound. See :data:`TRAILING_SILENCE_REL_DB`.
         pad_s: how much silence to keep after the last such sample.
 
     Returns:
         ``(audio, seconds_trimmed)``. The INPUT array is returned unchanged (and
-        ``0.0``) when there is nothing to do: empty input, no sample anywhere above
-        ``threshold`` (a silent or pathologically quiet track is not something to
-        truncate to nothing), or a tail already no longer than ``pad_s``.
+        ``0.0``) when there is nothing to do: empty input, no sample anywhere above the
+        threshold (a silent or pathologically quiet track is not something to truncate
+        to nothing), or a tail already no longer than ``pad_s``.
     """
     if audio is None or len(audio) == 0 or sample_rate <= 0:
         return audio, 0.0
+
+    rms = float(np.sqrt(np.mean(np.square(audio.astype(np.float64)))))
+    threshold = max(rms * (10.0 ** (float(silence_rel_db) / 20.0)), DITHER_FLOOR)
 
     loud = np.nonzero(np.abs(audio) > threshold)[0]
     if loud.size == 0:
@@ -211,6 +248,37 @@ def _trim_trailing_silence(
     if keep >= len(audio):
         return audio, 0.0
     return audio[:keep], (len(audio) - keep) / float(sample_rate)
+
+
+def _translation_failed(message: str, segments=None):
+    """Build the pipeline's documented "translation failed, transcript survived" error.
+
+    THE DEFECT THIS CLOSES: three places on the LEGACY (default) path caught a
+    translation failure and assigned the SOURCE text to ``translated_text``. The job
+    then finished GREEN and the user was handed an .srt in the wrong language with
+    nothing anywhere saying so — the single worst outcome this pipeline can produce,
+    because it is indistinguishable from success until someone reads the file. The v2
+    path has had the right contract for a while: FAIL, and hand back whatever
+    transcript was produced so the expensive part is not thrown away.
+
+    ``TranslationFailedWithSalvage`` lives in ``tasks.processing_tasks``, which imports
+    this module, so it is imported LAZILY: a module-level import would be circular. If
+    that import is unavailable (this module is importable with no Celery at all), the
+    failure is still a failure — it is raised as a ``TranslationServiceError`` instead
+    of being silently downgraded to a wrong-language success.
+
+    The transcript rides along on ``.segments``. ``original_srt`` is left empty because
+    this module does not know where — or whether — the caller wrote one; the caller,
+    which does, is the one that fills it in.
+    """
+    try:
+        from tasks.processing_tasks import TranslationFailedWithSalvage
+    except Exception:  # pragma: no cover - Celery-free import context
+        error = TranslationServiceError("translation", message)
+    else:
+        error = TranslationFailedWithSalvage(message, "")
+    error.segments = list(segments or [])
+    return error
 
 
 def _normalized_segment_text(text: str) -> str:
@@ -227,27 +295,61 @@ def _normalized_segment_text(text: str) -> str:
     )
 
 
+#: Words in a repeated segment below which the repetition is speech, not a decode loop.
+#:
+#: "No. No." and "Wait, wait." are things people say, and Whisper transcribes them
+#: correctly; a decode loop is a whole CLAUSE emitted twice ("thanks for watching" ->
+#: "thanks for watching"). Requiring four words keeps the loop signature and stops the
+#: signal firing on deliberate short repetition, which is a rhetorical device this
+#: pipeline is elsewhere instructed to PRESERVE (see ``translation_v2``'s repetition
+#: rule) — flagging it here and preserving it there is the same contradiction wearing
+#: two hats.
+REPEAT_LOOP_MIN_WORDS = 4
+
+
 def _segment_suspects(segments: list[dict]) -> list[dict]:
-    """Raw ASR segments that cannot be a recording of what was said.
+    """Raw ASR segments worth a second look. **DETECTION ONLY — nothing is deleted.**
 
     WHY THIS EXISTS AT SEGMENT LEVEL, when ``subtitle_engine.drop_hallucinated_cues``
     already gates CUES: by the time a cue exists, ``words_to_cues`` has re-spotted the
     transcript, and re-spotting DILUTES timing — it hands a cue the silence around it,
-    so a fabrication's impossible speech rate is averaged away before anything measures
-    it. Judged evidence: 9 invented words packed into 0.44s (20 words/second) sailed
-    through the cue gate intact, and elsewhere invented runs measured 7.5-7.7 w/s and
-    slid under the old 8.0 cue threshold. Measured on the RAW segment, against the
-    timestamps Whisper itself produced, both are obvious.
+    so a fabrication's speech rate is averaged away before anything measures it.
+    Measured on the RAW segment, against the timestamps Whisper itself produced, the
+    shape is still visible.
 
-    Two signals, both closed-form, both already paid for by the corpus:
+    WHY IT NO LONGER DELETES ANYTHING
+    ---------------------------------
+    It used to drop these segments and the word timestamps inside their spans. Two
+    measurements ended that:
 
-    * **impossible words per second** — over :data:`subtitle_engine.IMPOSSIBLE_WORDS_PER_SEC`,
-      a bound on the physics of speech (see that constant). A segment with text and a
-      zero or negative duration is the same claim in its purest form: words stamped on
-      no time at all.
-    * **verbatim repeat of the previous segment** — Whisper's decode loop, which emits
-      the same sentence over and over once it latches. Compared with punctuation,
-      casing and whitespace normalised away, because the loop varies those.
+    * Across 7 real runs the deletion **never once fired**. The quality win credited to
+      it came from :func:`_choose_asr_pass` — picking the cleaner of two COMPLETE
+      transcripts — which is non-destructive and is still here.
+    * Whisper is chaotically input-sensitive. One sample in 624,153 changed by a single
+      LSB (inaudible, below any microphone's noise floor) flipped 11 words of
+      transcript, reproduced 3/3 in both directions; an inaudible ±1-LSB dither on 0.1%
+      of samples moved 13.1% of the words on one clip. A rate computed from one decode
+      of one file is therefore not evidence that a person did not say something.
+
+    So the counts feed :func:`_choose_asr_pass` and the job log, and nothing else. A
+    suspect segment ships.
+
+    Two signals:
+
+    * **fast words per second** — over :data:`subtitle_engine.MAX_SOURCE_WORDS_PER_SEC`,
+      and only on segments lasting at least
+      :data:`subtitle_engine.RATE_SIGNAL_MIN_DUR`; below that the number describes
+      Whisper's 0.02s timestamp quantiser rather than the speaker.
+    * **verbatim repeat of the previous segment**, at least
+      :data:`REPEAT_LOOP_MIN_WORDS` words long — Whisper's decode loop, which emits the
+      same clause over and over once it latches. Compared with punctuation, casing and
+      whitespace normalised away, because the loop varies those.
+
+    A zero or negative duration is NOT a signal. It was, and it contradicted the sibling
+    gate: ``subtitle_engine.drop_hallucinated_cues`` explicitly KEEPS a zero-length cue
+    because "a zero-length cue has infinite CPS by arithmetic alone, which says nothing
+    about whether its text is real". Two gates reading the same signal in opposite
+    directions is not two opinions, it is one bug.
 
     Blank segments are never suspect: there is no fabrication in a segment with no
     words, and they are skipped for the repeat comparison too so two empties in a row
@@ -257,8 +359,8 @@ def _segment_suspects(segments: list[dict]) -> list[dict]:
 
     Returns:
         Copies of the suspect segments in input order, each carrying ``suspect_reason``
-        (a short greppable string) and ``index`` (its position in ``segments``, so the
-        caller can drop exactly these and nothing that merely looks like them).
+        (a short greppable string) and ``index`` (its position in ``segments``, for the
+        log line).
     """
     suspects: list[dict] = []
     previous_norm = ""
@@ -275,16 +377,16 @@ def _segment_suspects(segments: list[dict]) -> list[dict]:
 
         normalized = _normalized_segment_text(text)
         reason = None
-        if duration <= 0:
-            reason = "impossible_wps(no_duration)"
-        else:
+        if duration >= RATE_SIGNAL_MIN_DUR:
             words_per_sec = len(text.split()) / duration
-            if words_per_sec > IMPOSSIBLE_WORDS_PER_SEC:
-                reason = (
-                    f"impossible_wps({words_per_sec:.2f}>"
-                    f"{IMPOSSIBLE_WORDS_PER_SEC:.2f})"
-                )
-        if reason is None and normalized and normalized == previous_norm:
+            if words_per_sec > MAX_SOURCE_WORDS_PER_SEC:
+                reason = f"fast_wps({words_per_sec:.2f}>{MAX_SOURCE_WORDS_PER_SEC:.2f})"
+        if (
+            reason is None
+            and normalized
+            and normalized == previous_norm
+            and len(normalized.split()) >= REPEAT_LOOP_MIN_WORDS
+        ):
             reason = "repeat_of_previous"
 
         previous_norm = normalized
@@ -352,40 +454,138 @@ def _covers(word: dict, start: float, end: float) -> bool:
     return (word_end > start and word_start < end) or (start <= word_start <= end)
 
 
-def _drop_segments(
-    segments: list[dict], words: list[dict], suspects: list[dict]
-) -> tuple[list[dict], list[dict]]:
-    """Remove suspect segments and the word entries sitting inside their time spans.
+# =============================================================================
+# Coverage invariant (v2 path only) — the OPPOSITE of a deletion rule
+# =============================================================================
+#: Uncovered audio at the END of the decode, in seconds, below which nothing is done.
+#:
+#: MEASURED: on one corpus clip the ASR simply STOPPED 5.25 seconds before the end of
+#: the audio. Nothing was wrong with the transcript it produced; it was just short.
+#: Re-decoding that region alone recovered the exact missing sentence ("if you enjoyed
+#: the video don't forget to like and subscribe"). Under a second is ordinary — a final
+#: consonant's release, the pad :func:`_trim_trailing_silence` deliberately leaves — and
+#: re-decoding it would buy an empty window and a chance to invent into it.
+COVERAGE_MIN_UNCOVERED_S = 1.0
 
-    Words are removed BY TIME, not by matching text: the word list is a flat stream with
-    no segment ids on it, and leaving a dropped segment's words behind would put the
-    fabrication straight back on screen through ``words_to_cues``, which spots from
-    words alone.
+#: How far below the whole file's RMS the uncovered tail may sit and still be re-decoded.
+#:
+#: MEASURED on the recovered clip: the uncovered tail sat at -14.4 dB against a file
+#: average of -19.3 dB — i.e. it was 4.9 dB LOUDER than the programme. That is not a
+#: fade-out, it is speech nobody transcribed. -20 dB relative is deliberately generous:
+#: this mechanism only ever ADDS text, and the far more expensive error is the one that
+#: was measured (a sentence silently missing) rather than a redundant decode of room
+#: tone. Validated across all 11 corpus clips: it fires on the 3 with a speech-level
+#: tail and stays silent on the other 8.
+COVERAGE_MAX_QUIET_DB = -20.0
 
-    Pure: new lists of the same dicts; nothing is mutated. Suspects are identified by
-    the ``index`` key :func:`_segment_suspects` annotates them with.
+
+def _relative_db(region: np.ndarray, whole: np.ndarray) -> float | None:
+    """Level of ``region`` in dB RELATIVE to ``whole``'s RMS. ``None`` if unmeasurable.
+
+    Relative, never absolute, for the same reason :data:`TRAILING_SILENCE_REL_DB` is:
+    nothing in this pipeline controls the recording level of what it is handed, so
+    "loud" only means anything against the material itself.
     """
-    drop_at = {s["index"] for s in suspects if "index" in s}
-    if not drop_at:
-        return list(segments or []), list(words or [])
+    if region is None or whole is None or len(region) == 0 or len(whole) == 0:
+        return None
+    region_rms = float(np.sqrt(np.mean(np.square(region.astype(np.float64)))))
+    whole_rms = float(np.sqrt(np.mean(np.square(whole.astype(np.float64)))))
+    if region_rms <= 0.0 or whole_rms <= 0.0:
+        return None
+    return 20.0 * float(np.log10(region_rms / whole_rms))
 
-    spans = []
-    for index in sorted(drop_at):
-        segment = segments[index]
+
+def _uncovered_tail(
+    segments: list[dict],
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    min_uncovered_s: float = COVERAGE_MIN_UNCOVERED_S,
+    max_quiet_db: float = COVERAGE_MAX_QUIET_DB,
+) -> dict | None:
+    """The stretch of audio after the last segment, when it still sounds like speech.
+
+    THE COVERAGE INVARIANT: every second of audio handed to the decoder should be
+    accounted for by some segment. It is the exact opposite of a deletion rule — it can
+    only ever discover that something is MISSING, and the caller's only permitted
+    response is to add.
+
+    ``_trim_trailing_silence`` runs first, on the same array, so trailing DIGITAL
+    silence is already gone by the time coverage is measured: anything still uncovered
+    here is audio the decoder was given and did not describe. The two mechanisms
+    compose, and in that order — measuring coverage against the untrimmed file would
+    report every quiet ending as a gap.
+
+    Pure: numpy in, a dict or ``None`` out; nothing is decoded and nothing is mutated.
+
+    Returns:
+        ``{"start", "end", "duration", "db"}`` in seconds (``db`` relative to the whole
+        array's RMS), or ``None`` when there is no gap, the gap is shorter than
+        ``min_uncovered_s``, or the gap is quieter than ``max_quiet_db`` — which is what
+        an ordinary fade-out or a room-tone ending looks like.
+    """
+    if audio is None or len(audio) == 0 or sample_rate <= 0:
+        return None
+    total_s = len(audio) / float(sample_rate)
+
+    last_end = 0.0
+    for segment in segments or []:
         try:
-            spans.append(
-                (float(segment.get("start", 0) or 0), float(segment.get("end", 0) or 0))
-            )
+            last_end = max(last_end, float((segment or {}).get("end", 0) or 0))
         except (TypeError, ValueError):
             continue
+    last_end = min(max(last_end, 0.0), total_s)
 
-    kept_segments = [s for i, s in enumerate(segments or []) if i not in drop_at]
-    kept_words = [
-        w
-        for w in (words or [])
-        if not any(_covers(w, start, end) for start, end in spans)
-    ]
-    return kept_segments, kept_words
+    if total_s - last_end < min_uncovered_s:
+        return None
+
+    first = int(last_end * sample_rate)
+    level = _relative_db(audio[first:], audio)
+    if level is None or level < max_quiet_db:
+        return None
+    return {
+        "start": last_end,
+        "end": total_s,
+        "duration": total_s - last_end,
+        "db": round(level, 2),
+    }
+
+
+def _shifted(items: list[dict], offset: float, keys: tuple) -> list[dict]:
+    """Copies of ``items`` with the named time keys moved later by ``offset`` seconds.
+
+    A region decode returns timestamps relative to the region, so they mean nothing
+    until they are put back where the audio came from. Pure.
+    """
+    out = []
+    for item in items or []:
+        shifted = dict(item)
+        for key in keys:
+            try:
+                shifted[key] = float(item.get(key, 0) or 0) + offset
+            except (TypeError, ValueError):
+                pass
+        out.append(shifted)
+    return out
+
+
+def _recovery_is_new(recovered: list[dict], previous_text: str) -> tuple[bool, str]:
+    """Is a tail re-decode worth appending? ``(yes, why_not)``.
+
+    Two ways a recovery is worse than nothing, and both have been seen from Whisper on
+    short windows: an EMPTY result (a window with nothing to say still has to emit
+    tokens, and sometimes emits none), and a verbatim REPEAT of the segment before the
+    gap, which is the decode loop reaching across the seam. Either one would put a
+    duplicate line on screen in the name of completeness.
+
+    Pure.
+    """
+    text = " ".join(str((s or {}).get("text") or "").strip() for s in recovered or [])
+    if not text.strip():
+        return False, "the re-decode returned no text"
+    if _normalized_segment_text(text) == _normalized_segment_text(previous_text):
+        return False, "the re-decode repeated the segment before the gap verbatim"
+    return True, ""
 
 
 def _word_loss_report(
@@ -705,9 +905,11 @@ def transcribe_and_translate_streamed(
         if model_callback:
             model_callback()
 
-        # Choose and load model
+        # Choose and load model. `resolve_model` and not a local copy of the rule:
+        # this path called `load_model` directly, so the memory guard and every
+        # downgrade WARNING lived in a helper production never reached.
         if model_preference and model_preference in ["tiny", "base", "medium", "large"]:
-            model_name = model_preference
+            model_name = resolve_model(model_preference)
         else:
             model_name = "tiny"
 
@@ -783,10 +985,11 @@ def transcribe_and_translate_streamed(
                 logger.error(
                     f"❌ [Thread-{thread_id}] Batch #{batch_idx} translation failed: {e}"
                 )
-                # Return segments with original text as fallback
-                for seg in batch_segments:
-                    seg["translated_text"] = seg["text"]
-                return batch_segments
+                # NO source-text fallback. Assigning `seg["text"]` to
+                # `translated_text` here is what shipped untranslated .srt files under a
+                # green job — see :func:`_translation_failed`. The failure travels; the
+                # collector below turns it into one visible job failure.
+                raise
 
         # Process segments as they arrive
         try:
@@ -852,6 +1055,7 @@ def transcribe_and_translate_streamed(
                 f"⏳ Waiting for {len(batch_futures)} translation batches to complete..."
             )
 
+            failed_batches = []
             for future in as_completed(batch_futures):
                 batch_idx, original_batch = batch_futures[future]
                 try:
@@ -864,9 +1068,12 @@ def transcribe_and_translate_streamed(
                     logger.info(f"✅ Collected batch #{batch_idx} results")
                 except Exception as e:
                     logger.error(f"❌ Failed to collect batch #{batch_idx}: {e}")
-                    # Use original batch as fallback
+                    failed_batches.append((batch_idx, e))
+                    # The SOURCE text is kept — it is the salvage — but it is never
+                    # promoted to `translated_text`. A cue with no translation must
+                    # look like a cue with no translation.
                     for seg in original_batch:
-                        seg["translated_text"] = seg["text"]
+                        seg.pop("translated_text", None)
                         completed_segments[seg["index"]] = seg
 
             # Reconstruct segments in order
@@ -877,6 +1084,17 @@ def transcribe_and_translate_streamed(
                     # Remove index field before returning
                     del seg["index"]
                     all_segments.append(seg)
+
+            if failed_batches:
+                # FAIL VISIBLY, carrying the transcript. Substituting the source for a
+                # translation and returning success is the one outcome this pipeline
+                # must never produce — see :func:`_translation_failed`.
+                raise _translation_failed(
+                    f"{len(failed_batches)} of {len(batch_futures)} translation "
+                    f"batch(es) failed (first: {failed_batches[0][1]}) — "
+                    f"{len(all_segments)} transcribed segments salvaged",
+                    segments=all_segments,
+                )
 
             logger.info(f"✅ All translations complete: {len(all_segments)} segments")
 
@@ -1243,11 +1461,22 @@ def transcribe_with_words(
     ``condition_on_previous_text``) is still shared, so a v2/legacy comparison of the
     same request still isolates the flags plus this one prompt.
 
-    What this returns is not raw Whisper output. Three guards run over it, each one
-    bought with a measured defect that reached a delivered file:
-    :func:`_trim_trailing_silence` before the decode, :func:`_segment_suspects` +
-    :func:`_choose_asr_pass` + :func:`_drop_segments` after it, and
-    :func:`_word_loss_report` as a pure log. Only the third changes nothing.
+    What this returns is not raw Whisper output. Four mechanisms run over it, each one
+    bought with a measured defect that reached a delivered file — and **not one of them
+    deletes transcript**:
+
+    * :func:`_trim_trailing_silence` before the decode — it shortens the decoder's
+      INPUT, so there is no window of dead air for the model to invent into.
+    * :func:`_segment_suspects` + :func:`_choose_asr_pass` after it. The suspect counts
+      choose between two COMPLETE transcripts (non-destructive, and the source of the
+      measured quality win) and are otherwise logged. They used to delete the segments
+      they flagged; see :func:`_segment_suspects` for the two measurements that ended
+      that.
+    * :func:`_uncovered_tail` — the coverage invariant, which is the opposite of a
+      deletion rule: audio the decoder was handed and did not describe gets re-decoded
+      and APPENDED. It runs after the trim, so trailing digital silence is already gone
+      and cannot be mistaken for a gap.
+    * :func:`_word_loss_report` as a pure log.
 
     Args:
         collect_words: gather per-word timestamps. Whisper is asked for them either way
@@ -1331,9 +1560,10 @@ def transcribe_with_words(
     if model_callback:
         model_callback()
 
-    # Same selection rule as the legacy streamed path, so both paths pick the same model.
+    # Same selection rule as the legacy streamed path, so both paths pick the same
+    # model — and both now go through the memory guard rather than around it.
     if model_preference and model_preference in ["tiny", "base", "medium", "large"]:
-        model_name = model_preference
+        model_name = resolve_model(model_preference)
     else:
         model_name = "tiny"
 
@@ -1378,16 +1608,23 @@ def transcribe_with_words(
     # log keep reporting the clip the user submitted.
     audio_np, trimmed_s = _trim_trailing_silence(audio_np, 16000)
     if trimmed_s >= 0.5:
+        # f-strings, not %-args, everywhere in this function. ``logging_config``
+        # configures structlog with ``wrapper_class=structlog.BoundLogger``, whose
+        # ``warning(event, *args)`` raises TypeError on the second positional argument
+        # — so a %-style log line here is a job that dies inside a log statement.
         logger.info(
-            "✂️ v2 transcription: trimmed %.2fs of trailing silence before ASR — "
-            "that is decode window Whisper would have had to emit tokens for",
-            trimmed_s,
+            f"✂️ v2 transcription: trimmed {trimmed_s:.2f}s of trailing silence before "
+            f"ASR — that is decode window Whisper would have had to emit tokens for"
         )
 
     transcription_start = time.time()
 
-    def _materialize(run_options):
-        segments_iter, run_info = model.transcribe(audio_np, **run_options)
+    def _materialize(run_options, audio=None):
+        # `audio` overrides the full array for the tail re-decode, which hands the model
+        # ONE region and gets region-relative timestamps back; the caller shifts them.
+        segments_iter, run_info = model.transcribe(
+            audio_np if audio is None else audio, **run_options
+        )
         out_segments: list[dict] = []
         out_words: list[dict] = []
         for segment in segments_iter:
@@ -1439,35 +1676,33 @@ def transcribe_with_words(
     # spoken in the time it is stamped on. Which pass then ships is decided by
     # measurement, not by which one ran second — see :func:`_choose_asr_pass`.
     chosen_primed = options["initial_prompt"] is not None
+    chosen_options = options
     transcript, terminals = _terminal_count(segments)
     suspects = _segment_suspects(segments)
     attractor = terminals == 0 and len(transcript.split()) >= 40
 
     if not chosen_primed and (attractor or suspects):
+        symptom = (
+            "the unpunctuated-attractor signature and unusual segments"
+            if attractor and suspects
+            else (
+                "the unpunctuated-attractor signature"
+                if attractor
+                else "unusual segments"
+            )
+        )
         logger.warning(
-            "⚠️ v2 transcription: re-running once WITH the punctuation primer — "
-            "unprimed pass shows %s (%d words, %d terminals, %d impossible segment(s))",
-            (
-                "the unpunctuated-attractor signature and fabrication"
-                if attractor and suspects
-                else (
-                    "the unpunctuated-attractor signature"
-                    if attractor
-                    else "fabrication"
-                )
-            ),
-            len(transcript.split()),
-            terminals,
-            len(suspects),
+            f"⚠️ v2 transcription: re-running once WITH the punctuation primer — "
+            f"unprimed pass shows {symptom} ({len(transcript.split())} words, "
+            f"{terminals} terminals, {len(suspects)} unusual segment(s))"
         )
         primed_options = dict(options, initial_prompt=asr_primer_for(source_lang))
         try:
             primed_segments, primed_words, primed_info = _materialize(primed_options)
         except Exception as exc:  # noqa: BLE001 - a second opinion may never fail a job
             logger.warning(
-                "⚠️ v2 transcription: the primed re-run failed (%s) — keeping the "
-                "unprimed pass",
-                exc,
+                f"⚠️ v2 transcription: the primed re-run failed ({exc}) — keeping the "
+                f"unprimed pass"
             )
         else:
             primed_suspects = _segment_suspects(primed_segments)
@@ -1477,46 +1712,79 @@ def transcribe_with_words(
             # THE audit line: every later "why did this clip ship what it shipped?"
             # starts here, so it carries both measurements and the rule that used them.
             logger.info(
-                "🎚️ v2 ASR pass selection: chose the %s pass — %s "
-                "(unprimed: %d segments/%d impossible; primed: %d segments/%d impossible)",
-                choice,
-                why,
-                len(segments),
-                len(suspects),
-                len(primed_segments),
-                len(primed_suspects),
+                f"🎚️ v2 ASR pass selection: chose the {choice} pass — {why} "
+                f"(unprimed: {len(segments)} segments/{len(suspects)} unusual; "
+                f"primed: {len(primed_segments)} segments/{len(primed_suspects)} unusual)"
             )
             if choice == "primed":
                 chosen_primed = True
+                chosen_options = primed_options
                 segments, words, info = primed_segments, primed_words, primed_info
                 suspects = primed_suspects
                 detected_language = info.language
         transcript, terminals = _terminal_count(segments)
 
-    # Drop what cannot have been said. These are not "probably wrong" cues — they are
-    # words with no time to have been spoken in, and verbatim decode loops; both
-    # measured classes, both physically impossible rather than merely suspicious. Left
-    # in, they reach the viewer as invented dialogue, and (worse) as invented dialogue
-    # the translator then makes fluent.
-    if suspects:
-        for suspect in suspects:
-            logger.warning(
-                "🚫 v2 ASR: dropping fabricated segment %.2f-%.2fs [%s]: %r",
-                float(suspect.get("start", 0) or 0),
-                float(suspect.get("end", 0) or 0),
-                suspect.get("suspect_reason"),
-                str(suspect.get("text") or "").strip()[:80],
-            )
-        before_words = len(words)
-        segments, words = _drop_segments(segments, words, suspects)
+    # Suspect segments are REPORTED, never removed — see :func:`_segment_suspects` for
+    # the two measurements that ended the deletion (it never fired across 7 real runs,
+    # and a one-LSB audio change flips whole sentences, so a rate is not evidence that
+    # nobody spoke). The counts have already done their only job: choosing between two
+    # complete transcripts. What is left is a grep for the next reviewer.
+    for suspect in suspects:
         logger.warning(
-            "🚫 v2 ASR: dropped %d fabricated segment(s) and %d of their word "
-            "timestamps — %d segments remain",
-            len(suspects),
-            before_words - len(words),
-            len(segments),
+            f"🔎 v2 ASR: segment {float(suspect.get('start', 0) or 0):.2f}-"
+            f"{float(suspect.get('end', 0) or 0):.2f}s looks unusual "
+            f"[{suspect.get('suspect_reason')}] — KEPT (this is a measurement, not a "
+            f"verdict; nothing is deleted on it): "
+            f"{str(suspect.get('text') or '').strip()[:80]!r}"
         )
-        transcript, terminals = _terminal_count(segments)
+
+    # === Coverage invariant: audio the decoder was handed and did not describe ===
+    #
+    # THE MEASURED FAILURE: on one clip the ASR stopped 5.25s before the end while the
+    # uncovered tail was LOUDER than the file average (-14.4 dB vs -19.3 dB). Nothing
+    # flagged it — a transcript that is merely SHORT looks exactly like a transcript.
+    # Re-decoding just that region recovered the missing sentence verbatim. This only
+    # ever appends; it never deletes and never replaces.
+    gap = _uncovered_tail(segments, audio_np, 16000)
+    if gap is not None:
+        logger.warning(
+            f"🕳️ v2 ASR coverage: {gap['duration']:.2f}s of audio after the last "
+            f"segment ({gap['start']:.2f}-{gap['end']:.2f}s) is not described by any "
+            f"segment, and it is at {gap['db']:+.1f} dB against the file — that is "
+            f"speech level. Re-decoding just that region."
+        )
+        try:
+            region = audio_np[int(gap["start"] * 16000) :]
+            # No conditioning: the region is decoded on its own, so there is no
+            # previous output to carry a loop or a style across the seam into it.
+            tail_segments, tail_words, _tail_info = _materialize(
+                dict(chosen_options, condition_on_previous_text=False),
+                audio=region,
+            )
+        except Exception as exc:  # noqa: BLE001 - a recovery may never fail a job
+            logger.warning(
+                f"⚠️ v2 ASR coverage: the tail re-decode failed ({exc}) — keeping the "
+                f"transcript as it is"
+            )
+        else:
+            previous_text = str(segments[-1].get("text") or "") if segments else ""
+            usable, why_not = _recovery_is_new(tail_segments, previous_text)
+            if not usable:
+                logger.warning(f"🕳️ v2 ASR coverage: nothing appended — {why_not}")
+            else:
+                tail_segments = _shifted(tail_segments, gap["start"], ("start", "end"))
+                tail_words = _shifted(tail_words, gap["start"], ("s", "e"))
+                segments = list(segments) + tail_segments
+                words = list(words) + tail_words
+                recovered_text = " ".join(
+                    str(s.get("text") or "").strip() for s in tail_segments
+                )[:160]
+                logger.warning(
+                    f"🕳️ v2 ASR coverage: RECOVERED {len(tail_segments)} segment(s) / "
+                    f"{len(tail_words)} word(s) from the uncovered tail: "
+                    f"{recovered_text!r}"
+                )
+                transcript, terminals = _terminal_count(segments)
 
     transcription_duration = time.time() - transcription_start
     performance_monitor.log_transcription_performance(
@@ -1525,8 +1793,8 @@ def transcribe_with_words(
 
     if collect_words and not words:
         logger.warning(
-            "⚠️ v2 transcription: Whisper returned no word timestamps for %d segments",
-            len(segments),
+            f"⚠️ v2 transcription: Whisper returned no word timestamps for "
+            f"{len(segments)} segments"
         )
 
     # Segments whose text says more than their words do — see :func:`_word_loss_report`.
@@ -1534,14 +1802,10 @@ def transcribe_with_words(
     # a word and inverted a sentence" from an audit finding into a grep.
     for loss in _word_loss_report(segments, words):
         logger.warning(
-            "⚠️ v2 ASR word loss: segment %.2f-%.2fs has %d text tokens but only %d "
-            "word timestamps (%d missing) — spotting rebuilds cues from WORDS, so "
-            "those tokens will not reach the viewer",
-            loss["start"],
-            loss["end"],
-            loss["text_tokens"],
-            loss["word_tokens"],
-            loss["gap"],
+            f"⚠️ v2 ASR word loss: segment {loss['start']:.2f}-{loss['end']:.2f}s has "
+            f"{loss['text_tokens']} text tokens but only {loss['word_tokens']} word "
+            f"timestamps ({loss['gap']} missing) — spotting rebuilds cues from WORDS, "
+            f"so those tokens will not reach the viewer"
         )
 
     # Punctuation health of the transcript we actually got. This is the read-out that
@@ -1550,20 +1814,16 @@ def transcribe_with_words(
     commas = transcript.count(",")
     capitals = sum(1 for ch in transcript if ch.isupper())
     logger.info(
-        "📝 v2 ASR punctuation health: %d terminals, %d commas, %d capitals over "
-        "%d chars (priming=%s)",
-        terminals,
-        commas,
-        capitals,
-        len(transcript),
-        "off" if not chosen_primed else "on",
+        f"📝 v2 ASR punctuation health: {terminals} terminals, {commas} commas, "
+        f"{capitals} capitals over {len(transcript)} chars "
+        f"(priming={'off' if not chosen_primed else 'on'})"
     )
     if segments and terminals == 0:
         logger.warning(
-            "⚠️ v2 ASR returned ZERO terminal punctuation across %d segments despite "
-            "every configured measure — the unpunctuated attractor was not escaped "
-            "on this clip; downstream spotting will fall back to speech pauses",
-            len(segments),
+            f"⚠️ v2 ASR returned ZERO terminal punctuation across {len(segments)} "
+            f"segments despite every configured measure — the unpunctuated attractor "
+            f"was not escaped on this clip; downstream spotting will fall back to "
+            f"speech pauses"
         )
 
     logger.info(
@@ -1692,9 +1952,18 @@ def translate_segments(
         return segments
 
     except Exception as e:
+        # NO source-text fallback, and no green job on a failed translation. This
+        # `except` used to write `segment["text"]` into `translated_text` for every
+        # segment and RETURN — the caller could not tell the difference, so the user got
+        # an untranslated .srt and a successful job. See :func:`_translation_failed`.
         logger.error(
-            f"Translation with {service} failed for language '{target_language}': {e}. Falling back to original text."
+            f"Translation with {service} failed for language '{target_language}': {e}. "
+            f"Failing the job and salvaging {len(segments)} transcribed segment(s) — "
+            f"the source text is NOT substituted for a translation."
         )
         for segment in segments:
-            segment["translated_text"] = segment["text"]
-        return segments
+            segment.pop("translated_text", None)
+        raise _translation_failed(
+            f"Translation with {service} failed for '{target_language}': {e}",
+            segments=segments,
+        ) from e

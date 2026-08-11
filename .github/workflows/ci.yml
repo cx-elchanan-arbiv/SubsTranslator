@@ -50,6 +50,65 @@ jobs:
         flags: backend
         name: backend-coverage
 
+  integration-tests:
+    name: Backend Integration Tests
+    runs-on: ubuntu-latest
+    # 167 tests that never ran on a PR until now — including every pixel/render test in
+    # tests/integration/test_bidi_render.py and test_subtitle_layout_render.py, i.e. the
+    # only checks in the repo that look at what the burned-in subtitles actually LOOK
+    # like. Nothing here needs Docker or Redis: the suite runs against local ffmpeg and
+    # the filesystem (conftest points REDIS_URL at an unserved localhost port on
+    # purpose, and the code paths under test tolerate that).
+    timeout-minutes: 20
+
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🐍 Setup Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: 📦 Install System Dependencies
+      run: |
+        sudo apt-get update
+        # fonts-noto-core carries NotoSansHebrew-{Regular,Bold}.ttf. It is REQUIRED, not
+        # nice-to-have: both render suites skip themselves when the Hebrew font is
+        # missing (test_bidi_render walks /usr/share/fonts for "NotoSansHebrew";
+        # test_subtitle_layout_render needs ASS_FONTS_DIR to be a real directory), and a
+        # render gate that skips is a gate that is not there.
+        sudo apt-get install -y ffmpeg fontconfig fonts-noto-core
+
+    - name: ✅ Verify the render prerequisites (fail instead of skipping)
+      run: |
+        set -e
+        ffmpeg -version | head -1
+        # Verified on ubuntu:24.04: fonts-noto-core installs both files below.
+        test -f /usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf
+        test -f /usr/share/fonts/truetype/noto/NotoSansHebrew-Bold.ttf
+        fc-list | grep -i "Noto Sans Hebrew" | head -2
+        echo "ffmpeg + Noto Sans Hebrew present — the render tests will RUN, not skip."
+
+    - name: 📦 Install Python Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r backend/requirements.txt
+        pip install -r backend/requirements-test.txt
+        pip install -e backend/
+
+    - name: 🧪 Run Backend Integration Tests
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        FLASK_TESTING: "1"
+        DISABLE_RATE_LIMIT: "1"
+        TESTING: "true"
+        # test_subtitle_layout_render defaults to the container's font path
+        # (/usr/share/fonts/truetype/hebrew), which does not exist on a runner.
+        ASS_FONTS_DIR: /usr/share/fonts/truetype/noto
+      run: |
+        python -m pytest backend/tests/integration -v --tb=short
+
   frontend-tests:
     name: Frontend Tests
     runs-on: ubuntu-latest
@@ -134,18 +193,43 @@ jobs:
   security-check:
     name: Security Scan
     runs-on: ubuntu-latest
-    # DISABLED — blocked on the security workstream, not on this job's wiring.
-    # Verified 2026-08-03 against the current tree:
-    #   * pip-audit  -> 16 known CVEs across 6 pinned deps (flask, requests, werkzeug,
-    #                   yt-dlp, python-dotenv, deep-translator). Green requires
-    #                   dependency upgrades + regression testing.
-    #   * bandit     -> 67 findings (1 High / 6 Medium / 60 Low) needing triage.
-    #   * npm audit  -> 62 findings (3 critical / 32 high), almost all react-scripts
-    #                   transitives; `npm audit fix --force` is a breaking upgrade.
-    # Enabling it before that work lands would make every unrelated PR red. Note also
-    # that pip-audit/npm audit are time-varying: a green run today goes red tomorrow
-    # when a new advisory lands, with no code change — so this job wants a scheduled
-    # run + explicit allowlist, not a per-PR blocking gate.
+    # DISABLED — still blocked on the security workstream, not on this job's wiring.
+    # Note this job does NOT run tests/integration/test_5_security_basics.py (that one
+    # now runs in integration-tests above, and it is green): all three steps below fail
+    # on their own, for reasons that predate this workflow.
+    #
+    # RE-VERIFIED 2026-08-11 by running each step's exact command against this tree in a
+    # clean python:3.12-slim container:
+    #   * pip-audit -r backend/requirements.txt
+    #       -> "Found 16 known vulnerabilities in 6 packages": flask 3.1.2, requests
+    #          2.32.4, werkzeug 3.1.3 (x3), yt-dlp 2025.10.14 (x9), python-dotenv 1.1.1,
+    #          deep-translator 1.11.4 (no fix published). Exits non-zero.
+    #   * bandit -r backend/ -x backend/venv/,backend/__pycache__/
+    #       -> 4 High / 24 Medium / 2172 Low. (The 2026-08-03 note in this file said
+    #          67 findings; the Low count is now dominated by B101 assert_used across
+    #          the test suite, which has roughly tripled since.) Exits non-zero.
+    #   * npm audit --audit-level high  (in ./frontend)
+    #       -> "63 vulnerabilities (11 low, 16 moderate, 33 high, 3 critical)", almost
+    #          all react-scripts transitives; `npm audit fix --force` is a breaking
+    #          upgrade. Exits non-zero.
+    #
+    # TO ENABLE, all of the following must be true — delete `if: false` only then:
+    #   1. pip-audit on backend/requirements.txt reports 0 vulnerabilities, or every
+    #      remaining one is listed in an explicit `--ignore-vuln` allowlist with a
+    #      written reason (deep-translator PYSEC-2022-252 has no fix, so it needs one).
+    #   2. bandit reports 0 findings at the severity the step gates on. Either triage
+    #      them or pin the gate to what is actually being asserted, e.g.
+    #      `bandit -r backend/ -ll -x backend/venv/,backend/__pycache__/,backend/tests/`
+    #      (Medium+ and excluding tests) — and say so here, so the next reader knows
+    #      the Lows are deliberately out of scope rather than accidentally missed.
+    #   3. `npm audit --audit-level high` in ./frontend exits 0, which today means the
+    #      react-scripts upgrade has landed and the frontend still builds and tests.
+    # Do NOT enable it by loosening a threshold until the number happens to pass.
+    #
+    # Even once green, pip-audit and npm audit are TIME-VARYING: a green run today goes
+    # red tomorrow when a new advisory lands, with no code change. So the destination
+    # for this job is `schedule:` (plus the allowlist above), not a per-PR blocking gate
+    # in all-tests-passed's `needs`.
     if: false
 
     steps:
@@ -190,21 +274,26 @@ jobs:
   all-tests-passed:
     name: ✅ All Tests Passed
     runs-on: ubuntu-latest
-    needs: [backend-tests, frontend-tests]
-    
+    # This job is what branch protection watches, so `needs` IS the gate — a job left
+    # out of this list can go red without blocking a merge. lint-and-format was missing
+    # from it, which meant a black/isort failure did not stop anything.
+    needs: [backend-tests, integration-tests, frontend-tests, lint-and-format]
+
     steps:
     - name: ✅ All Checks Passed
       run: |
         echo "🎉 כל הטסטים עברו בהצלחה!"
         echo "🚀 הקוד מוכן למערג ל-main"
-        
+
     - name: 📊 Summary
       run: |
         echo "### 📋 Test Summary" >> $GITHUB_STEP_SUMMARY
         echo "- ✅ Backend Unit Tests: Passed" >> $GITHUB_STEP_SUMMARY
-        echo "- ✅ Frontend Tests: Passed" >> $GITHUB_STEP_SUMMARY  
+        echo "- ✅ Backend Integration Tests (incl. pixel/render): Passed" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Frontend Tests: Passed" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Code Quality (black + isort + tsc): Passed" >> $GITHUB_STEP_SUMMARY
 
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "🎯 **Ready for merge to main!**" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "ℹ️ *Integration and E2E tests can be run manually via GitHub Actions*" >> $GITHUB_STEP_SUMMARY
+        echo "ℹ️ *E2E tests and the security scan are still run manually — see security-check in ci.yml*" >> $GITHUB_STEP_SUMMARY

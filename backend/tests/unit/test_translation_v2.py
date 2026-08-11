@@ -1649,9 +1649,18 @@ class TestTerminologySyntacticFrame:
         assert "it wasn't called X, it was called Y" in prompt
         assert "they didn't call it X, they called it Y" in prompt
 
-    def test_the_hebrew_ivrit_failure_is_quoted_verbatim(self):
+    def test_the_self_contradicting_cue_is_named_as_the_failure(self):
+        """The PRINCIPLE, in the abstract. What was deleted was the scripted answer.
+
+        This rule used to spell out the exact Hebrew strings it wanted back for the one
+        clip it was learned on. A prompt that dictates a specific video's output is that
+        video's expected result smuggled into the system prompt: it cannot generalise,
+        and it makes the rule impossible to evaluate on anything else.
+        """
         prompt = build_system_prompt("he")
-        assert "לא קראו לזה עברית. קראו לזה עברית." in prompt
+        assert "it is not called A, it is called A" in prompt
+        assert "mistranslation, not a subtitle" in prompt
+        assert "קראו לזה" not in prompt, "a scripted output for one clip came back"
 
     def test_the_parsi_farsi_phonetic_contrast_is_an_example(self):
         prompt = build_system_prompt("he")
@@ -2169,15 +2178,16 @@ class TestTerminologyCollapse:
         assert "WHEN TRANSLITERATION CANNOT CARRY THE CONTRAST" in prompt
         assert "KEEP THE FOREIGN TERM IN LATIN SCRIPT" in prompt
 
-    def test_niqqud_is_named_as_not_a_contrast(self):
+    def test_diacritics_are_named_as_not_a_contrast(self):
         prompt = build_system_prompt("he")
-        assert "subtitle fonts do not draw Hebrew niqqud" in prompt
-        assert "לא קראו לזה Hebrew. קראו לזה עברית." in prompt
+        assert "Diacritics are NOT a contrast" in prompt
+        assert "subtitle fonts do not draw them" in prompt
 
-    def test_the_tautology_is_quoted_as_the_failure(self):
+    def test_the_remedy_is_stated_as_a_rule_not_as_one_clip_s_answer(self):
+        """Keeping a name in Latin script is the instruction; the strings are gone."""
         prompt = build_system_prompt("he")
-        assert "מה המילה העברית לעברית?" in prompt
-        assert "מה המילה העברית ל-Hebrew?" in prompt
+        assert "keeping one of the two names in Latin script is" in prompt
+        assert "המילה העברית" not in prompt, "a scripted output for one clip came back"
 
     def test_the_phonetic_contrast_that_works_is_untouched(self):
         """פרסי vs פארסי differ without diacritics, so transliteration still carries it."""
@@ -2209,11 +2219,23 @@ class TestFillerYouKnow:
     """ "You know, he really got hurt." came back as "אתה יודע, הוא באמת נפגע." in
     CLEAN style, where the whole point is that filler is deleted."""
 
-    def test_the_rule_is_mechanical_not_a_judgement_call(self):
-        """The judgement-shaped version of this rule was measured and did not bind."""
+    def test_there_is_exactly_one_filler_rule(self):
+        """It was two, and they contradicted each other.
+
+        A "MECHANICAL RULE, no judgement required" (delete any opening marker) followed
+        by an EXCEPTION that "outranks" it and demands exactly the judgement the first
+        half forbids. A model handed both follows whichever it read last, which is not
+        a policy — it is a coin flip with a rationale attached.
+        """
         prompt = build_system_prompt("he", "clean")
-        assert "MECHANICAL RULE, no judgement required" in prompt
-        assert "your translation starts AFTER it" in prompt
+        assert "MECHANICAL RULE" not in prompt
+        assert "no judgement required" not in prompt
+        assert "EXCEPTION, and it outranks" not in prompt
+
+    def test_the_rule_is_stated_as_a_judgement_about_what_the_marker_does(self):
+        prompt = build_system_prompt("he", "clean")
+        assert "DROPPED when it is doing nothing but filling time" in prompt
+        assert "KEPT and translated when it is doing interpersonal work" in prompt
 
     def test_the_opening_phrases_are_listed_with_their_comma(self):
         prompt = build_system_prompt("he", "clean")
@@ -2223,8 +2245,430 @@ class TestFillerYouKnow:
     def test_the_measured_cue_is_the_worked_example(self):
         prompt = build_system_prompt("he", "clean")
         assert '"You know, like, he really got hurt."' in prompt
-        assert "אתה יודע, הוא באמת נפגע." in prompt
+        assert "הוא באמת נפגע." in prompt
+
+    def test_the_test_is_a_reading_of_the_cue_not_a_word_list(self):
+        prompt = build_system_prompt("he", "clean")
+        assert "read the sentence without it" in prompt
+        assert "colder, blunter or more certain than they were" in prompt
 
     def test_the_real_question_keeps_its_verb(self):
         prompt = build_system_prompt("he", "clean")
-        assert '"Do you know what that means?" keeps it' in prompt
+        assert '"Do you know what that means?" is a question, not a marker' in prompt
+
+
+# --------------------------------------------------------------------------------------
+# C1 — a cue is an independent unit (the 38%-of-video content-shift disaster)
+# --------------------------------------------------------------------------------------
+@pytest.mark.unit
+class TestCueIsAnIndependentUnit:
+    """The prompt used to INSTRUCT the model to steal the next cue's content.
+
+    "every cue must end with proper punctuation" + "read the WHOLE batch" is a direct
+    order to complete a mid-sentence fragment, and the only place the missing words can
+    come from is the cue after it. Verified in the raw LLM archive: source cue 42
+    "President Johnson refused to greenlight a preemptive" / 43 "strike by Israel... in
+    1967." came back with 42 holding the whole sentence and 43 holding cue 44's content.
+    The offset grew to 3 and held to the end of the chunk.
+    """
+
+    def test_punctuation_preservation_survives(self):
+        prompt = build_system_prompt("he")
+        assert "PRESERVE sentence punctuation" in prompt
+
+    def test_the_blanket_every_cue_must_end_with_punctuation_order_is_gone(self):
+        prompt = build_system_prompt("he")
+        assert "every cue must end with proper punctuation" not in prompt
+
+    def test_a_cue_is_declared_an_independent_unit(self):
+        prompt = build_system_prompt("he")
+        assert "A CUE IS AN INDEPENDENT UNIT" in prompt
+
+    def test_completing_a_fragment_from_the_next_cue_is_forbidden(self):
+        prompt = build_system_prompt("he")
+        assert "do NOT complete it" in prompt
+        assert "do NOT pull words forward from the next cue" in prompt
+        assert "do NOT push words back into the previous one" in prompt
+
+    def test_merging_two_cues_is_forbidden(self):
+        prompt = build_system_prompt("he")
+        assert "Never merge two cues into one" in prompt
+
+    def test_the_punctuation_rule_explicitly_exempts_a_continuing_fragment(self):
+        """Without this exemption the two rules still contradict each other."""
+        prompt = build_system_prompt("he")
+        assert (
+            "punctuation requirement does NOT apply to a fragment that continues into "
+            "the next cue" in prompt
+        )
+
+    def test_the_reason_is_stated_in_terms_of_timing(self):
+        """A cue is a TIMED unit; moved content lands on the wrong picture."""
+        prompt = build_system_prompt("he")
+        assert "on screen only while those exact words are spoken" in prompt
+
+    def test_it_applies_to_every_language(self):
+        for code in ("he", "ar", "es", "fr"):
+            assert "A CUE IS AN INDEPENDENT UNIT" in build_system_prompt(code), code
+
+
+# --------------------------------------------------------------------------------------
+# C2 — the Hebrew grammar rule stops asserting a rule that is not one
+# --------------------------------------------------------------------------------------
+@pytest.mark.unit
+class TestHebrewMicroGrammar:
+    """A prompt rule that is WRONG is worse than a missing one: the model obeys it."""
+
+    def test_the_counted_noun_clause_is_gone(self):
+        """ "243 שנה, never 243 שנים" is not Hebrew grammar.
+
+        The singular after a large number is an optional LITERARY pattern limited to
+        units of measure, time and currency. The general rule is the opposite, so this
+        clause was instructing the model to write ungrammatical Hebrew.
+        """
+        prompt = build_system_prompt("he")
+        assert "243" not in prompt
+        assert "counted noun" not in prompt
+
+    def test_the_definite_construct_chain_clause_survives(self):
+        """Clause (1) is a correct general rule and is untouched."""
+        prompt = build_system_prompt("he")
+        assert "לב הארגמן" in prompt
+
+    def test_the_honorific_clause_is_narrowed_to_ranks_and_offices(self):
+        prompt = build_system_prompt("he")
+        assert "MILITARY RANK" in prompt and "OFFICE" in prompt
+        assert "הגנרל ג'ורג' וושינגטון" in prompt
+
+    def test_personal_honorifics_are_excluded(self):
+        prompt = build_system_prompt("he")
+        assert "מר כהן" in prompt and "המר כהן" in prompt
+
+    def test_direct_address_is_excluded(self):
+        prompt = build_system_prompt("he")
+        assert "אדוני הנשיא" in prompt
+
+
+# --------------------------------------------------------------------------------------
+# D — content-level alignment: every id present is not the same as every id correct
+# --------------------------------------------------------------------------------------
+@pytest.mark.unit
+class TestAnchors:
+    """The tokens that SURVIVE translation are the only ones that can be matched across it."""
+
+    def test_digits_are_anchors_at_any_length(self):
+        from services.translation_v2 import _anchors
+
+        assert "1967" in _anchors("strike by Israel in 1967")
+        assert "7" in _anchors("chapter 7")
+
+    def test_latin_tokens_of_two_or_more_characters_are_anchors(self):
+        from services.translation_v2 import _anchors
+
+        found = _anchors("The ICC and AIPAC")
+        assert {"icc", "aipac", "the", "and"} <= found
+
+    def test_single_latin_letters_are_not_anchors(self):
+        """ "a" and "I" appear everywhere and would agree with anything."""
+        from services.translation_v2 import _anchors
+
+        assert _anchors("a I x") == set()
+
+    def test_anchors_survive_into_a_hebrew_translation(self):
+        from services.translation_v2 import _anchors
+
+        source = "President Johnson refused, in 1967."
+        target = "הנשיא ג'ונסון סירב, ב-1967."
+        assert _anchors(source) & _anchors(target) == {"1967"}
+
+    def test_case_does_not_matter(self):
+        from services.translation_v2 import _anchors
+
+        assert _anchors("AIPAC") == _anchors("aipac")
+
+
+@pytest.mark.unit
+class TestDetectChunkOffset:
+    """The archive's silent off-by-one: all 40 ids present, all 40 contents shifted."""
+
+    #: Sources whose anchors are unmistakable and unique per cue.
+    SOURCES = [
+        "It happened in 1961.",
+        "Then again in 1962.",
+        "And once more in 1963.",
+        "The last time was 1964.",
+        "Nothing after 1965.",
+    ]
+
+    def test_a_correctly_bound_chunk_is_aligned(self):
+        from services.translation_v2 import _detect_chunk_offset
+
+        targets = [f"קרה ב-{1961 + i}." for i in range(5)]
+        assert _detect_chunk_offset(self.SOURCES, targets)["offset"] == 0
+
+    def test_a_uniform_shift_of_one_is_detected(self):
+        from services.translation_v2 import _detect_chunk_offset
+
+        # Every translation holds the NEXT source cue's content — the measured defect.
+        targets = [f"קרה ב-{1962 + i}." for i in range(5)]
+        result = _detect_chunk_offset(self.SOURCES, targets)
+        assert result["offset"] == 1
+        assert "1" in result["why"]
+
+    def test_a_shift_of_three_is_detected(self):
+        from services.translation_v2 import _detect_chunk_offset
+
+        sources = [f"Year {1961 + i}." for i in range(12)]
+        targets = [f"שנת {1964 + i}." for i in range(12)]
+        assert _detect_chunk_offset(sources, targets)["offset"] == 3
+
+    def test_a_single_coincidental_agreement_is_not_enough(self):
+        """One shared anchor between neighbours is a coincidence, not a shift."""
+        from services.translation_v2 import _detect_chunk_offset
+
+        sources = ["Nothing here.", "It was 1961.", "Nothing here either."]
+        targets = ["כלום.", "זה היה 1961.", "גם כאן כלום."]
+        assert _detect_chunk_offset(sources, targets)["offset"] == 0
+
+    def test_a_chunk_with_no_anchors_at_all_is_reported_aligned(self):
+        """This check reports what it can SEE; with nothing to measure it never guesses."""
+        from services.translation_v2 import _detect_chunk_offset
+
+        sources = ["שלום.", "מה נשמע.", "בסדר גמור."]
+        targets = ["hello.", "how are you.", "just fine."]
+        result = _detect_chunk_offset(sources, targets)
+        assert result["offset"] == 0
+
+    def test_the_aligned_reading_wins_every_tie(self):
+        from services.translation_v2 import _detect_chunk_offset
+
+        sources = ["Item 5.", "Item 5.", "Item 5."]
+        targets = ["פריט 5.", "פריט 5.", "פריט 5."]
+        assert _detect_chunk_offset(sources, targets)["offset"] == 0
+
+    def test_the_scores_are_returned_as_evidence(self):
+        from services.translation_v2 import ALIGNMENT_MAX_OFFSET, _detect_chunk_offset
+
+        result = _detect_chunk_offset(self.SOURCES, list(self.SOURCES))
+        assert set(result["scores"]) == set(range(ALIGNMENT_MAX_OFFSET + 1))
+        assert result["scores"][0]["anchor_hits"] == 5
+
+    def test_empty_input_is_aligned(self):
+        from services.translation_v2 import _detect_chunk_offset
+
+        assert _detect_chunk_offset([], [])["offset"] == 0
+
+
+@pytest.mark.unit
+class TestAlignmentGuardInTranslateCues:
+    """A shifted response is never bound. It is re-asked, and it is logged loudly."""
+
+    @staticmethod
+    def _numbered_cues(count):
+        return [
+            {
+                "start": i * 3.0,
+                "end": (i + 1) * 3.0,
+                "text": f"This happened in {1961 + i}, without any doubt at all.",
+            }
+            for i in range(count)
+        ]
+
+    @staticmethod
+    def _shift_then_fix(shift_calls=1):
+        """Answers shifted by one for the first ``shift_calls`` calls, aligned after."""
+
+        def _responder(kwargs, call_no):
+            ids = requested_ids(kwargs["messages"][1]["content"])
+            offset = 1 if call_no <= shift_calls else 0
+            return {
+                "cues": [
+                    {"id": i, "t": f"זה קרה ב-{1961 + (i - 1) + offset}."} for i in ids
+                ]
+            }
+
+        return _responder
+
+    def test_a_shifted_chunk_is_re_requested_and_the_aligned_answer_is_bound(self):
+        client = FakeClient(self._shift_then_fix(shift_calls=1))
+        result = translate_cues(self._numbered_cues(6), "he", client=client)
+
+        assert len(client.calls) == 2, "one shifted response, one re-request"
+        assert [c["translated"] for c in result] == [
+            f"זה קרה ב-{1961 + i}." for i in range(6)
+        ]
+
+    def test_nothing_from_the_shifted_response_reaches_a_cue(self):
+        client = FakeClient(self._shift_then_fix(shift_calls=1))
+        result = translate_cues(self._numbered_cues(6), "he", client=client)
+
+        assert "1962" not in result[0]["translated"], "the shifted text was bound"
+
+    def test_the_evidence_is_logged_loudly(self, caplog):
+        client = FakeClient(self._shift_then_fix(shift_calls=1))
+        with caplog.at_level("ERROR"):
+            translate_cues(self._numbered_cues(6), "he", client=client)
+
+        assert "MISALIGNED" in caplog.text
+        assert "NOTHING from this response is bound" in caplog.text
+        assert "uniform shift of 1" in caplog.text
+
+    def test_an_aligned_response_costs_no_extra_request(self):
+        client = FakeClient(self._shift_then_fix(shift_calls=0))
+        translate_cues(self._numbered_cues(6), "he", client=client)
+        assert len(client.calls) == 1
+
+    def test_two_shifted_responses_fall_back_to_one_request_per_cue(self, caplog):
+        client = FakeClient(self._shift_then_fix(shift_calls=2))
+        with caplog.at_level("WARNING"):
+            result = translate_cues(self._numbered_cues(4), "he", client=client)
+
+        # chunk + realign + one per cue
+        assert len(client.calls) == 2 + 4
+        assert "one cue at a time" in caplog.text
+        assert [c["translated"] for c in result] == [
+            f"זה קרה ב-{1961 + i}." for i in range(4)
+        ]
+
+    def test_a_per_cue_request_asks_for_exactly_one_id(self):
+        client = FakeClient(self._shift_then_fix(shift_calls=2))
+        translate_cues(self._numbered_cues(4), "he", client=client)
+
+        for call in client.calls[2:]:
+            assert len(requested_ids(call["messages"][1]["content"])) == 1
+
+    def test_a_per_cue_request_still_carries_the_scene_as_context(self):
+        """Whole-scene consistency must survive the fallback, or it trades one defect
+        (a shift) for another (gender and tense drifting cue by cue)."""
+        client = FakeClient(self._shift_then_fix(shift_calls=2))
+        translate_cues(self._numbered_cues(4), "he", client=client)
+
+        assert len(context_ids(client.calls[2]["messages"][1]["content"])) == 3
+
+    def test_an_unrecoverable_shift_fails_rather_than_binding_it(self):
+        client = FakeClient(self._shift_then_fix(shift_calls=99))
+
+        def responder(kwargs, call_no):
+            ids = requested_ids(kwargs["messages"][1]["content"])
+            if len(ids) == 1:
+                return {"cues": []}  # the per-cue fallback returns nothing
+            return {
+                "cues": [{"id": i, "t": f"זה קרה ב-{1962 + (i - 1)}."} for i in ids]
+            }
+
+        client = FakeClient(responder)
+        with pytest.raises(TranslationV2Error) as caught:
+            translate_cues(self._numbered_cues(4), "he", client=client)
+
+        assert "misaligned and unrecoverable" in str(caught.value)
+        assert caught.value.missing_ids == [1, 2, 3, 4]
+
+
+@pytest.mark.unit
+class TestRetryDuplicateGuard:
+    """The archive shows the missing-id retry filling a hole by COPYING another cue.
+
+    That is not a recovery: it prints one cue's words over another cue's timing, and
+    every check downstream sees a complete, well-formed chunk.
+    """
+
+    @staticmethod
+    def _cues():
+        return [
+            {"start": 0.0, "end": 3.0, "text": "The first thing that was said."},
+            {"start": 3.0, "end": 6.0, "text": "Something completely different."},
+            {"start": 6.0, "end": 9.0, "text": "A third and final statement."},
+        ]
+
+    def test_a_duplicate_fill_is_refused_and_the_chunk_fails(self, caplog):
+        def responder(kwargs, call_no):
+            ids = requested_ids(kwargs["messages"][1]["content"])
+            if call_no == 1:
+                return {"cues": [{"id": i, "t": f"משפט {i}."} for i in ids if i != 2]}
+            # The retry hands back cue 1's translation for cue 2.
+            return {"cues": [{"id": 2, "t": "משפט 1."}]}
+
+        client = FakeClient(responder)
+        with caplog.at_level("ERROR"):
+            with pytest.raises(TranslationV2Error) as caught:
+                translate_cues(self._cues(), "he", client=client)
+
+        assert caught.value.missing_ids == [2]
+        assert "already bound to cue 1" in caplog.text
+
+    def test_a_genuine_fill_is_accepted(self):
+        def responder(kwargs, call_no):
+            ids = requested_ids(kwargs["messages"][1]["content"])
+            if call_no == 1:
+                return {"cues": [{"id": i, "t": f"משפט {i}."} for i in ids if i != 2]}
+            return {"cues": [{"id": 2, "t": "משהו אחר לגמרי."}]}
+
+        result = translate_cues(self._cues(), "he", client=FakeClient(responder))
+        assert result[1]["translated"] == "משהו אחר לגמרי."
+
+    def test_two_cues_with_the_same_source_may_share_a_translation(self):
+        """ "Yes." and "Yes." legitimately come back identical. Only differing SOURCES
+        make a duplicate translation a defect."""
+        cues = [
+            {"start": 0.0, "end": 3.0, "text": "Yes, absolutely."},
+            {"start": 3.0, "end": 6.0, "text": "Yes, absolutely."},
+        ]
+
+        def responder(kwargs, call_no):
+            ids = requested_ids(kwargs["messages"][1]["content"])
+            if call_no == 1:
+                return {"cues": [{"id": i, "t": "כן, בהחלט."} for i in ids if i != 2]}
+            return {"cues": [{"id": 2, "t": "כן, בהחלט."}]}
+
+        result = translate_cues(cues, "he", client=FakeClient(responder))
+        assert [c["translated"] for c in result] == ["כן, בהחלט.", "כן, בהחלט."]
+
+
+@pytest.mark.unit
+class TestScriptSwitchDetection:
+    """The term lock's blind spot is measured, not assumed.
+
+    A term the model TRANSLATES is absent from the translation, so the lock (which
+    only ever says "keep leaving this in Latin") cannot see it — ISIS became "דאעש"
+    in one chunk and stayed ISIS in another on a real 5-minute video. The detector
+    changes no output; it exists so the decision to build a full entity ledger is
+    made on counts instead of on one anecdote.
+    """
+
+    def test_a_locked_term_that_gets_translated_is_reported(self):
+        from services.translation_v2 import _script_switches
+
+        assert _script_switches(
+            ["ISIS claimed responsibility."], ["דאעש נטלה אחריות."], {"ISIS": "ISIS"}
+        ) == ["ISIS"]
+
+    def test_a_locked_term_that_survives_is_not_reported(self):
+        from services.translation_v2 import _script_switches
+
+        assert (
+            _script_switches(
+                ["AIPAC said so."], ["AIPAC אמרו זאת."], {"AIPAC": "AIPAC"}
+            )
+            == []
+        )
+
+    def test_an_unlocked_term_is_not_reported(self):
+        """Only a term the video already committed to counts as drift."""
+        from services.translation_v2 import _script_switches
+
+        assert _script_switches(["NATO met."], ["נאט״ו נפגשו."], {}) == []
+
+    def test_each_term_reported_once(self):
+        from services.translation_v2 import _script_switches
+
+        assert _script_switches(
+            ["ISIS again.", "ISIS once more."],
+            ["דאעש שוב.", "דאעש עוד פעם."],
+            {"ISIS": "ISIS"},
+        ) == ["ISIS"]
+
+    def test_empty_inputs_are_safe(self):
+        from services.translation_v2 import _script_switches
+
+        assert _script_switches([], [], {"ISIS": "ISIS"}) == []
+        assert _script_switches(["ISIS"], ["דאעש"], {}) == []

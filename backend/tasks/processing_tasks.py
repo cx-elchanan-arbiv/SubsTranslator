@@ -40,6 +40,7 @@ from services.transcription_service import (
     translate_segments,
 )
 from services.translation_v2 import cps_report, enforce_cps, translate_cues
+from services.whisper_smart import smart_whisper
 from utils.file_utils import clean_filename
 from utils.video_utils import get_video_duration, relative_energy_probe
 
@@ -64,6 +65,32 @@ class TranslationFailedWithSalvage(Exception):
     def __init__(self, message: str, original_srt: str):
         super().__init__(message)
         self.original_srt = original_srt
+
+
+#: What the user is shown when the burn-in fails. The task result carries it as
+#: ``user_facing_message``, which is the field ``/status/<task_id>`` hands to the UI —
+#: without it the UI falls back to its generic "Processing failed" string.
+RENDER_FAILED_USER_MESSAGE = (
+    "Subtitles could not be burned into the video. The subtitle files (.srt) were "
+    "created successfully and can still be downloaded."
+)
+
+
+def _render_produced_a_file(reported_success, output_path) -> bool:
+    """Did the render really produce a video, or did it only claim to?
+
+    The renderers return a bool derived from FFmpeg's exit status, which cannot tell
+    "wrote a playable video" apart from "exited 0 and wrote nothing". The path this
+    guards is handed straight to the user as a download link, so the file existing and
+    being non-empty is the only part of the claim worth trusting. Anything the renderer
+    calls a failure stays a failure regardless.
+    """
+    if not reported_success:
+        return False
+    try:
+        return os.path.getsize(output_path) > 0
+    except OSError:
+        return False
 
 
 @celery_app.task(bind=True)
@@ -492,11 +519,29 @@ def process_video_task(
                     )
                 else:
                     progress_manager.log("Translating cues...", step_index=3)
-                    segments = normalize_cues(
-                        translate_segments(
-                            segments, target_lang, service=translation_service
+                    # Same contract as the translation_v2 branch above: a translation
+                    # that did not happen is a FAILED job, never an untranslated .srt
+                    # shipped under a green tick. The legacy translator used to answer
+                    # a failure by copying the source text into `translated_text` and
+                    # returning normally, which is indistinguishable from success here.
+                    # Written to hold either way: if that silent fallback is still in
+                    # place this code is unreachable, and the moment it raises — with
+                    # TranslationFailedWithSalvage or anything else — the failure is
+                    # reported with the source SRT that was written before translation.
+                    try:
+                        segments = normalize_cues(
+                            translate_segments(
+                                segments, target_lang, service=translation_service
+                            )
                         )
-                    )
+                    except Exception as exc:
+                        logger.error(
+                            f"legacy translation failed after the source SRT was "
+                            f"written: {exc}"
+                        )
+                        raise TranslationFailedWithSalvage(
+                            str(exc), os.path.basename(original_srt_path)
+                        ) from exc
                     recorder.save_cues("post_translation", segments)
                 timing_summary["translate_v2"] = f"{time.time() - translate_start:.1f}"
                 recorder.add_timing("translate", time.time() - translate_start)
@@ -524,16 +569,43 @@ def process_video_task(
             logger.info(f"DEBUG: Extracted youtube_url = {youtube_url}")
             logger.info(f"DEBUG: whisper_model = {whisper_model}")
 
-            transcription_result = transcribe_and_translate_streamed(
-                video_path,
-                target_language=target_lang,
-                source_lang=source_lang,
-                model_preference=whisper_model,
-                translation_service=translation_service,
-                progress_callback=transcription_progress_callback,
-                model_callback=model_loading_callback,
-                youtube_url=youtube_url,
-            )
+            try:
+                transcription_result = transcribe_and_translate_streamed(
+                    video_path,
+                    target_language=target_lang,
+                    source_lang=source_lang,
+                    model_preference=whisper_model,
+                    translation_service=translation_service,
+                    progress_callback=transcription_progress_callback,
+                    model_callback=model_loading_callback,
+                    youtube_url=youtube_url,
+                )
+            except TranslationFailedWithSalvage as exc:
+                # This path overlaps transcription and translation, so unlike the v2
+                # branch there is no source SRT on disk to fall back to: when the
+                # translator gives up, the transcription that was already paid for is
+                # inside the exception or nowhere. Write it out here, then let the
+                # failure through — the alternative, which is what used to happen, is
+                # `translated_text = text` and an untranslated video reported as a win.
+                # Defensive by design: the raise may not exist yet, and when it does it
+                # may hand over a filename it wrote itself or the salvaged segments.
+                salvage_name = getattr(exc, "original_srt", None)
+                salvaged_segments = getattr(exc, "segments", None)
+                if not salvage_name and salvaged_segments:
+                    salvage_name = os.path.basename(
+                        subtitle_service.create_srt_file(
+                            normalize_cues(salvaged_segments),
+                            os.path.join(DOWNLOADS_FOLDER, f"{base_name}_original.srt"),
+                            use_translation=False,
+                        )
+                    )
+                    logger.info(
+                        f"legacy translation failed; salvaged transcript written to "
+                        f"{salvage_name}"
+                    )
+                raise TranslationFailedWithSalvage(
+                    str(exc), salvage_name or ""
+                ) from exc
             segments = transcription_result["segments"]
             detected_language = transcription_result["language"]
             transcribe_duration = time.time() - transcribe_start
@@ -589,6 +661,29 @@ def process_video_task(
             progress_manager.log("Skipping translation.", step_index=3)
             progress_manager.complete_step(3)
 
+        # The model that ACTUALLY transcribed this job, which is not necessarily the one
+        # the user asked for: whisper_smart downgrades on low memory, on a load failure,
+        # on a transcribe exception, on a Gemini fallback and on "small". Every one of
+        # those used to be invisible from here, because the stats below recorded
+        # `whisper_model` — the REQUEST — as if it were the result. That is why Redis
+        # holds 104 records under `stats:index:model:large` that cannot be trusted to
+        # describe runs of `large`. Read the transcriber's own report first, fall back
+        # to what the model manager last loaded, and only then to the request.
+        model_actually_used = (
+            transcription_result.get("model_used")
+            or getattr(smart_whisper, "last_model_used", None)
+            or whisper_model
+        )
+        if model_actually_used != whisper_model:
+            logger.warning(
+                f"Transcription model downgrade [task={task_id}]: '{whisper_model}' "
+                f"was requested but '{model_actually_used}' actually ran"
+            )
+        recorder.update_meta(
+            transcription_model_requested=whisper_model,
+            transcription_model_used=model_actually_used,
+        )
+
         progress_manager.set_step_status(4, "in_progress")
         progress_manager.log("Creating subtitle files...", step_index=4)
         # Rewritten unconditionally: the v2 branch already wrote this file before
@@ -610,6 +705,10 @@ def process_video_task(
         recorder.copy_output(translated_srt_path)
 
         final_video_path = None
+        # Set only when the burn-in / watermark step really failed. It is what turns
+        # this run into a reported FAILURE at the end instead of a green job with a
+        # download button that silently is not there.
+        render_error = None
         progress_manager.set_step_status(5, "in_progress")
         progress_manager.log(
             f"Rendering {len(segments)} cues into the video "
@@ -705,17 +804,29 @@ def process_video_task(
                         )
                     )
 
-                final_video_path = (
-                    final_video_path_output if video_creation_success else None
-                )
-
                 timing_summary["create_video_with_subtitles_and_watermark"] = (
                     f"{time.time() - video_creation_start:.1f}"
                 )
-                # Mark both steps as complete since we did them combined
-                progress_manager.complete_step(5)
-                progress_manager.set_step_status(6, "completed")
-                progress_manager.complete_step(6)
+                # One call did the work of both steps, so both stand or fall with it.
+                # This branch used to complete BOTH unconditionally, with no success
+                # check at all — a failed combined render was displayed as "Embedding
+                # Subtitles - completed 100%" and "Finalizing Video - completed 100%".
+                if _render_produced_a_file(
+                    video_creation_success, final_video_path_output
+                ):
+                    final_video_path = final_video_path_output
+                    progress_manager.complete_step(5)
+                    progress_manager.set_step_status(6, "in_progress")
+                    progress_manager.complete_step(6)
+                else:
+                    final_video_path = None
+                    render_error = (
+                        "Burning the subtitles and watermark into the video failed - "
+                        f"no usable {os.path.basename(final_video_path_output)} was "
+                        f"produced."
+                    )
+                    progress_manager.set_step_error(5, render_error)
+                    progress_manager.set_step_error(6, render_error)
 
             else:
                 # No watermark
@@ -747,26 +858,32 @@ def process_video_task(
                         )
                     )
 
-                progress_manager.log("Finalizing video...", step_index=5)
-                progress_manager.set_step_progress(5, 99)
-                time.sleep(1)
-
                 timing_summary["create_video_with_subtitles"] = (
                     f"{time.time() - video_creation_start:.1f}"
                 )
-                progress_manager.complete_step(5)
 
-                progress_manager.set_step_status(6, "in_progress")
-
-                # Check if video creation was successful before proceeding
-                if not video_creation_success:
-                    progress_manager.log(
-                        "Video with subtitles creation failed...", step_index=6
-                    )
+                # Verify BEFORE completing the step. The old order ran
+                # complete_step(5) first and only then asked whether the burn had
+                # worked, and its failure branch went on to call complete_step(6) as
+                # well — so a run that produced no video at all still reported both
+                # steps completed, 100% overall and no step in an error state.
+                if not _render_produced_a_file(
+                    video_creation_success, video_with_subtitles_path
+                ):
                     final_video_path = None
-                    timing_summary["add_watermark"] = "0.0 (failed)"
-                    progress_manager.complete_step(6)
+                    render_error = (
+                        "Burning the subtitles into the video failed - no usable "
+                        f"{os.path.basename(video_with_subtitles_path)} was produced."
+                    )
+                    progress_manager.set_step_error(5, render_error)
+                    timing_summary["add_watermark"] = "0.0 (not reached)"
                 else:
+                    progress_manager.log("Finalizing video...", step_index=5)
+                    progress_manager.set_step_progress(5, 99)
+                    time.sleep(1)
+                    progress_manager.complete_step(5)
+
+                    progress_manager.set_step_status(6, "in_progress")
                     progress_manager.log(
                         "Skipping watermark (disabled by user)...", step_index=6
                     )
@@ -835,16 +952,25 @@ def process_video_task(
         final_result["user_choices"] = {**final_result["user_choices"], **flags}
         final_result["user_choices"]["subtitle_position"] = subtitle_position
 
-        # Structured logging for task completion
+        # Structured logging. A run whose video never rendered is not a completion, and
+        # logging it as one is how this failure stayed invisible in the logs too.
         duration = time.time() - start_time
-        log_task_complete(
-            logger,
-            "process_video",
-            duration=duration,
-            task_id=task_id,
-            detected_language=detected_language,
-            files_created=len([f for f in files_result.values() if f]),
-        )
+        if render_error:
+            log_task_error(
+                logger,
+                "process_video",
+                RuntimeError(render_error),
+                task_id=task_id,
+            )
+        else:
+            log_task_complete(
+                logger,
+                "process_video",
+                duration=duration,
+                task_id=task_id,
+                detected_language=detected_language,
+                files_created=len([f for f in files_result.values() if f]),
+            )
 
         # Save statistics to Redis
         try:
@@ -887,7 +1013,12 @@ def process_video_task(
                 "video_url": video_metadata.get("url", "uploaded"),
                 "video_duration": video_duration,
                 "video_size_mb": round(video_size_mb, 2),
-                "transcription_model": whisper_model,
+                # The model that RAN, not the one that was asked for — see
+                # `model_actually_used` above. `transcription_model` keeps its name
+                # because stats_service indexes on it (stats:index:model:<name>), so
+                # that index now means what it always claimed to mean.
+                "transcription_model": model_actually_used,
+                "transcription_model_requested": whisper_model,
                 "transcription_duration": round(transcription_duration, 2),
                 "transcription_speed_ratio": round(transcription_speed_ratio, 2),
                 "translation_service": translation_service,
@@ -900,8 +1031,10 @@ def process_video_task(
                 "translation_cost_usd": round(translation_usage_totals["cost_usd"], 6),
                 "embedding_duration": round(embedding_duration, 2),
                 "total_duration": round(duration, 2),
-                "status": "success",
-                "error_message": None,
+                # Was hardcoded "success" with a null error, which meant a run that
+                # produced no video was archived, indexed and charted as a win.
+                "status": "failure" if render_error else "success",
+                "error_message": render_error,
                 # The experiment's independent variables + one quality read-out, so a
                 # run can be attributed to the settings that produced it.
                 "spotting_v2": flags["spotting_v2"],
@@ -927,6 +1060,27 @@ def process_video_task(
             files=files_result,
         )
         recorder.add_timing("total", duration)
+
+        if render_error:
+            # The job failed, and says so. The transcript and both SRT files are real,
+            # already on disk and handed over here rather than discarded — but a run
+            # that produced no video is not a SUCCESS, and returning one is what left
+            # the user staring at a finished-looking job whose download button had
+            # quietly vanished with no error anywhere.
+            recorder.update_meta(render_error=render_error)
+            recorder.finish(success=False, error=render_error)
+            logger.error(f"Video rendering failed [task={task_id}]: {render_error}")
+            return {
+                "status": "FAILURE",
+                "code": "RENDER_FAILED",
+                "error": render_error,
+                "message": render_error,
+                "user_facing_message": RENDER_FAILED_USER_MESSAGE,
+                "recoverable": True,
+                "files": files_result,
+                "salvaged": True,
+            }
+
         recorder.finish(success=True)
 
         return {"status": "SUCCESS", "result": final_result}
@@ -945,9 +1099,12 @@ def process_video_task(
                 break
 
         failure = {"status": "FAILURE", "error": str(e)}
-        if isinstance(e, TranslationFailedWithSalvage):
+        if isinstance(e, TranslationFailedWithSalvage) and e.original_srt:
             # Still a failure — but the transcription was expensive and its output
             # is already on disk, so hand it over instead of throwing it away.
+            # Guarded on the filename: the legacy overlapped path can fail before any
+            # SRT exists, and advertising a file that was never written would send the
+            # UI to a download that 404s.
             failure["files"] = {"original_srt": e.original_srt}
             failure["salvaged"] = True
             logger.info(

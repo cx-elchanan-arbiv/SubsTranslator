@@ -96,7 +96,14 @@ services:
     depends_on:
       - redis
       - backend
-    mem_limit: 8g
+    # 8g was not enough to keep the promise the rest of the config makes. The worker
+    # sits at ~3g mid-job, leaving ~5g headroom — under the 6g bar `whisper_smart`
+    # requires for `large`, which is now the default model. With the memory guard
+    # wired into the real transcription paths (it used to be bypassed), an 8g limit
+    # would silently answer every `large` request with `medium`. The host has ~20g and
+    # a limit is a ceiling, not a reservation, so 12g costs nothing and lets the
+    # default model actually run.
+    mem_limit: 12g
     mem_reservation: 4g
     oom_kill_disable: false
 

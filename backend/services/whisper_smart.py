@@ -24,10 +24,184 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+#: Free memory a ``large`` load needs before it is safe to attempt. Unchanged from the
+#: guard that has always been here — only the NUMBER it was comparing against was wrong.
+LARGE_MODEL_MIN_FREE_GB = 6.0
+
+#: Below this, faster-whisper's beam search is what tips a container over, so the search
+#: is narrowed rather than the model swapped.
+LOW_MEMORY_BEAM_1_GB = 2.0
+
+#: cgroup v1 spells "no limit" as a near-2**63 sentinel (9223372036854771712). Anything
+#: above 8 PiB is that sentinel, not a machine.
+_CGROUP_NO_LIMIT_BYTES = 1 << 53
+
+_GIB = 1024**3
+
+
+def _log_downgrade(requested: str, actual: str, reason: str) -> str:
+    """Log a model downgrade at WARNING and return the model that will actually run.
+
+    Every downgrade in this module used to be invisible — some were logged at INFO,
+    some not at all — while the caller went on recording the model it ASKED for. That
+    is how Redis ended up with 104 rows indexed ``stats:index:model:large`` whose runs
+    may have executed ``medium``. A downgrade is a change to the product the user
+    receives, so it is a WARNING, it names requested -> actual, and it says why.
+    """
+    logger.warning(
+        f"⚠️ MODEL DOWNGRADE: requested '{requested}' -> running '{actual}' ({reason})"
+    )
+    return actual
+
+
+def resolve_model(requested: str | None) -> str:
+    """The model that will actually be loaded for ``requested``, memory taken into account.
+
+    This decision existed only INSIDE :meth:`SmartWhisperManager.transcribe_smart` — and
+    both of the pipeline's real entry points (``transcribe_and_translate_streamed`` and
+    ``transcribe_with_words``) call :meth:`load_model` directly and never go through it.
+    So the memory guard, the ``small`` mapping and every downgrade WARNING were dead code
+    on the two paths that matter; the only place they ran was a helper nothing calls in
+    production. One function, called from all three, so the guard cannot be bypassed by
+    adding a fourth caller.
+
+    Returns the requested name unchanged when it is already safe, and a downgraded name
+    (logged at WARNING by :func:`_log_downgrade`) when it is not.
+    """
+    if not requested:
+        return "tiny"
+    if requested == "small":
+        return _log_downgrade(
+            "small",
+            "medium",
+            "this service does not load 'small'; 'medium' is its nearest model",
+        )
+    if requested != "large":
+        return requested
+
+    headroom_gb, source = memory_headroom_gb()
+    if headroom_gb is None:
+        # UNKNOWN is not LOW. Downgrading here is what made every `large` request on a
+        # host without cgroup or /proc/meminfo (i.e. every native macOS dev run) produce
+        # `medium` output while the UI, the stats and the archive all said `large`.
+        logger.warning(
+            f"⚠️ Cannot measure free memory ({source}) — honouring the requested 'large' "
+            f"model with UNKNOWN headroom. If this process is killed, start here."
+        )
+        return "large"
+    if headroom_gb < LARGE_MODEL_MIN_FREE_GB:
+        return _log_downgrade(
+            "large",
+            "medium",
+            f"only {headroom_gb:.2f} GiB free ({source}), below the "
+            f"{LARGE_MODEL_MIN_FREE_GB:.1f} GiB 'large' needs",
+        )
+    logger.info(f"✅ {headroom_gb:.2f} GiB free ({source}), proceeding with 'large'")
+    return "large"
+
+
+def _read_int_file(path: str) -> int | None:
+    """Return the single integer in ``path``, or None if it is missing or not a number.
+
+    cgroup v2 writes the literal string ``max`` into ``memory.max`` for an unlimited
+    cgroup, which is an answer ("no limit here"), not an error — both come back as None
+    and the caller moves on to the next source.
+    """
+    try:
+        with open(path) as handle:
+            return int(handle.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _cgroup_memory(limit_path: str, current_path: str, stat_path: str):
+    """``(limit_gb, working_set_gb)`` for one cgroup layout, or None if it is not there."""
+    limit = _read_int_file(limit_path)
+    current = _read_int_file(current_path)
+    if limit is None or current is None or limit >= _CGROUP_NO_LIMIT_BYTES:
+        return None
+
+    # Page cache counts towards `current` but the kernel hands it back under pressure,
+    # so the non-reclaimable "working set" is current minus the inactive file cache —
+    # the same subtraction the kernel's own OOM accounting (and Kubernetes) makes.
+    # Measured in this project's idle worker: current 0.39 GiB, of which inactive_file
+    # is 0.17 GiB. Counting that cache as "in use" would understate free memory by
+    # nearly half and downgrade `large` for no reason.
+    inactive_file = 0
+    try:
+        with open(stat_path) as handle:
+            for line in handle:
+                key, _, value = line.partition(" ")
+                if key in ("inactive_file", "total_inactive_file"):
+                    inactive_file = int(value.strip())
+                    break
+    except (OSError, ValueError):
+        inactive_file = 0
+
+    working_set = max(current - inactive_file, 0)
+    return limit / _GIB, working_set / _GIB
+
+
+def memory_headroom_gb() -> tuple[float | None, str]:
+    """How much memory this process can still take, and where the number came from.
+
+    Returns ``(None, reason)`` when nothing readable can answer. ``None`` means UNKNOWN
+    and callers must not read it as "low" — see below.
+
+    Why this is not simply ``/proc/meminfo``, measured inside this project's own worker
+    container: the cgroup limit is 8.00 GiB against 2.98 GiB in use, i.e. 5.02 GiB of
+    real headroom — under the 6.0 GiB bar ``large`` needs — while ``/proc/meminfo``
+    reported 14.97 GiB ``MemAvailable``, because ``/proc`` describes the HOST VM and not
+    the container the model has to fit inside. The guard read the host's number and
+    waved ``large`` through every time.
+
+    And on native macOS ``/proc/meminfo`` does not exist at all, so the old probe raised
+    ``FileNotFoundError`` on every single call and its ``except`` branch silently turned
+    every ``large`` request into ``medium`` — verified on this machine.
+    """
+    cgroup = _cgroup_memory(  # cgroup v2 (Docker Desktop, modern Linux)
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory.current",
+        "/sys/fs/cgroup/memory.stat",
+    ) or _cgroup_memory(  # cgroup v1
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+        "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+        "/sys/fs/cgroup/memory/memory.stat",
+    )
+    if cgroup:
+        limit_gb, used_gb = cgroup
+        return (
+            limit_gb - used_gb,
+            f"cgroup limit {limit_gb:.2f} GiB, {used_gb:.2f} GiB in use",
+        )
+
+    # No cgroup limit: the host's own free memory IS the bound that applies.
+    try:
+        with open("/proc/meminfo") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return (
+                        int(line.split()[1]) / (1024**2),
+                        "/proc/meminfo MemAvailable (host-wide, no cgroup limit)",
+                    )
+    except (OSError, ValueError, IndexError):
+        pass
+
+    return None, "no cgroup memory limit and no readable /proc/meminfo"
+
 
 class SmartWhisperManager:
     def __init__(self):
         self.loaded_models: dict[str, WhisperModel] = {}
+
+        # The model that ACTUALLY ran, last time anything ran here. Callers only know
+        # what they REQUESTED, and the two diverge on every downgrade path below; this
+        # is the only place that knows which one really executed, so it is published
+        # for the stats writer to record instead of the request.
+        # Safe as instance state: the worker runs --concurrency=1 --max-tasks-per-child=1
+        # (docker-compose.yml), i.e. one job per process, and every load happens on the
+        # same thread that then transcribes.
+        self.last_model_used: str | None = None
 
         # Set up persistent cache directory for models
         # Default to local directory in dev, Docker will override with env var
@@ -140,10 +314,12 @@ class SmartWhisperManager:
                 logger.error(f"Failed to load {model_name} model: {e}")
                 # Fallback to base model
                 if model_name != "base":
-                    logger.info("Falling back to base model")
+                    _log_downgrade(model_name, "base", f"it failed to load: {e}")
                     return self.load_model("base")
                 raise
 
+        # Only now is the claim true: this model is loaded and is the one that will run.
+        self.last_model_used = model_name
         return self.loaded_models[model_name]
 
     def preload_large_model(self):
@@ -227,8 +403,9 @@ class SmartWhisperManager:
         # === GEMINI PATH ===
         if model_preference == "gemini":
             if not youtube_url:
-                logger.warning("⚠️ Gemini requires YouTube URL, falling back to base")
-                model_preference = "base"
+                model_preference = _log_downgrade(
+                    "gemini", "base", "Gemini needs a YouTube URL and none was given"
+                )
             else:
                 logger.info("🚀 Using Gemini API for YouTube transcription")
                 try:
@@ -242,12 +419,19 @@ class SmartWhisperManager:
                     )
 
                     logger.info("✅ Gemini transcription successful!")
+                    # Gemini never touches load_model, so record here what ran — and
+                    # hand it back in the payload as well, so a caller that keeps the
+                    # dict does not have to ask this manager afterwards.
+                    self.last_model_used = "gemini"
+                    if isinstance(result, dict):
+                        result.setdefault("model_used", "gemini")
                     return result
 
                 except Exception as e:
                     logger.error(f"❌ Gemini failed: {e}")
-                    logger.info("🔄 Falling back to Whisper (base)")
-                    model_preference = "base"
+                    model_preference = _log_downgrade(
+                        "gemini", "base", f"Gemini transcription failed: {e}"
+                    )
                     # Continue to Whisper below
 
         # === WHISPER PATH (original code) ===
@@ -275,44 +459,8 @@ class SmartWhisperManager:
         if model_preference:
             logger.info(f"🎯 Using forced model: {model_preference}")
             # Support tiny, base, medium and large, map others to large
-            if model_preference in ["tiny", "base", "medium", "large"]:
-                # Check memory before using large model
-                if model_preference == "large":
-                    try:
-                        # Check available memory using /proc/meminfo
-                        with open("/proc/meminfo") as f:
-                            meminfo = f.read()
-                        available_kb = int(
-                            [
-                                line
-                                for line in meminfo.split("\n")
-                                if "MemAvailable" in line
-                            ][0].split()[1]
-                        )
-                        available_gb = available_kb / (1024**2)
-
-                        if available_gb < 6.0:  # Less than 6GB available
-                            logger.warning(
-                                f"⚠️ Only {available_gb:.1f}GB RAM available, using 'medium' instead of 'large'"
-                            )
-                            model_name = "medium"
-                        else:
-                            logger.info(
-                                f"✅ {available_gb:.1f}GB RAM available, proceeding with 'large' model"
-                            )
-                            model_name = model_preference
-                    except (FileNotFoundError, IndexError, ValueError):
-                        logger.warning(
-                            "⚠️ Cannot check memory, using 'medium' instead of 'large' for safety"
-                        )
-                        model_name = "medium"
-                else:
-                    model_name = model_preference
-            elif model_preference in ["small"]:
-                logger.info(
-                    f"🔄 Mapping {model_preference} to 'medium' for better compatibility"
-                )
-                model_name = "medium"
+            if model_preference in ["tiny", "base", "medium", "large", "small"]:
+                model_name = resolve_model(model_preference)
             else:
                 model_name = model_preference
         else:
@@ -347,27 +495,26 @@ class SmartWhisperManager:
 
         logger.info(f"Starting transcription with {model_name} model")
 
-        # Monitor memory before transcription
-        try:
-            with open("/proc/meminfo") as f:
-                meminfo = f.read()
-            available_kb = int(
-                [line for line in meminfo.split("\n") if "MemAvailable" in line][
-                    0
-                ].split()[1]
+        # Monitor memory before transcription. Same probe as the model guard above, and
+        # for the same reason: this used to read the HOST's free memory from
+        # /proc/meminfo while the decode has to fit inside the container's cgroup.
+        headroom_gb, source = memory_headroom_gb()
+        if headroom_gb is None:
+            logger.warning(
+                f"💾 Memory headroom unknown ({source}) — keeping "
+                f"beam_size={options['beam_size']}"
             )
-            available_gb = available_kb / (1024**2)
+        else:
             logger.info(
-                f"💾 Memory available before transcription: {available_gb:.1f}GB"
+                f"💾 Memory headroom before transcription: {headroom_gb:.2f} GiB "
+                f"({source})"
             )
-
-            if available_gb < 2.0:
+            if headroom_gb < LOW_MEMORY_BEAM_1_GB:
                 logger.warning(
-                    f"⚠️ Low memory ({available_gb:.1f}GB) - reducing beam_size to 1"
+                    f"⚠️ Low memory ({headroom_gb:.2f} GiB free) - reducing "
+                    f"beam_size to 1"
                 )
                 options["beam_size"] = 1
-        except:
-            pass
 
         try:
             # Calculate expected chunks for progress tracking
@@ -463,7 +610,7 @@ class SmartWhisperManager:
 
             # Try fallback to base model if not already using it
             if model_name != "base":
-                logger.info("Trying fallback to base model")
+                _log_downgrade(model_name, "base", f"transcription raised: {e}")
                 return self.transcribe_smart(
                     audio_input, language, duration, "speed", model_preference="base"
                 )

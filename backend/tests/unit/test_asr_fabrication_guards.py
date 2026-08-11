@@ -1,12 +1,22 @@
 """
 The guards standing between raw Whisper output and the v2 subtitle pipeline.
 
-Every one of them exists because a fabrication reached a delivered file: text invented
-into trailing silence, words stamped on time too short to have said them, a decode loop
-repeating one sentence, and a word present in a segment's text but missing from its word
-timestamps. The helpers under test are deliberately PURE — arrays and dicts in, arrays
-and dicts out — precisely so the rules that decide what a viewer sees can be pinned here
-rather than inferred from a job log.
+Every one of them exists because a measured defect reached a delivered file: text
+invented into trailing silence, a decode loop repeating one clause, a word present in a
+segment's text but missing from its word timestamps — and, in the other direction, a
+transcript that simply STOPPED 5.25 seconds early over audio that was louder than the
+programme.
+
+**None of them deletes transcript any more.** The deletion that used to sit here never
+fired once across 7 real runs, and the quality win credited to it came from pass
+selection, which is non-destructive. What ended the argument is the input sensitivity of
+the model itself: one sample in 624,153 changed by a single LSB — inaudible — flips 11
+words of transcript, reproduced 3/3 in both directions. A rate measured off one decode
+of one file cannot justify deleting what a person may have said.
+
+The helpers under test are deliberately PURE — arrays and dicts in, arrays and dicts
+out — precisely so the rules that decide what a viewer sees can be pinned here rather
+than inferred from a job log.
 """
 
 import os
@@ -19,12 +29,21 @@ backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."
 if backend_dir not in sys.path:
     sys.path.insert(0, backend_dir)
 
-from services.subtitle_engine import IMPOSSIBLE_WORDS_PER_SEC  # noqa: E402
+from services.subtitle_engine import (  # noqa: E402
+    MAX_SOURCE_WORDS_PER_SEC,
+    RATE_SIGNAL_MIN_DUR,
+)
 from services.transcription_service import (  # noqa: E402
+    COVERAGE_MAX_QUIET_DB,
+    DITHER_FLOOR,
+    REPEAT_LOOP_MIN_WORDS,
     _choose_asr_pass,
-    _drop_segments,
+    _recovery_is_new,
+    _relative_db,
     _segment_suspects,
+    _shifted,
     _trim_trailing_silence,
+    _uncovered_tail,
     _word_loss_report,
 )
 
@@ -106,12 +125,56 @@ class TestTrimTrailingSilence:
         assert seconds == 0.0
         assert len(trimmed) == 0
 
-    def test_room_tone_under_the_threshold_still_counts_as_silence(self):
-        """The threshold is what separates "quiet" from "nothing" — 0.001 is nothing."""
+    def test_room_tone_far_under_the_programme_still_counts_as_silence(self):
+        """The threshold is what separates "quiet" from "nothing"."""
         audio = np.concatenate(
             [_tone(1.0), np.full(int(2.0 * SR), 0.001, dtype=np.float32)]
         )
-        _trimmed, seconds = _trim_trailing_silence(audio, SR, threshold=0.004)
+        _trimmed, seconds = _trim_trailing_silence(audio, SR)
+        assert seconds == pytest.approx(1.65, abs=0.01)
+
+    def test_a_quiet_recording_does_not_lose_its_last_word(self):
+        """The defect an ABSOLUTE threshold has: it is a claim about recording level.
+
+        1s of speech at 0.02, then a final quiet word at 0.002 — under the old absolute
+        0.004 floor, so the old rule called it silence and cut it off. Everything here
+        is real speech; only the level is low.
+        """
+        audio = np.concatenate(
+            [
+                _tone(1.0, amplitude=0.02),
+                _tone(0.5, amplitude=0.002),
+                _silence(2.0),
+            ]
+        )
+        trimmed, seconds = _trim_trailing_silence(audio, SR, pad_s=0.35)
+
+        assert len(trimmed) / SR == pytest.approx(1.85, abs=0.01), "the last word went"
+        assert seconds == pytest.approx(1.65, abs=0.01)
+
+    def test_the_threshold_scales_with_the_file(self):
+        """Same waveform, two levels, same decision. That is what 'relative' means."""
+        loud = np.concatenate([_tone(1.0, amplitude=0.5), _silence(2.0)])
+        quiet = np.concatenate([_tone(1.0, amplitude=0.005), _silence(2.0)])
+
+        assert _trim_trailing_silence(loud, SR)[1] == pytest.approx(
+            _trim_trailing_silence(quiet, SR)[1], abs=1e-6
+        )
+
+    def test_dither_on_a_silent_tail_is_still_silence(self):
+        """A digitally silent tail carries ±1 LSB, which is inaudible and not speech.
+
+        Without the absolute floor under the relative threshold, a quiet file's
+        threshold falls beneath its own dither and the trim never fires.
+        """
+        rng = np.random.default_rng(0)
+        dither = rng.choice(
+            np.array([-1.0, 0.0, 1.0], dtype=np.float32) / 32768.0, int(2.0 * SR)
+        ).astype(np.float32)
+        audio = np.concatenate([_tone(1.0, amplitude=0.01), dither])
+
+        _trimmed, seconds = _trim_trailing_silence(audio, SR, pad_s=0.35)
+        assert float(np.abs(dither).max()) <= DITHER_FLOOR
         assert seconds == pytest.approx(1.65, abs=0.01)
 
 
@@ -120,65 +183,87 @@ class TestTrimTrailingSilence:
 # =============================================================================
 @pytest.mark.unit
 class TestSegmentSuspects:
-    """Measured at CUE level the fabrications hide; measured on the RAW segment they do not.
+    """DETECTION ONLY. These flags choose between two complete transcripts and then log.
 
-    Re-spotting hands a cue the silence around it, which averages an impossible speech
-    rate back down into the plausible range — 9 invented words in 0.44s survived the cue
-    gate intact.
+    They used to delete the segments they flagged. That deletion never fired once across
+    7 real runs, and Whisper is chaotically input-sensitive — a one-LSB change to a
+    single sample flips whole sentences — so a rate is a suspicion, never a verdict.
     """
 
-    def test_an_impossible_speech_rate_is_suspect(self):
-        # 15 words in 2.0s = 7.5 w/s — the slowest fabrication actually measured.
-        text = " ".join(f"word{i}" for i in range(15))
-        suspects = _segment_suspects([_segment(text, 0.0, 2.0)])
+    def test_a_fast_speech_rate_is_suspect(self):
+        # 25 words in 2.5s = 10 w/s, over the bound and over the duration floor.
+        text = " ".join(f"word{i}" for i in range(25))
+        suspects = _segment_suspects([_segment(text, 0.0, 2.5)])
 
         assert len(suspects) == 1
-        assert suspects[0]["suspect_reason"].startswith("impossible_wps")
+        assert suspects[0]["suspect_reason"].startswith("fast_wps")
         assert suspects[0]["index"] == 0
 
-    def test_the_measured_20_words_per_second_case(self):
-        """9 invented words in 0.44s — the run that reached a delivered file."""
+    def test_the_bound_is_the_engine_constant_not_a_local_copy(self):
+        """One number, one place: a segment just over it is suspect, just under is not."""
+        over = " ".join(["w"] * int(MAX_SOURCE_WORDS_PER_SEC * 2.5 + 2))
+        under = " ".join(["w"] * int(MAX_SOURCE_WORDS_PER_SEC * 2.5 - 2))
+
+        assert len(_segment_suspects([_segment(over, 0.0, 2.5)])) == 1
+        assert _segment_suspects([_segment(under, 0.0, 2.5)]) == []
+
+    def test_no_rate_is_computed_below_the_duration_floor(self):
+        """9 words in 0.44s is 20 w/s — and it is not a measurement of anything.
+
+        Whisper quantises word times to 0.02s and its error is roughly constant in
+        absolute time, so on a sub-second span the rate describes the quantiser. This is
+        the same floor the cue-level gate applies, from the same constant.
+        """
+        assert RATE_SIGNAL_MIN_DUR == 2.0
         text = "it stuck that is what it is all about"
-        suspects = _segment_suspects([_segment(text, 10.0, 10.44)])
-        assert len(suspects) == 1
+        assert _segment_suspects([_segment(text, 10.0, 10.44)]) == []
 
     def test_real_speech_at_five_words_a_second_passes(self):
         text = " ".join(f"word{i}" for i in range(10))
         assert _segment_suspects([_segment(text, 0.0, 2.0)]) == []
 
     def test_the_corpus_fastest_genuine_cue_passes(self):
-        """7.03 w/s, real cross-talk. The threshold sits ABOVE this on purpose."""
+        """7.03 w/s, real cross-talk. The bound now clears it by 28%, not by 3%."""
         text = "and they were screaming and yelling at each other."
         assert len(text.split()) / (10.06 - 8.78) == pytest.approx(7.03, abs=0.01)
         assert _segment_suspects([_segment(text, 8.78, 10.06)]) == []
 
     def test_a_verbatim_repeat_of_the_previous_segment_is_suspect(self):
         segments = [
-            _segment("Thanks for watching.", 0.0, 3.0),
-            _segment("thanks for watching", 3.0, 6.0),
+            _segment("Thanks for watching my video.", 0.0, 3.0),
+            _segment("thanks for watching my video", 3.0, 6.0),
         ]
         suspects = _segment_suspects(segments)
 
         assert [s["index"] for s in suspects] == [1]
         assert suspects[0]["suspect_reason"] == "repeat_of_previous"
 
+    def test_a_short_repetition_is_speech_not_a_decode_loop(self):
+        """ "No. No." is a person insisting. A decode loop repeats a whole clause."""
+        assert REPEAT_LOOP_MIN_WORDS == 4
+        segments = [_segment("No.", 0.0, 1.0), _segment("No.", 1.2, 2.2)]
+        assert _segment_suspects(segments) == []
+
     def test_a_repeat_two_segments_apart_is_not_a_loop(self):
         """Only the immediate repeat is the decode loop; recurrence is just speech."""
         segments = [
-            _segment("Yes.", 0.0, 3.0),
-            _segment("Something else entirely.", 3.0, 6.0),
-            _segment("Yes.", 6.0, 9.0),
+            _segment("Yes I really do think so.", 0.0, 3.0),
+            _segment("Something else entirely here.", 3.0, 6.0),
+            _segment("Yes I really do think so.", 6.0, 9.0),
         ]
         assert _segment_suspects(segments) == []
 
-    def test_zero_duration_with_text_is_suspect(self):
-        suspects = _segment_suspects([_segment("Words on no time at all.", 5.0, 5.0)])
-        assert len(suspects) == 1
-        assert suspects[0]["suspect_reason"] == "impossible_wps(no_duration)"
+    def test_zero_duration_with_text_is_NOT_suspect(self):
+        """The sibling gate KEEPS zero-length cues; two gates must not disagree.
 
-    def test_negative_duration_is_suspect(self):
-        suspects = _segment_suspects([_segment("Backwards.", 5.0, 4.0)])
-        assert len(suspects) == 1
+        ``subtitle_engine.drop_hallucinated_cues`` keeps them because "zero length only
+        means arithmetic infinity, not that the text is fake". Reading the same signal
+        in the opposite direction here was one bug, not two opinions.
+        """
+        assert _segment_suspects([_segment("Words on no time at all.", 5.0, 5.0)]) == []
+
+    def test_negative_duration_is_not_suspect_either(self):
+        assert _segment_suspects([_segment("Backwards.", 5.0, 4.0)]) == []
 
     def test_a_blank_segment_is_never_suspect(self):
         """There is nothing fabricated in a segment with no words."""
@@ -189,7 +274,7 @@ class TestSegmentSuspects:
         assert _segment_suspects(segments) == []
 
     def test_the_input_is_not_mutated(self):
-        segments = [_segment("Words on no time at all.", 5.0, 5.0)]
+        segments = [_segment(" ".join(f"w{i}" for i in range(25)), 0.0, 2.5)]
         before = [dict(s) for s in segments]
         _segment_suspects(segments)
         assert segments == before
@@ -240,54 +325,135 @@ class TestChooseAsrPass:
                 assert isinstance(why, str) and why.strip()
 
 
+# =============================================================================
+# B — the coverage invariant: the OPPOSITE of a deletion rule
+# =============================================================================
 @pytest.mark.unit
-class TestDropSegments:
-    """A dropped segment whose WORDS stay behind is a fabrication that ships anyway.
+class TestUncoveredTail:
+    """The ASR stopped 5.25s early over audio LOUDER than the programme (-14.4 vs -19.3).
 
-    ``words_to_cues`` spots from the word stream alone, so removing the segment without
-    removing its words puts the invented text straight back on screen.
+    A transcript that is merely SHORT looks exactly like a transcript, so nothing
+    anywhere reported it. Re-decoding that one region recovered the missing sentence
+    verbatim ("if you enjoyed the video don't forget to like and subscribe").
     """
 
-    def test_the_suspect_segment_and_its_words_both_go(self):
-        segments = [
-            _segment("Real speech here.", 0.0, 2.0),
-            _segment("Invented.", 2.0, 2.1),
-            _segment("More real speech.", 3.0, 5.0),
-        ]
-        words = _words(
-            [(0.0, 1.0, "Real"), (2.0, 2.1, "Invented."), (3.0, 4.0, "More")]
+    def test_a_loud_uncovered_tail_is_reported(self):
+        audio = _tone(10.0)
+        segments = [_segment("Everything up to here.", 0.0, 4.75)]
+
+        gap = _uncovered_tail(segments, audio, SR)
+
+        assert gap is not None
+        assert gap["start"] == pytest.approx(4.75)
+        assert gap["end"] == pytest.approx(10.0)
+        assert gap["duration"] == pytest.approx(5.25)
+        assert gap["db"] == pytest.approx(0.0, abs=0.5)
+
+    def test_a_fully_covered_transcript_reports_nothing(self):
+        audio = _tone(10.0)
+        assert _uncovered_tail([_segment("All of it.", 0.0, 10.0)], audio, SR) is None
+
+    def test_a_sub_second_gap_is_ordinary_and_ignored(self):
+        """The final consonant's release, and the pad the trim deliberately leaves."""
+        audio = _tone(10.0)
+        assert _uncovered_tail([_segment("x", 0.0, 9.3)], audio, SR) is None
+
+    def test_a_quiet_tail_is_a_fade_out_not_a_gap(self):
+        audio = np.concatenate([_tone(5.0, amplitude=0.5), _tone(5.0, amplitude=0.001)])
+        assert _uncovered_tail([_segment("x", 0.0, 5.0)], audio, SR) is None
+
+    def test_the_quiet_bound_is_generous_on_purpose(self):
+        """This mechanism only ever ADDS; the expensive error is the missing sentence."""
+        assert COVERAGE_MAX_QUIET_DB == -20.0
+        audio = np.concatenate([_tone(5.0, amplitude=0.5), _tone(5.0, amplitude=0.1)])
+        gap = _uncovered_tail([_segment("x", 0.0, 5.0)], audio, SR)
+        assert gap is not None and gap["db"] < 0
+
+    def test_no_segments_at_all_is_the_whole_file(self):
+        gap = _uncovered_tail([], _tone(10.0), SR)
+        assert gap is not None and gap["start"] == 0.0
+
+    def test_a_segment_running_past_the_audio_is_not_a_negative_gap(self):
+        assert _uncovered_tail([_segment("x", 0.0, 99.0)], _tone(10.0), SR) is None
+
+    def test_empty_audio_is_not_an_error(self):
+        assert _uncovered_tail([_segment("x", 0.0, 1.0)], np.array([]), SR) is None
+
+    def test_it_changes_nothing(self):
+        segments = [_segment("x", 0.0, 1.0)]
+        before = [dict(s) for s in segments]
+        _uncovered_tail(segments, _tone(10.0), SR)
+        assert segments == before
+
+
+@pytest.mark.unit
+class TestRelativeDb:
+    """Level is always measured against the file itself — nothing here sets the gain."""
+
+    def test_the_same_level_is_zero_db(self):
+        audio = _tone(2.0)
+        assert _relative_db(audio, audio) == pytest.approx(0.0, abs=1e-6)
+
+    def test_half_the_amplitude_is_about_minus_six_db(self):
+        whole = _tone(2.0, amplitude=0.5)
+        region = _tone(1.0, amplitude=0.25)
+        assert _relative_db(region, whole) == pytest.approx(-6.02, abs=0.05)
+
+    def test_digital_silence_is_unmeasurable_not_minus_infinity(self):
+        assert _relative_db(_silence(1.0), _tone(2.0)) is None
+
+    def test_empty_inputs_are_unmeasurable(self):
+        assert _relative_db(np.array([]), _tone(1.0)) is None
+        assert _relative_db(_tone(1.0), np.array([])) is None
+
+
+@pytest.mark.unit
+class TestShifted:
+    """A region decode returns region-relative times; they mean nothing until moved."""
+
+    def test_segment_times_move_by_the_offset(self):
+        moved = _shifted([_segment("Recovered.", 0.0, 2.0)], 100.0, ("start", "end"))
+        assert moved[0]["start"] == 100.0 and moved[0]["end"] == 102.0
+        assert moved[0]["text"] == "Recovered."
+
+    def test_word_times_use_their_own_keys(self):
+        moved = _shifted(_words([(0.0, 0.5, "hi")]), 10.0, ("s", "e"))
+        assert moved[0]["s"] == 10.0 and moved[0]["e"] == 10.5
+
+    def test_the_input_is_not_mutated(self):
+        original = [_segment("x", 0.0, 1.0)]
+        _shifted(original, 5.0, ("start", "end"))
+        assert original[0]["start"] == 0.0
+
+    def test_unparseable_times_are_left_alone_rather_than_crashing(self):
+        moved = _shifted([{"start": None, "end": "x"}], 5.0, ("start", "end"))
+        assert moved == [{"start": 5.0, "end": "x"}]
+
+
+@pytest.mark.unit
+class TestRecoveryIsNew:
+    """A recovery that adds a duplicate is worse than the gap it was filling."""
+
+    def test_real_recovered_text_is_appended(self):
+        ok, why = _recovery_is_new(
+            [_segment("if you enjoyed the video don't forget to subscribe", 0.0, 3.0)],
+            "That is all I wanted to say.",
         )
-        suspects = [dict(segments[1], suspect_reason="impossible_wps(x)", index=1)]
+        assert ok is True and why == ""
 
-        kept_segments, kept_words = _drop_segments(segments, words, suspects)
+    def test_an_empty_re_decode_is_skipped(self):
+        ok, why = _recovery_is_new([_segment("   ", 0.0, 3.0)], "Anything.")
+        assert ok is False and "no text" in why
 
-        assert [s["text"] for s in kept_segments] == [
-            "Real speech here.",
-            "More real speech.",
-        ]
-        assert [w["w"] for w in kept_words] == ["Real", "More"]
+    def test_no_segments_at_all_is_skipped(self):
+        assert _recovery_is_new([], "Anything.")[0] is False
 
-    def test_a_zero_length_span_still_takes_its_words(self):
-        segments = [_segment("Phantom.", 5.0, 5.0)]
-        words = _words([(5.0, 5.0, "Phantom.")])
-        suspects = [dict(segments[0], suspect_reason="x", index=0)]
-
-        kept_segments, kept_words = _drop_segments(segments, words, suspects)
-        assert kept_segments == [] and kept_words == []
-
-    def test_nothing_suspect_changes_nothing(self):
-        segments = [_segment("Real.", 0.0, 2.0)]
-        words = _words([(0.0, 1.0, "Real.")])
-        kept_segments, kept_words = _drop_segments(segments, words, [])
-        assert kept_segments == segments and kept_words == words
-
-    def test_the_input_lists_are_not_mutated(self):
-        segments = [_segment("a", 0.0, 1.0), _segment("b", 1.0, 2.0)]
-        words = _words([(0.0, 1.0, "a"), (1.0, 2.0, "b")])
-        suspects = [dict(segments[1], suspect_reason="x", index=1)]
-
-        _drop_segments(segments, words, suspects)
-        assert len(segments) == 2 and len(words) == 2
+    def test_a_verbatim_repeat_of_the_segment_before_the_gap_is_skipped(self):
+        """The decode loop reaching across the seam — punctuation and case vary."""
+        ok, why = _recovery_is_new(
+            [_segment("thanks for watching", 0.0, 3.0)], "Thanks for watching."
+        )
+        assert ok is False and "repeated" in why
 
 
 # =============================================================================
@@ -343,14 +509,269 @@ class TestWordLossReport:
 
 
 # =============================================================================
-# The shared threshold
+# E — the legacy path must fail visibly rather than ship the source as a translation
 # =============================================================================
 @pytest.mark.unit
-class TestImpossibleWordsPerSecIsShared:
-    def test_the_segment_gate_uses_the_engine_constant(self):
-        """One number, one place. A segment just over it is suspect; just under is not."""
-        over = " ".join(["w"] * int(IMPOSSIBLE_WORDS_PER_SEC * 2 + 2))
-        under = " ".join(["w"] * int(IMPOSSIBLE_WORDS_PER_SEC * 2 - 2))
+class TestLegacyTranslationFailure:
+    """An untranslated .srt under a green job is the worst outcome this pipeline has.
 
-        assert len(_segment_suspects([_segment(over, 0.0, 2.0)])) == 1
-        assert _segment_suspects([_segment(under, 0.0, 2.0)]) == []
+    It is indistinguishable from success until a human reads the file. All three legacy
+    fallbacks that produced it now raise the same exception the v2 path already uses,
+    carrying the transcript so the expensive stage is not thrown away.
+    """
+
+    @staticmethod
+    def _segments():
+        return [
+            {"start": 0.0, "end": 1.0, "text": "Hello there."},
+            {"start": 1.0, "end": 2.0, "text": "Second line."},
+        ]
+
+    @staticmethod
+    def _with_a_dead_translator(monkeypatch):
+        from services import transcription_service as svc
+
+        monkeypatch.setattr(svc.config, "USE_FAKE_YTDLP", False, raising=False)
+        monkeypatch.setattr(
+            svc,
+            "get_translator",
+            lambda service: (_ for _ in ()).throw(RuntimeError("provider down")),
+        )
+        return svc
+
+    def test_a_failing_translator_raises_instead_of_returning_the_source(
+        self, monkeypatch
+    ):
+        from tasks.processing_tasks import TranslationFailedWithSalvage
+
+        svc = self._with_a_dead_translator(monkeypatch)
+
+        with pytest.raises(TranslationFailedWithSalvage) as caught:
+            svc.translate_segments(self._segments(), "he", service="google")
+
+        assert "provider down" in str(caught.value)
+
+    def test_no_segment_is_left_claiming_a_translation_it_does_not_have(
+        self, monkeypatch
+    ):
+        from tasks.processing_tasks import TranslationFailedWithSalvage
+
+        svc = self._with_a_dead_translator(monkeypatch)
+        segments = self._segments()
+
+        with pytest.raises(TranslationFailedWithSalvage):
+            svc.translate_segments(segments, "he", service="google")
+
+        assert all("translated_text" not in s for s in segments)
+
+    def test_the_transcript_rides_along_as_salvage(self, monkeypatch):
+        from tasks.processing_tasks import TranslationFailedWithSalvage
+
+        svc = self._with_a_dead_translator(monkeypatch)
+
+        with pytest.raises(TranslationFailedWithSalvage) as caught:
+            svc.translate_segments(self._segments(), "he", service="google")
+
+        assert [s["text"] for s in caught.value.segments] == [
+            "Hello there.",
+            "Second line.",
+        ]
+
+    def test_the_exception_is_the_one_the_v2_path_already_raises(self):
+        """Same class, so the existing salvage handler needs no second contract."""
+        from services.transcription_service import _translation_failed
+        from tasks.processing_tasks import TranslationFailedWithSalvage
+
+        assert isinstance(_translation_failed("x", []), TranslationFailedWithSalvage)
+
+
+# =============================================================================
+# B (wiring) — the coverage recovery actually appends, on the real code path
+# =============================================================================
+class _FakeWord:
+    def __init__(self, start, end, word):
+        self.start, self.end, self.word = start, end, word
+
+
+class _FakeSegment:
+    def __init__(self, start, end, text, words=()):
+        self.start, self.end, self.text = start, end, text
+        self.words = list(words)
+
+
+class _FakeInfo:
+    language = "en"
+
+
+class _FakeModel:
+    """Returns one canned segment list per ``transcribe`` call, recording each call."""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self.calls = []
+
+    def transcribe(self, audio, **options):
+        self.calls.append({"samples": len(audio), "options": dict(options)})
+        index = min(len(self.calls) - 1, len(self._script) - 1)
+        return iter(self._script[index]), _FakeInfo()
+
+
+@pytest.mark.unit
+class TestCoverageRecoveryWiring:
+    """The ASR stopped 5.25s early on real audio and nothing said so.
+
+    The pure helpers are pinned above; this pins the WIRING — that a detected gap
+    actually produces a second decode whose output is appended with corrected
+    timestamps, and that a covered transcript costs nothing.
+    """
+
+    @staticmethod
+    def _install(monkeypatch, model, seconds=20.0):
+        from services import transcription_service as svc
+
+        audio = _tone(seconds)
+        monkeypatch.setattr(svc.config, "USE_FAKE_YTDLP", False, raising=False)
+        monkeypatch.setattr(
+            svc, "_extract_audio_np", lambda path, cb=None: (audio, seconds)
+        )
+        monkeypatch.setattr(svc.smart_whisper, "load_model", lambda name: model)
+        return svc
+
+    def test_an_uncovered_tail_is_re_decoded_and_appended(self, monkeypatch):
+        model = _FakeModel(
+            [
+                [
+                    _FakeSegment(
+                        0.0,
+                        10.0,
+                        "Everything up to here.",
+                        [_FakeWord(0.0, 1.0, "Everything")],
+                    )
+                ],
+                [
+                    _FakeSegment(
+                        0.0,
+                        3.0,
+                        "don't forget to like and subscribe.",
+                        [_FakeWord(0.0, 1.0, "don't")],
+                    )
+                ],
+            ]
+        )
+        svc = self._install(monkeypatch, model)
+
+        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
+
+        assert len(model.calls) == 2, "the tail was not re-decoded"
+        assert [s["text"] for s in result["segments"]] == [
+            "Everything up to here.",
+            "don't forget to like and subscribe.",
+        ]
+
+    def test_the_recovered_timestamps_are_moved_back_to_where_the_audio_was(
+        self, monkeypatch
+    ):
+        model = _FakeModel(
+            [
+                [_FakeSegment(0.0, 10.0, "First.", [_FakeWord(0.0, 1.0, "First.")])],
+                [_FakeSegment(0.0, 3.0, "Second.", [_FakeWord(0.5, 1.5, "Second.")])],
+            ]
+        )
+        svc = self._install(monkeypatch, model)
+
+        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
+
+        assert result["segments"][1]["start"] == pytest.approx(10.0)
+        assert result["segments"][1]["end"] == pytest.approx(13.0)
+        assert result["words"][1]["s"] == pytest.approx(10.5)
+
+    def test_the_re_decode_is_not_conditioned_on_the_previous_output(self, monkeypatch):
+        """A region decoded on its own has no earlier output to carry a loop across."""
+        model = _FakeModel(
+            [
+                [_FakeSegment(0.0, 10.0, "First.", [])],
+                [_FakeSegment(0.0, 3.0, "Second.", [])],
+            ]
+        )
+        svc = self._install(monkeypatch, model)
+        svc.transcribe_with_words("/x.mp4", model_preference="large")
+
+        assert model.calls[0]["options"]["condition_on_previous_text"] is True
+        assert model.calls[1]["options"]["condition_on_previous_text"] is False
+
+    def test_only_the_uncovered_region_is_handed_to_the_second_decode(
+        self, monkeypatch
+    ):
+        model = _FakeModel(
+            [
+                [_FakeSegment(0.0, 10.0, "First.", [])],
+                [_FakeSegment(0.0, 3.0, "Second.", [])],
+            ]
+        )
+        svc = self._install(monkeypatch, model, seconds=20.0)
+        svc.transcribe_with_words("/x.mp4", model_preference="large")
+
+        assert model.calls[0]["samples"] == 20 * SR
+        assert model.calls[1]["samples"] == 10 * SR
+
+    def test_a_covered_transcript_costs_no_second_decode(self, monkeypatch):
+        model = _FakeModel(
+            [[_FakeSegment(0.0, 19.9, "All of it, right to the end.", [])]]
+        )
+        svc = self._install(monkeypatch, model)
+
+        svc.transcribe_with_words("/x.mp4", model_preference="large")
+        assert len(model.calls) == 1
+
+    def test_a_repeated_recovery_is_skipped_rather_than_duplicated(self, monkeypatch):
+        model = _FakeModel(
+            [
+                [_FakeSegment(0.0, 10.0, "Thanks for watching.", [])],
+                [_FakeSegment(0.0, 3.0, "thanks for watching", [])],
+            ]
+        )
+        svc = self._install(monkeypatch, model)
+
+        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
+
+        assert len(model.calls) == 2
+        assert [s["text"] for s in result["segments"]] == ["Thanks for watching."]
+
+    def test_an_empty_recovery_is_skipped(self, monkeypatch):
+        model = _FakeModel([[_FakeSegment(0.0, 10.0, "First.", [])], []])
+        svc = self._install(monkeypatch, model)
+
+        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
+        assert [s["text"] for s in result["segments"]] == ["First."]
+
+    def test_a_failing_re_decode_never_fails_the_job(self, monkeypatch):
+        class _Exploding(_FakeModel):
+            def transcribe(self, audio, **options):
+                if self.calls:
+                    self.calls.append({"samples": len(audio), "options": options})
+                    raise RuntimeError("CUDA out of memory")
+                return super().transcribe(audio, **options)
+
+        model = _Exploding([[_FakeSegment(0.0, 10.0, "First.", [])]])
+        svc = self._install(monkeypatch, model)
+
+        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
+        assert [s["text"] for s in result["segments"]] == ["First."]
+
+    def test_a_suspect_segment_is_logged_and_KEPT(self, monkeypatch):
+        """The deletion is gone. What is left is a grep for the next reviewer."""
+        import structlog
+
+        fast = " ".join(f"word{i}" for i in range(30))  # 12 w/s over 2.5s
+        model = _FakeModel(
+            [[_FakeSegment(0.0, 2.5, fast, []), _FakeSegment(2.5, 19.9, "Rest.", [])]]
+        )
+        svc = self._install(monkeypatch, model)
+
+        with structlog.testing.capture_logs() as captured:
+            result = svc.transcribe_with_words("/x.mp4", model_preference="large")
+        logged = "\n".join(str(entry.get("event", "")) for entry in captured)
+
+        assert len(result["segments"]) == 2, "a suspect segment was deleted"
+        assert "KEPT" in logged and "not a verdict" in logged
+        assert "dropping" not in logged and "fabricated" not in logged

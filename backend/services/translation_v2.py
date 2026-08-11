@@ -449,6 +449,40 @@ def _harvest_latin_locks(
     return locks
 
 
+def _script_switches(
+    source_texts: list[str], translated_texts: list[str], locked: dict
+) -> list[str]:
+    """Terms the video has ALREADY kept in Latin that this chunk translated away.
+
+    The known blind spot of :func:`_harvest_latin_locks`, made visible instead of
+    guessed at. The lock can only ever say "keep leaving this in Latin", because a
+    term the model translated is absent from the translation and there is no way to
+    learn WHICH target word it became without word-level alignment or a separate
+    glossary pass. So ISIS -> "דאעש" in one chunk and ISIS in another is drift the
+    lock cannot prevent.
+
+    Building the entity ledger that WOULD prevent it costs an extra model pass per
+    video, and one measured occurrence is not enough to justify that. This detector
+    is the cheap half: it costs nothing, it never changes output, and it turns "we
+    think this drifts" into a count. If the log stays empty across real use, the
+    ledger is not needed; if it fills up, it is — and the evidence will be sitting
+    in the run archive either way.
+
+    Pure. Returns the offending source terms.
+    """
+    if not locked:
+        return []
+    present = set()
+    for text in translated_texts or []:
+        present.update(_LATIN_TERM_RE.findall(str(text or "")))
+    switched = []
+    for text in source_texts or []:
+        for token in _LATIN_TERM_RE.findall(str(text or "")):
+            if token in locked and token not in present and token not in switched:
+                switched.append(token)
+    return switched
+
+
 def _merge_locks(glossary, locks: dict) -> dict:
     """The caller's glossary plus harvested term locks, caller's entries winning.
 
@@ -513,24 +547,29 @@ def build_system_prompt(
         '"like", stutters and false starts'
     )
     if style == "clean":
+        # ONE rule, not two. This used to be a "MECHANICAL RULE, no judgement required"
+        # (delete any opening "you know," / "well," / "look,") followed by an EXCEPTION
+        # that "outranks" it and requires exactly the judgement the first half forbids.
+        # A model handed two rules that contradict each other follows whichever one it
+        # read last, which is not a policy. The judgement is the rule.
         filler_rule = (
             f"REMOVE spoken disfluencies and filler: {filler_examples}. Subtitles are "
-            "read, not heard — filler wastes reading time. Note that these are FILLER "
-            'only when they carry no meaning: sentence-initial "like" ('
-            '"Like, I was there") is filler and is deleted, while comparative "like" '
-            '("it moves like a train") is meaning and is translated. The same test '
-            'applies to "look" and "listen": drop the interjection, keep the verb.\n'
-            "   MECHANICAL RULE, no judgement required: when a cue OPENS with one of "
-            '"you know," / "I mean," / "like," / "well," / "look," / "listen," — the '
-            "phrase followed by a COMMA — your translation starts AFTER it, and the "
-            'comma goes with it. "You know, like, he really got hurt." is '
-            '"הוא באמת נפגע." — not "אתה יודע, הוא באמת נפגע." A question that uses the '
-            'same words as a VERB is untouched: "Do you know what that means?" keeps it.\n'
-            "   EXCEPTION, and it outranks the mechanical rule: a marker doing "
-            'interpersonal WORK is meaning, not filler. Direct address ("look, Nick" '
-            "— a parent softening what follows), a marker the sentence's warmth or "
-            "stance leans on, stays and is translated. The test: if removing it makes "
-            "the speaker colder or blunter than they were, it was not filler."
+            "read, not heard — filler wastes reading time. But these words are filler "
+            "only when they carry NO meaning, so decide each one on what it is doing:\n"
+            '   Sentence-initial "like" ("Like, I was there") is filler and goes; '
+            'comparative "like" ("it moves like a train") is meaning and is translated. '
+            'The same test applies to "look" and "listen": drop the interjection, keep '
+            'the verb — "Do you know what that means?" is a question, not a marker.\n'
+            '   An opening discourse marker — "you know," / "I mean," / "like," / '
+            '"well," / "look," / "listen," — is DROPPED when it is doing nothing but '
+            'filling time ("You know, like, he really got hurt." is "הוא באמת נפגע."), '
+            "and KEPT and translated when it is doing interpersonal work: direct address "
+            '("look, Nick" — a parent softening what follows), softening, hedging, or '
+            "carrying the speaker's stance toward what they are about to say.\n"
+            "   The test, applied to that cue and not to the word in the abstract: read "
+            "the sentence without it. If it says the same thing and the speaker sounds "
+            "the same, it was filler. If the speaker comes out colder, blunter or more "
+            "certain than they were, it was meaning and it stays."
         )
     else:
         filler_rule = (
@@ -544,8 +583,27 @@ def build_system_prompt(
     rules = [
         f"Output natural, idiomatic spoken {lang} — never a literal, word-for-word "
         "rendering.",
-        "PRESERVE sentence punctuation: . , ? ! — every cue must end with proper "
-        "punctuation.",
+        # THE 38%-OF-VIDEO DISASTER. This rule used to end "every cue must end with
+        # proper punctuation", and combined with "read the whole batch" that is an
+        # INSTRUCTION to complete a mid-sentence fragment from the cue after it. Verified
+        # in the raw LLM archive: source cue 42 "President Johnson refused to greenlight
+        # a preemptive" / 43 "strike by Israel... in 1967." came back with 42 holding the
+        # whole sentence and 43 holding cue 44's content. The offset then grew to 3 and
+        # held to the end of the chunk. A cue is a TIMED unit — it is on screen while
+        # those words are being spoken — so a fragment that ends mid-sentence is correct
+        # and completing it is theft from the next cue.
+        "PRESERVE sentence punctuation: . , ? ! — a cue that ends a sentence in the "
+        "source ends one in your translation, with the same mark.\n"
+        "   A CUE IS AN INDEPENDENT UNIT. Translate the words that are in it and only "
+        "those. If a cue stops mid-sentence, your translation stops mid-sentence too: do "
+        "NOT complete it, do NOT pull words forward from the next cue, and do NOT push "
+        "words back into the previous one. Never merge two cues into one, and never "
+        "leave a cue empty because you already said its content somewhere else. The "
+        "punctuation requirement does NOT apply to a fragment that continues into the "
+        "next cue — such a fragment correctly ends with no terminal mark at all.\n"
+        "   Each cue is on screen only while those exact words are spoken, so content "
+        "moved between cues appears at the wrong moment on the picture, and every cue "
+        "after it is wrong too.",
         filler_rule,
         # Measured twice in judged rounds: "Fucking shit" came back as "איזה שטויות"
         # ("what nonsense"), and in another run a profanity was silently deleted — the
@@ -599,6 +657,14 @@ def build_system_prompt(
     # cues into statements that contradict themselves ("it is not called X, it is called
     # X"). A translator collapsing two names onto one target word is normally right —
     # it is the same referent — which is exactly why it needs an explicit exception.
+    #
+    # The dictated Hebrew outputs for that one clip were DELETED from this rule: it used
+    # to spell out the exact strings "לא קראו לזה Hebrew. קראו לזה עברית." and
+    # "מה המילה העברית ל-Hebrew?". A prompt that scripts the answer for one video is not
+    # a rule, it is that video's expected output smuggled into the system prompt — it
+    # cannot generalise and it makes the rule impossible to evaluate on anything else.
+    # The PRINCIPLE stays, with an illustrative example (Farsi/Parsi) that is not the
+    # clip it was learned on.
     rules.append(
         "When the source DISTINGUISHES two names or terms for the same thing, the "
         f"{lang} MUST keep them distinguishable. TRANSLITERATE the foreign term "
@@ -614,13 +680,10 @@ def build_system_prompt(
         f"WHEN TRANSLITERATION CANNOT CARRY THE CONTRAST — because the {lang} for the "
         f"foreign term and the transliteration of it are the SAME {lang} word, or differ "
         "only by diacritics — KEEP THE FOREIGN TERM IN LATIN SCRIPT instead. Diacritics "
-        "are not a contrast: subtitle fonts do not draw Hebrew niqqud, so עברית and "
-        "עִברית are one word on screen and a cue built on the difference between them "
-        'says nothing. "They didn\'t call it Hebrew, they called it Ivrit" must not '
-        'become "לא קראו לזה עברית. קראו לזה עברית." and must not be rescued with '
-        'niqqud either — it is "לא קראו לזה Hebrew. קראו לזה עברית." And "What is the '
-        'Hebrew word for Hebrew?" is "מה המילה העברית ל-Hebrew?", never the tautology '
-        '"מה המילה העברית לעברית?".'
+        "are NOT a contrast: subtitle fonts do not draw them, so two spellings that "
+        "differ only in diacritics are one word on screen and a cue built on the "
+        "difference between them says nothing. Rescuing such a cue with diacritics is "
+        "not a solution; keeping one of the two names in Latin script is."
     )
     rules.append(
         f'A cue that begins with the dialogue dash "{DIALOGUE_DASH}" MUST begin with '
@@ -641,12 +704,25 @@ def build_system_prompt(
             f"ז{GERESH}אנר."
         )
         rules.append(
-            # Each of these three was a recurring judged error, across two pipelines.
+            # Clause (3) was DELETED: 'a counted noun above ten is singular — "243 שנה",
+            # never "243 שנים"'. That is not Hebrew grammar. The singular after a large
+            # number is an optional LITERARY pattern confined to units of measure, time
+            # and currency; the general rule is the opposite, and the instruction was
+            # making the model write "243 איש" where "243 אנשים" is what Hebrew says.
+            # A prompt rule that is wrong is worse than a missing one — the model obeys
+            # it.
+            #
+            # Clause (2) was NARROWED. "military and honorific titles take the article"
+            # is true of ranks and offices before a name ("הגנרל ג'ורג' וושינגטון") and
+            # false of מר / ד"ר / פרופ' ("מר כהן", never "המר כהן") and of direct
+            # address ("אדוני הנשיא", not "האדוני הנשיא").
             "Hebrew micro-grammar that machine output keeps getting wrong: (1) in a "
             'definite construct chain only the LAST noun is definite — "לב הארגמן", '
-            'never "הלב הארגמן"; (2) military and honorific titles take the article — '
-            '"הגנרל ג\'ורג\' וושינגטון", "הנשיא"; (3) a counted noun above ten is '
-            'singular — "243 שנה", never "243 שנים".'
+            'never "הלב הארגמן"; (2) a MILITARY RANK or an OFFICE standing before a '
+            'proper name takes the article — "הגנרל ג\'ורג\' וושינגטון", "הנשיא טראמפ" '
+            f"— but the personal honorifics מר, ד{GERSHAYIM}ר and פרופ{GERESH} do NOT "
+            '("מר כהן", never "המר כהן"), and neither does direct address '
+            '("אדוני הנשיא").'
         )
         rules.append(
             "Grammatical gender must agree WITHIN each noun phrase, not only across "
@@ -1034,6 +1110,189 @@ def _parse_cue_map(content: str) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------------------
+# Alignment: is cue N's translation actually a translation of cue N?
+# --------------------------------------------------------------------------------------
+#: Largest uniform cue shift the alignment check looks for.
+#:
+#: THE MEASURED FAILURE: validation checked only that every requested id was PRESENT
+#: (set membership) and then bound text to cue by index. A response in which every id
+#: exists but all the content has slid by one therefore passed in complete silence.
+#: Verified in the raw LLM archive: source cue 42 "President Johnson refused to
+#: greenlight a preemptive" / 43 "strike by Israel... in 1967." came back with 42 holding
+#: the whole sentence and 43 holding cue 44's content. The offset then grew to 3 and held
+#: to the end of the chunk — 38% of that video was subtitled with the wrong line.
+#:
+#: 3 because 3 is what was measured. A drift larger than that is not a drift, it is a
+#: different response, and the anchor evidence for it would be indistinguishable from
+#: noise on a 40-cue chunk.
+ALIGNMENT_MAX_OFFSET = 3
+
+#: How many more cues a SHIFTED reading must explain than the aligned one before the
+#: chunk is rejected.
+#:
+#: One extra agreement is a coincidence — a name that happens to appear in two adjacent
+#: cues. Two independent cues both agreeing with the shifted reading and disagreeing
+#: with the ids is the signature of the defect. Deliberately conservative in the safe
+#: direction: a false NEGATIVE costs the same silent shift that already ships today,
+#: while a false POSITIVE spends a whole extra chunk request on a correct response.
+ALIGNMENT_MIN_ADVANTAGE = 2
+
+#: Plausible band for ``len(translation) / len(source)`` on a correctly bound cue.
+#:
+#: A weak, corroborating signal only. Hebrew usually comes back shorter than English and
+#: Spanish longer, so the band is wide on purpose: its job is to be able to CONTRADICT a
+#: shifted reading, never to detect one on its own.
+ALIGNMENT_LENGTH_BAND = (0.4, 2.5)
+
+#: Digit runs, and Latin-script tokens of two characters or more.
+_ANCHOR_RE = re.compile(r"[0-9]+|[A-Za-z][A-Za-z0-9'’\-]*")
+
+
+def _anchors(text: str) -> set:
+    """The tokens of one cue that SURVIVE translation, so they can be matched across it.
+
+    Digits survive by rule (the prompt requires "11 and above stay as numerals") and
+    Latin-script tokens survive whenever the prompt's own rules keep them: proper nouns,
+    acronyms, programme titles, and the terms the cross-chunk lock pins in Latin. Those
+    are the only things a Hebrew or Arabic translation still shares with its English
+    source, which is exactly what makes them usable as alignment anchors.
+
+    Single Latin letters are excluded: "a", "I" and stray initials appear everywhere and
+    would agree with anything. Digit runs are kept at any length — a lone "7" inside a
+    line of Hebrew is a strong anchor.
+
+    Pure. Lower-cased, so casing drift is not mistaken for a different token.
+    """
+    found = set()
+    for match in _ANCHOR_RE.finditer(str(text or "")):
+        token = match.group(0)
+        if token[0].isdigit():
+            found.add(token)
+        elif len(token) >= 2:
+            found.add(token.lower())
+    return found
+
+
+def _compare_key(text: str) -> str:
+    """Case-, punctuation- and whitespace-insensitive form: "is this the same line?"."""
+    return " ".join(
+        "".join(
+            ch for ch in str(text or "").lower() if ch.isalnum() or ch.isspace()
+        ).split()
+    )
+
+
+def _alignment_scores(sources: list, targets: list, max_offset: int) -> dict:
+    """For each shift ``k``, how well does "target p is really source p+k" hold up?
+
+    Two independent measurements per pair, and they are kept separate on purpose:
+
+    ``anchor_hits``
+        how many pairs share at least one :func:`_anchors` token. Content evidence, and
+        the only thing allowed to DECIDE.
+    ``length_fit``
+        the fraction of pairs whose length ratio is inside
+        :data:`ALIGNMENT_LENGTH_BAND`. Corroboration only — it can veto a shifted
+        reading, never establish one.
+
+    Pure.
+    """
+    low, high = ALIGNMENT_LENGTH_BAND
+    scores = {}
+    for offset in range(0, max(0, int(max_offset)) + 1):
+        hits = 0
+        fitting = 0
+        pairs = 0
+        for position, target in enumerate(targets):
+            source_position = position + offset
+            if source_position >= len(sources):
+                break
+            source = sources[source_position]
+            pairs += 1
+            if _anchors(source) & _anchors(target):
+                hits += 1
+            source_len = len(str(source or "").strip())
+            if (
+                source_len
+                and low <= len(str(target or "").strip()) / source_len <= high
+            ):
+                fitting += 1
+        scores[offset] = {
+            "pairs": pairs,
+            "anchor_hits": hits,
+            "length_fit": round(fitting / pairs, 3) if pairs else 0.0,
+        }
+    return scores
+
+
+def _detect_chunk_offset(
+    sources: list, targets: list, *, max_offset: int = ALIGNMENT_MAX_OFFSET
+) -> dict:
+    """Does a uniform shift explain this chunk's content better than the ids do?
+
+    THE INVARIANT: a response whose ids are all present is not therefore correct. This
+    is a CONTENT check, run before anything is bound, and it is the only thing standing
+    between the archive's measured off-by-one and a delivered file in which every
+    subtitle is one line early.
+
+    The aligned reading (``offset == 0``) is the default and wins every tie. A shift is
+    declared only when it explains at least :data:`ALIGNMENT_MIN_ADVANTAGE` more cues by
+    anchor content AND the length evidence does not contradict it. With no anchors
+    anywhere in the chunk — a possibility, since anchors are exactly the tokens that
+    survive translation — there is nothing to measure and the answer is "aligned": this
+    check reports what it can see and never guesses.
+
+    Pure.
+
+    Returns:
+        ``{"offset": int, "scores": {k: {...}}, "why": str}``. ``offset`` is 0 when the
+        chunk looks correctly bound.
+    """
+    scores = _alignment_scores(sources or [], targets or [], max_offset)
+    aligned = scores.get(0, {"anchor_hits": 0, "length_fit": 0.0, "pairs": 0})
+    best_offset = 0
+    best = aligned
+    for offset, score in scores.items():
+        if offset == 0:
+            continue
+        if score["anchor_hits"] > best["anchor_hits"]:
+            best_offset, best = offset, score
+
+    if not best_offset:
+        return {"offset": 0, "scores": scores, "why": "no shift explains more content"}
+    advantage = best["anchor_hits"] - aligned["anchor_hits"]
+    if advantage < ALIGNMENT_MIN_ADVANTAGE:
+        return {
+            "offset": 0,
+            "scores": scores,
+            "why": (
+                f"shift {best_offset} explains only {advantage} more cue(s) than the "
+                f"ids do — under the {ALIGNMENT_MIN_ADVANTAGE} needed to reject"
+            ),
+        }
+    if best["length_fit"] < aligned["length_fit"]:
+        return {
+            "offset": 0,
+            "scores": scores,
+            "why": (
+                f"shift {best_offset} matches {advantage} more anchor(s) but its cue "
+                f"lengths fit worse ({best['length_fit']} < {aligned['length_fit']}) — "
+                "not enough to reject"
+            ),
+        }
+    return {
+        "offset": best_offset,
+        "scores": scores,
+        "why": (
+            f"a uniform shift of {best_offset} matches the anchors of "
+            f"{best['anchor_hits']}/{best['pairs']} cues where the ids match only "
+            f"{aligned['anchor_hits']}/{aligned['pairs']}; length fit "
+            f"{best['length_fit']} vs {aligned['length_fit']}"
+        ),
+    }
+
+
 def _record_llm(
     recorder, stage: str, system: str, user: str, response, meta: dict
 ) -> None:
@@ -1119,6 +1378,114 @@ def _request_cue_map(
         },
     )
     return _parse_cue_map(_extract_content(response))
+
+
+def _reask_misaligned_chunk(
+    *,
+    request,
+    target_lang: str,
+    texts: dict,
+    target_ids: list,
+    context_items: list,
+    mode: str,
+    chunk_index: int,
+) -> dict:
+    """Get an ALIGNED translation for a chunk that came back shifted, or fail loudly.
+
+    Two escalating attempts, because they fail for different reasons:
+
+    1. **The same chunk, asked again.** A shift is a decoding accident, not a property
+       of the request — the archive's shifted response came from a prompt that already
+       said one entry per id. Most of the time asking again is enough, and it costs one
+       request.
+    2. **One request per cue.** A per-cue request cannot be misaligned: there is exactly
+       one source cue in it, so there is nothing for the content to slide against. The
+       other cues ride along as read-only context so whole-scene consistency (gender,
+       tense, terminology) survives the fallback. It is expensive on purpose — it is
+       reached only after a chunk has come back wrong twice.
+
+    Never returns a shifted map, and never returns a partial one: an id the model will
+    not translate even one-at-a-time raises, exactly as a missing id already does.
+
+    Args:
+        request: ``(items, stage) -> {id: text}``; the caller owns the client, model and
+            prompt, so this function stays testable with a plain callable.
+        context_items: the chunk's read-only neighbours, as ``(id, text, True)``.
+    """
+    wanted = set(target_ids)
+    sources = [texts[i] for i in target_ids]
+
+    items = sorted(
+        [(i, texts[i], False) for i in target_ids] + list(context_items),
+        key=lambda item: item[0],
+    )
+    try:
+        retry = {
+            i: t
+            for i, t in request(items, f"{mode}_realign_{chunk_index + 1}").items()
+            if i in wanted
+        }
+    except TranslationV2Error as exc:
+        logger.error("translation_v2: the realignment request failed: %s", exc)
+        retry = {}
+
+    dropped = [i for i in target_ids if i not in retry]
+    if not dropped:
+        check = _detect_chunk_offset(sources, [retry[i] for i in target_ids])
+        if not check["offset"]:
+            logger.info(
+                "translation_v2: chunk %d came back ALIGNED on the second ask — %s",
+                chunk_index + 1,
+                check["why"],
+            )
+            return retry
+        logger.error(
+            "translation_v2: chunk %d is STILL shifted by %d on the second ask (%s) — "
+            "falling back to one request per cue, where a shift is impossible",
+            chunk_index + 1,
+            check["offset"],
+            check["why"],
+        )
+    else:
+        logger.error(
+            "translation_v2: the realignment request dropped ids %s — falling back to "
+            "one request per cue",
+            sorted(dropped),
+        )
+
+    per_cue: dict = {}
+    for cue_id in target_ids:
+        single_items = sorted(
+            [(cue_id, texts[cue_id], False)]
+            + [(i, texts[i], True) for i in target_ids if i != cue_id]
+            + list(context_items),
+            key=lambda item: item[0],
+        )
+        try:
+            answer = request(single_items, f"{mode}_percue_{chunk_index + 1}_{cue_id}")
+        except TranslationV2Error as exc:
+            logger.error(
+                "translation_v2: per-cue request for %s failed: %s", cue_id, exc
+            )
+            continue
+        if cue_id in answer:
+            per_cue[cue_id] = answer[cue_id]
+
+    still_missing = [i for i in target_ids if i not in per_cue]
+    if still_missing:
+        raise TranslationV2Error(
+            "Translation misaligned and unrecoverable: chunk "
+            f"{chunk_index + 1} came back shifted, and cue ids {sorted(still_missing)} "
+            "could not be translated one at a time either",
+            missing_ids=still_missing,
+        )
+    logger.warning(
+        "translation_v2: chunk %d recovered one cue at a time (%d requests) after two "
+        "shifted responses",
+        chunk_index + 1,
+        len(target_ids),
+    )
+    return per_cue
 
 
 # --------------------------------------------------------------------------------------
@@ -1366,9 +1733,34 @@ def translate_cues(
             except TranslationV2Error as exc:
                 logger.error("translation_v2: retry request failed: %s", exc)
 
+            # A retry that fills a hole by COPYING a line it already produced has not
+            # recovered anything — it has printed one cue's words over another cue's
+            # timing. The archive shows exactly that. Two cues whose SOURCE text is the
+            # same are allowed to share a translation ("Yes." / "Yes."); two cues that
+            # said different things are not.
+            assigned = {_compare_key(t): cue_id for cue_id, t in translated.items()}
             for cue_id in list(missing):
-                if cue_id in retry_translations:
-                    translated[cue_id] = retry_translations[cue_id]
+                candidate = retry_translations.get(cue_id)
+                if candidate is None:
+                    continue
+                holder = assigned.get(_compare_key(candidate))
+                if holder is not None and _compare_key(texts.get(holder, "")) != (
+                    _compare_key(texts.get(cue_id, ""))
+                ):
+                    logger.error(
+                        "translation_v2: the retry filled cue %s with a translation "
+                        "already bound to cue %s, whose SOURCE says something else — "
+                        "refusing it rather than shipping cue %s's words on cue %s's "
+                        "timing: %r",
+                        cue_id,
+                        holder,
+                        holder,
+                        cue_id,
+                        candidate[:60],
+                    )
+                    continue
+                translated[cue_id] = candidate
+                assigned[_compare_key(candidate)] = cue_id
 
             missing = [i for i in target_ids if i not in translated]
             if missing:
@@ -1378,6 +1770,50 @@ def translate_cues(
                     missing_ids=missing,
                 )
 
+        # === Alignment: every id being PRESENT is not the same as being CORRECT ===
+        #
+        # Until this check existed, text was bound to cue by index the moment the ids
+        # validated. A response where all 40 ids are there and all 40 contents have slid
+        # by one passed silently, and the archive holds one that did — the shift grew to
+        # 3 and held to the end of the chunk. Nothing from a shifted response is bound.
+        alignment = _detect_chunk_offset(
+            [texts[i] for i in target_ids], [translated[i] for i in target_ids]
+        )
+        if alignment["offset"]:
+            logger.error(
+                "translation_v2: chunk %d (cues %d-%d) came back MISALIGNED by %d — %s. "
+                "NOTHING from this response is bound; re-requesting the chunk.",
+                chunk_index + 1,
+                target_ids[0],
+                target_ids[-1],
+                alignment["offset"],
+                alignment["why"],
+            )
+            translated = _reask_misaligned_chunk(
+                # `system` is bound as a default so the closure carries THIS chunk's
+                # prompt (term locks and all), not whatever the loop variable holds by
+                # the time it is called.
+                request=lambda request_items, stage, system=chunk_system: (
+                    _request_cue_map(
+                        client,
+                        model,
+                        system,
+                        build_user_prompt(target_lang, request_items, mode=mode),
+                        usage,
+                        recorder=recorder,
+                        stage=stage,
+                    )
+                ),
+                target_lang=target_lang,
+                texts=texts,
+                target_ids=target_ids,
+                context_items=[
+                    (i, t, True) for i, t, is_context in items if is_context
+                ],
+                mode=mode,
+                chunk_index=chunk_index,
+            )
+
         for cue_id, text in translated.items():
             out[cue_id - 1]["translated"] = text
 
@@ -1385,10 +1821,23 @@ def translate_cues(
         # Never in proofread mode: source and target are the same language there, so
         # "the term survived verbatim" is true of every word and carries no information.
         if not proofread:
-            found = _harvest_latin_locks(
-                [texts[i] for i in target_ids if i in texts],
-                [translated[i] for i in target_ids if i in translated],
-            )
+            chunk_sources = [texts[i] for i in target_ids if i in texts]
+            chunk_targets = [translated[i] for i in target_ids if i in translated]
+
+            # Detect first: a term this chunk translated away can still be one an
+            # EARLIER chunk locked, and the lock has no way to stop that. Logging
+            # only — see _script_switches for why the fix is deferred.
+            switched = _script_switches(chunk_sources, chunk_targets, locks)
+            if switched:
+                logger.warning(
+                    "translation_v2: term drift — chunk %d translated %s, which an "
+                    "earlier chunk had kept in Latin script; the same video now uses "
+                    "two renderings for it",
+                    chunk_index + 1,
+                    ", ".join(sorted(switched)),
+                )
+
+            found = _harvest_latin_locks(chunk_sources, chunk_targets)
             fresh = {t: r for t, r in found.items() if t not in locks}
             if fresh:
                 logger.info(

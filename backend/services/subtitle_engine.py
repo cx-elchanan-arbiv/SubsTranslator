@@ -103,6 +103,26 @@ DIALOGUE_DASH = "— "
 #: exceed this cap, but only for a cue that genuinely cannot be read in the time it has.
 LEAD_OUT_MAX = 1.0
 
+#: Longest LEAD-IN (seconds) a cue may claim from the silence BEHIND it — i.e. how early
+#: it may appear, before its own first word is spoken.
+#:
+#: Why a lead-in exists at all: it is the only time left when a cue is crowded from the
+#: front. :func:`_can_merge` refuses to glue a complete sentence to a following QUESTION
+#: (the judged spoiler defect — a rapid interview put the interviewer's next question on
+#: screen 2.5s before it was asked), and when the question starts less than ``min_dur``
+#: after the statement begins, that refusal used to be paid for by shipping the statement
+#: under the duration floor. It does not have to be: the silence in FRONT of the
+#: statement is dead air that the previous cue was only holding as lead-out, and taking
+#: it back costs the viewer nothing while buying the floor back in full. On the measured
+#: fixture the statement needs 0.18s and there are 0.34s of silence available.
+#:
+#: 0.5 is the conventional ceiling, not a measured one: a subtitle may lead its audio
+#: slightly — that is standard practice and reads as anticipation — but past about half a
+#: second the viewer registers the caption before the voice, which is the same spoiler
+#: defect in miniature. Bounded further, and always, by the previous cue's own speech and
+#: its own duration floor: a lead-in may only eat SILENCE, never a neighbour.
+LEAD_IN_MAX = 0.5
+
 #: Characters per second above which a SOURCE cue is SUSPECTED of being an ASR
 #: hallucination. **A suspicion, not a verdict** — see :func:`drop_hallucinated_cues`.
 #:
@@ -139,36 +159,56 @@ MAX_SOURCE_CPS = 35.0
 #: real ever measured here and less than half of the fabrication.
 IMPOSSIBLE_SOURCE_CPS = 90.0
 
-#: Companion hard signal in WORDS per second, because the CPS test is calibrated on
-#: character density and English words are long enough to slip under it: the judged
-#: crosstalk fabrication packed 17 invented words into 1.52s — 11.2 w/s but only
-#: ~40 CPS, sailing past the 90 above. Deliberately a HARD signal: crosstalk zones are
-#: LOUD, so the audio-energy veto would rescue exactly the fabrications this exists to
-#: drop.
+#: Words per second above which a source cue is SUSPECTED of being invented. **One SOFT
+#: signal among several** — see :func:`drop_hallucinated_cues`.
 #:
-#: LOWERED 8.0 -> 7.25. The 8.0 was set to clear "conference-record auctioneering",
-#: which is not this product's material and never appeared in the corpus; later judged
-#: rounds measured INVENTED runs at 7.5-7.7 w/s that slid straight under it.
+#: Why a words-per-second signal exists at all
+#: -------------------------------------------
+#: The CPS pair above is calibrated on character DENSITY, and English words are long
+#: enough to slip under it: the judged crosstalk fabrication packed 17 invented words
+#: into 1.52s — 11.2 w/s but only ~40 CPS, sailing straight past the 90.
 #:
-#: 7.25 and not 7.0, and the 0.25 is the whole point. The two populations in this corpus
-#: are closer together than the CPS ones:
+#: Why it is 9.0, and why it stopped being a verdict
+#: ------------------------------------------------
+#: It was 7.25 and it DELETED cues on its own. The justification was that 7.25 is "the
+#: midpoint of the empty gap" between the fastest genuine cue on record here (7.03 w/s,
+#: "and they were screaming and yelling at each other." in 1.28s, real cross-talk) and
+#: the slowest measured fabrication (7.5 w/s). That gap is 3% wide. **3% is not a gap,
+#: it is the measurement.**
 #:
-#:     fastest GENUINE cue     7.03 w/s — "and they were screaming and yelling at each
-#:                             other." in 1.28s, real cross-talk in an argument, pinned
-#:                             by ``test_fast_speech_alone_is_no_longer_enough`` because
-#:                             an earlier rule already deleted it once
-#:     slowest FABRICATION     7.5 w/s (invented runs measured at 7.5-7.7)
+#: MEASURED, this session, on this project's own audio: Whisper's output is chaotically
+#: sensitive to its input. Changing ONE sample out of 624,153 by a single LSB — an edit
+#: far below the noise floor of any microphone, and inaudible — flipped 11 words of the
+#: transcript, reproduced 3/3 in both directions. An inaudible ±1-LSB dither applied to
+#: 0.1% of the samples changed 13.1% of the words on one clip (and 0.0% on two others).
+#: So a cue's measured words-per-second is not a stable property of the SPEECH; it is a
+#: property of one decode of it. Re-run the same file and the same sentence can land on
+#: either side of a 3% line.
 #:
-#: 7.25 is the midpoint of that empty gap. 7.0 would sit BELOW the genuine cue and delete
-#: real dialogue on a hard signal — the exact regression this module has now been burned
-#: by twice — while buying nothing: everything between 7.0 and 7.25 that was ever
-#: measured here was spoken by a person.
+#: 9.0 is 28% above 7.03 instead of 3% above it, and the signal is SOFT: it now needs
+#: corroboration and is subject to the audio-energy veto, which is exactly the demotion
+#: :data:`MAX_SOURCE_CPS` was given after it deleted 8 real cues and caught 0
+#: fabrications. Crosstalk zones are LOUD, and the veto is what rescues them.
 #:
-#: This is a bound on the physics of speech, not a tuning knob for one clip: no speaker
-#: in this corpus, fast standup and shouted cross-talk included, sustains more than
-#: ~7 words in a second, and text that claims to is text that was not spoken in the time
-#: it is stamped on.
-IMPOSSIBLE_WORDS_PER_SEC = 7.25
+#: **Rate alone can never justify deletion.** A number that a one-LSB audio change can
+#: move is not evidence that a person did not say something. If the rate is the only
+#: thing wrong with a cue, the cue ships.
+MAX_SOURCE_WORDS_PER_SEC = 9.0
+
+#: Shortest cue on which a words-per-second rate is computed at all.
+#:
+#: Whisper quantises word timestamps to 0.02s and its per-word timing error is roughly
+#: CONSTANT in absolute time, so the relative error in a rate grows as 1/duration. On a
+#: half-second cue a routine two-tick error moves the measured rate by ~8% — larger than
+#: the entire distance between "fast speech" and "fabrication" ever measured in this
+#: corpus. Below this floor the number describes the quantiser, not the speaker, so it is
+#: not computed and the signal simply does not fire.
+#:
+#: Applied to the words-per-second signal only. The CPS pair is deliberately NOT floored:
+#: :data:`IMPOSSIBLE_SOURCE_CPS` (90) is more than half again the fastest genuine cue in
+#: the corpus (58.9) and its single measured catch is a 0.26s fabrication at 219 CPS, so
+#: flooring it would delete the signal's whole evidence base without removing any risk.
+RATE_SIGNAL_MIN_DUR = 2.0
 
 #: A word timestamp shorter than this is DEGENERATE: Whisper's word times are quantised
 #: to 0.02s, so anything under 0.05s is one or two ticks — the shape it produces when it
@@ -196,6 +236,12 @@ DEGENERATE_WORD_RUN = 3
 #: verified Whisper loop repetition sits at -14.9 dB. -6.0 is inside that gap. The probe
 #: is optional; with no probe there is no veto and the signals decide alone.
 ENERGY_VETO_DB = -6.0
+
+#: Resolution of an emitted cue time. :func:`words_to_cues` rounds every start and end
+#: to milliseconds, which is what SRT carries, so any rule that aims to land EXACTLY on
+#: a boundary lands one tick under it about half the time. Rules that must clear a
+#: boundary ask for one tick more than they need.
+CUE_TIME_RESOLUTION = 0.001
 
 #: Shortest cue that can actually be seen (~1 frame at 25 fps). A cue that cannot
 #: be given this much time without overlapping its neighbour is not shortened to
@@ -709,6 +755,58 @@ def _word_stats(group: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _lead_in_start(
+    start: float,
+    next_start: float,
+    previous_start: float | None,
+    previous_end: float | None,
+    *,
+    min_dur: float,
+    min_gap: float,
+    lead_in_max: float,
+) -> float:
+    """How early a crowded cue may appear so it can still be shown for ``min_dur``.
+
+    THE DEFECT THIS CLOSES: a cue whose successor starts less than ``min_dur + min_gap``
+    after it begins cannot be given the duration floor by the lead-out pass — there is no
+    dead air AHEAD of it. Until now the only answers were "merge it into the successor"
+    or "ship it under the floor", and :func:`_can_merge` forbids the first whenever the
+    successor is a QUESTION (gluing a statement to the question after it puts that
+    question on screen before it is asked — measured at 2.5s early on a real interview).
+    So the floor was quietly weakened to accommodate the guard. There is a third answer:
+    the silence BEHIND the cue, which the previous cue is only holding as lead-out.
+
+    Every bound here is a thing the lead-in may not eat:
+
+    * ``lead_in_max`` — how far ahead of its own speech a cue may appear at all;
+    * ``previous_end + min_gap`` — the previous cue's SPEECH, plus the breath between
+      them. A lead-in takes lead-out and silence, never a neighbour's words;
+    * ``previous_start + min_dur + min_gap`` — the previous cue's own duration floor.
+      Fixing one cue by pushing another under the floor is not a fix;
+    * ``next_start - min_gap - min_dur`` — never earlier than it needs to be. This is
+      the target, not merely a bound: a cue that already has room is left alone. One
+      :data:`CUE_TIME_RESOLUTION` is added to it because the caller rounds cue times to
+      milliseconds, and a target landing exactly ON the floor rounds under it half the
+      time.
+
+    Pure. Returns the new start, which is ``start`` itself whenever nothing can be taken
+    (including when the bounds contradict each other, e.g. the previous cue is crowded
+    too).
+    """
+    needed = next_start - min_gap - min_dur - CUE_TIME_RESOLUTION
+    if needed >= start:
+        return start
+    earliest = start - max(0.0, lead_in_max)
+    if previous_end is None or previous_start is None:
+        earliest = max(earliest, 0.0)
+    else:
+        earliest = max(
+            earliest, previous_end + min_gap, previous_start + min_dur + min_gap
+        )
+    candidate = max(needed, earliest)
+    return candidate if candidate < start else start
+
+
 def words_to_cues(
     words: list[dict[str, Any]],
     *,
@@ -720,6 +818,7 @@ def words_to_cues(
     asr_primed: bool = False,
     turn_gap: float = TURN_SPLIT_GAP,
     lead_out_max: float = LEAD_OUT_MAX,
+    lead_in_max: float = LEAD_IN_MAX,
     video_duration: float | None = None,
 ) -> list[dict[str, Any]]:
     """Re-spot word timestamps into readable subtitle cues.
@@ -749,6 +848,11 @@ def words_to_cues(
          air left to grant. It is merged into that successor (the same
          :func:`_can_merge` constraints) rather than shipped under the floor. When
          that merge is impossible the short cue survives and a WARNING says so.
+      3d. **Lead-in** — a cue that step 3c could not merge takes what it still needs
+         from the silence BEHIND it (:func:`_lead_in_start`), bounded by
+         ``lead_in_max``, by the previous cue's speech + ``min_gap`` and by the previous
+         cue's own floor. This is what lets the question guard refuse a merge without
+         the duration floor paying for it.
       4. **Lead-out** — each cue's end grows into the dead air ahead of it, by at most
          ``min(next_start - min_gap, end + lead_out_max)`` and never past
          ``start + max_dur``; when cues collide the end shrinks instead, but not below
@@ -939,13 +1043,10 @@ def words_to_cues(
                 ):
                     floored[-1] = previous + group
                     continue
-                logger.warning(
-                    "spotting: %r can only be shown for %.2fs (floor %.2fs) and cannot "
-                    "be merged into the next cue — shipping the compromise",
-                    _text_of(previous)[:40],
-                    room,
-                    min_dur,
-                )
+                # No warning here any more: step 3d still has the silence BEHIND this
+                # cue to spend, and on the measured fixture that is enough to close the
+                # gap exactly. Warning about a defect that is about to be repaired is
+                # what taught this module's own tests to expect one.
         floored.append(group)
 
     cues = [
@@ -957,6 +1058,38 @@ def words_to_cues(
         }
         for g in floored
     ]
+
+    # 3d. LEAD-IN. Step 3c leaves behind exactly one kind of cue: one that cannot reach
+    # `min_dur` because its successor crowds it AND cannot legally be merged into that
+    # successor — almost always because the successor is a question and merging would
+    # spoil it. That residue used to be shipped under the floor, and the floor's own
+    # tests were relaxed to let it through, which is fitting the test to the code. The
+    # interaction is what was wrong, not the floor: the silence in FRONT of the crowded
+    # cue is dead air the previous cue was only holding as lead-out, so the cue takes it
+    # and the floor is met with the question left exactly where it was spoken.
+    for index, cue in enumerate(cues[:-1]):
+        next_start = cues[index + 1]["start"]
+        if next_start - cue["start"] >= min_dur + min_gap:
+            continue
+        previous = cues[index - 1] if index else None
+        moved = _lead_in_start(
+            cue["start"],
+            next_start,
+            previous["start"] if previous else None,
+            previous["end"] if previous else None,
+            min_dur=min_dur,
+            min_gap=min_gap,
+            lead_in_max=lead_in_max,
+        )
+        if moved < cue["start"]:
+            logger.info(
+                "spotting: %r appears %.2fs early so it can hold the %.2fs floor "
+                "without being merged into the cue that crowds it",
+                cue["text"][:40],
+                cue["start"] - moved,
+                min_dur,
+            )
+            cue["start"] = moved
 
     # 4. lead-out / anti-overlap
     for i, cue in enumerate(cues):
@@ -987,6 +1120,22 @@ def words_to_cues(
         cue["end"] = max(cue["end"], cue["start"] + MIN_VISIBLE_DUR)
         cue["start"] = round(cue["start"], 3)
         cue["end"] = round(cue["end"], 3)
+
+    # The honest residue, reported AFTER every mechanism that could still have fixed it
+    # (merge, lead-in, lead-out) and BEFORE the EOF clamp, which shortens cues for a
+    # completely different and entirely legitimate reason. A cue only reaches this line
+    # when it could not be merged into the cue crowding it AND there was not enough
+    # silence behind it to buy the difference.
+    for cue in cues:
+        if (cue["end"] - cue["start"]) < min_dur - 1e-6:
+            logger.warning(
+                "spotting: %r can only be shown for %.2fs (floor %.2fs) — it cannot be "
+                "merged into the cue that crowds it and there is not enough silence "
+                "behind it to make up the difference; shipping the compromise",
+                cue["text"][:40],
+                cue["end"] - cue["start"],
+                min_dur,
+            )
 
     # 5. clamp to the end of the picture. Applied last, after every rule that could
     # have grown a cue: the lead-out on the FINAL cue is the usual offender (it has no
@@ -1031,6 +1180,7 @@ def drop_hallucinated_cues(
     *,
     max_cps: float = MAX_SOURCE_CPS,
     impossible_cps: float = IMPOSSIBLE_SOURCE_CPS,
+    max_words_per_sec: float = MAX_SOURCE_WORDS_PER_SEC,
     key: str = "text",
     energy_probe: Any = None,
     energy_veto_db: float = ENERGY_VETO_DB,
@@ -1068,6 +1218,13 @@ def drop_hallucinated_cues(
         speech level.
     ``cps_fast`` (SOFT)
         Above :data:`MAX_SOURCE_CPS`. Suspicious, never sufficient.
+    ``wps_fast`` (SOFT)
+        Above :data:`MAX_SOURCE_WORDS_PER_SEC`, and only on cues lasting at least
+        :data:`RATE_SIGNAL_MIN_DUR`. It was HARD, at 7.25 w/s — 3% above the fastest
+        genuine cue on record here — until it was measured that a ONE-LSB change to a
+        single sample of the audio flips whole sentences of Whisper output. A rate that
+        an inaudible edit can move is a suspicion; it is never a reason to delete text.
+        See :data:`MAX_SOURCE_WORDS_PER_SEC`.
     ``degenerate_words`` (SOFT)
         A run of at least :data:`DEGENERATE_WORD_RUN` consecutive sub-50ms word
         timestamps (from ``word_stats``, attached by :func:`words_to_cues`): Whisper
@@ -1089,6 +1246,8 @@ def drop_hallucinated_cues(
         max_cps: soft characters-per-second signal; see :data:`MAX_SOURCE_CPS`.
         impossible_cps: hard characters-per-second signal; see
             :data:`IMPOSSIBLE_SOURCE_CPS`.
+        max_words_per_sec: soft words-per-second signal; see
+            :data:`MAX_SOURCE_WORDS_PER_SEC`.
         key: which field carries the source text.
         energy_probe: optional callable ``(start, end) -> float | None`` returning the
             window's mean audio level in dB RELATIVE to the whole file's mean (0 = the
@@ -1137,15 +1296,16 @@ def drop_hallucinated_cues(
         soft: list[str] = []
         if cps > impossible_cps:
             hard.append(f"cps_impossible({cps:.1f}>{impossible_cps:.0f})")
-        words_per_sec = len(text.split()) / duration
-        if words_per_sec > IMPOSSIBLE_WORDS_PER_SEC:
-            hard.append(
-                f"wps_impossible({words_per_sec:.2f}>{IMPOSSIBLE_WORDS_PER_SEC:.2f})"
-            )
         if normalized and normalized == previous_norm:
             hard.append("duplicate_of_previous")
         if cps > max_cps:
             soft.append(f"cps_fast({cps:.1f}>{max_cps:.0f})")
+        # Below RATE_SIGNAL_MIN_DUR the rate measures Whisper's 0.02s timestamp
+        # quantiser rather than the speaker, so it is not computed at all.
+        if duration >= RATE_SIGNAL_MIN_DUR:
+            words_per_sec = len(text.split()) / duration
+            if words_per_sec > max_words_per_sec:
+                soft.append(f"wps_fast({words_per_sec:.2f}>{max_words_per_sec:.2f})")
         if degenerate_run >= DEGENERATE_WORD_RUN:
             soft.append(f"degenerate_words(run={degenerate_run})")
 
@@ -1378,6 +1538,12 @@ REFLOW_MAX_GAP = 1.5
 #: Netflix budget the rest of this module is built around.
 REFLOW_MAX_CHARS = MAX_LINE_CHARS * MAX_LINES
 
+#: The three prefixes that assimilate a following definite article: ב + הבית = בבית,
+#: ל + הילד = לילד, כ + השמש = כשמש. The others keep it (והבית, מהבית, שהבית), which
+#: is why this is a subset. :func:`reflow_dangling_connectors` uses it to REFUSE an
+#: ambiguous join rather than to perform one — see the comment at the call site.
+_ARTICLE_SWALLOWING_PREFIXES = frozenset("בלכ")
+
 _DANGLING_RE = re.compile(f"(?:^|\\s)([{''.join(DANGLING_PREFIXES)}])-?$")
 
 
@@ -1441,6 +1607,21 @@ def reflow_dangling_connectors(
             "AN",
         ):
             token += "-"
+        # ב/ל/כ absorb a following definite article — the preposition carries the
+        # article's vowel, so "ב" + "הבית" is "בבית", and plain concatenation
+        # yields "בהבית", which is not a Hebrew word. The obvious repair (drop the
+        # ה) is WRONG just as often: an initial ה may be part of the word rather
+        # than the article, and "ל" + "הרים" is "להרים", not "לרים". Hebrew
+        # orthography does not distinguish the two without morphological analysis
+        # this module has no business doing.
+        #
+        # So the ambiguous case is simply not reflowed. A stranded prefix is a
+        # visible line-break artefact; an invented non-word reads as a spelling
+        # error and can change the word. When the join cannot be made correctly,
+        # not joining is the honest outcome. ו/מ/ש never assimilate ("והבית",
+        # "מהבית", "שהבית" are all correct), so they are unaffected.
+        if token[0] in _ARTICLE_SWALLOWING_PREFIXES and next_text.startswith("ה"):
+            continue
         joined = token + next_text
         if len(joined) > max_chars:
             continue

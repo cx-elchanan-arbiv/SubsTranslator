@@ -55,6 +55,9 @@ def setup_logging(level: str = "INFO", testing: bool = False, json_logs: bool = 
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
+        # Interpolates `logger.info("took %ss", n)`. See the wrapper_class note in
+        # structlog.configure() below — the two go together.
+        structlog.stdlib.PositionalArgumentsFormatter(),
     ]
 
     if testing:
@@ -69,7 +72,21 @@ def setup_logging(level: str = "INFO", testing: bool = False, json_logs: bool = 
 
     structlog.configure(
         processors=processors,
-        wrapper_class=structlog.BoundLogger,
+        # `structlog.stdlib.BoundLogger`, not `structlog.BoundLogger`, and this is a
+        # correctness fix rather than a preference. Percent-style logging —
+        # `logger.info("took %ss", n)` — is the stdlib interface and this backend
+        # uses it in services and tasks. The generic BoundLogger refuses any
+        # positional argument after the message and raises TypeError
+        # ("_proxy_to_logger() takes from 2 to 3 positional arguments but 4 were
+        # given") *from the log line itself*, i.e. it turns a diagnostic into a
+        # crash of whatever request reached it. The stdlib wrapper moves those
+        # arguments into ``positional_args`` for the formatter above instead.
+        #
+        # Why nobody noticed: `setup_logging` is called only by ``app.py``, so the
+        # Celery worker ran on structlog's defaults and the API ran on this config.
+        # The two processes were executing the same modules under two different
+        # logging contracts, and only one of them was armed.
+        wrapper_class=structlog.stdlib.BoundLogger,
         logger_factory=structlog.WriteLoggerFactory(),
         cache_logger_on_first_use=True,
     )

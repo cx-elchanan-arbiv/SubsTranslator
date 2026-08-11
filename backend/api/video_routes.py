@@ -587,7 +587,20 @@ def get_task_status(task_id):
         "state": status,
         "progress": progress_info,
         "video_metadata": video_metadata,
-        "result": result if status == "SUCCESS" and not error_info else None,
+        # A failed run can still have produced files worth keeping — the transcript
+        # and the .srt survive a failed burn or a failed translation, and the task
+        # layer marks that payload `salvaged`. Blanking the whole result on any error
+        # threw those away at the last step, so the user paid for a transcription and
+        # was handed nothing. On failure, pass through the salvage (and only that).
+        "result": (
+            result
+            if status == "SUCCESS" and not error_info
+            else (
+                {k: v for k, v in result.items() if k in ("files", "salvaged")}
+                if isinstance(result, dict) and result.get("salvaged")
+                else None
+            )
+        ),
         "user_choices": user_choices,
         "initial_request": initial_request,
         "error": error_info,

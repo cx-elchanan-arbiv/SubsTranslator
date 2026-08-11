@@ -104,7 +104,7 @@
     "transcriptionOnly": "Transcription & subtitles only (no translation)",
     "transcriptionOnlyHint": "Subtitles will be in the video's source language",
     "subtitleQuality": "Subtitle improvements (experimental)",
-    "subtitleQualityHint": "Each improvement works on its own. With all of them off the pipeline is exactly as before.",
+    "subtitleQualityHint": "Turning on \"Smart cue spotting\" or \"Whole-scene translation\" also switches the transcription stage, so the transcription itself can come out different. \"Translation style\" only applies while \"Whole-scene translation\" is on, and \"Improved burn-in\" only changes the finished video. With all of them off the pipeline is exactly as before.",
     "spottingV2": "Smart cue spotting",
     "spottingV2Hint": "Builds cues from word timings instead of speech segments — fewer flashes and cut sentences",
     "translationV2": "Whole-scene translation",
