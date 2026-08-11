@@ -1841,74 +1841,40 @@ def transcribe_with_words(
 
     # === Coverage invariant: audio the decoder was handed and did not describe ===
     #
-    # THE MEASURED FAILURE: on one clip the ASR stopped 5.25s before the end while the
-    # uncovered tail was LOUDER than the file average (-14.4 dB vs -19.3 dB). Nothing
-    # flagged it — a transcript that is merely SHORT looks exactly like a transcript.
-    # Re-decoding just that region recovered the missing sentence verbatim. This only
-    # ever appends; it never deletes and never replaces.
+    # DETECTION ONLY, and that is a verdict rather than a stopping point.
+    #
+    # The mechanism began as an append: when the ASR stopped 5.25s before the end of a
+    # clip whose tail was LOUDER than the file average, re-decoding just that region
+    # recovered the missing sentence verbatim. Measured over nine firings across eight
+    # clips, that success repeated twice. The other seven produced, in order of how bad
+    # they were: two fragments of ASR_PUNCTUATION_PRIMER handed back to us, a Greek
+    # phrase on a Hebrew news bulletin, three one-word crumbs ("more", "Uh-huh.",
+    # "country.") — and a fabricated United States president, four words long, inserted
+    # into a chronological list and burned into the video.
+    #
+    # Each of those was met with a narrower filter: pass no primer, pin the language,
+    # reject a foreign script, reject a repeat, reject a fragment. The president is what
+    # ended it: at exactly four words it cleared the length bar that the crumbs had
+    # failed, which is the proof that no surface property of the returned text separates
+    # speech from invention. A short isolated window is the condition under which the
+    # decoder is least reliable, so re-decoding one and trusting the answer asks the
+    # question in the worst possible place.
+    #
+    # The two errors are not worth the same. A missing tail costs a sentence the viewer
+    # never sees; an invented one puts words in a speaker's mouth, in their voice, on
+    # screen, with nothing to mark it. So the gap is reported and nothing is appended.
+    # The measurement stays — it is how a future mechanism with real evidence behind it
+    # (forced alignment, a second model, a confidence score) would be justified.
     gap = _uncovered_tail(segments, audio_np, 16000)
     if gap is not None:
         logger.warning(
             f"🕳️ v2 ASR coverage: {gap['duration']:.2f}s of audio after the last "
             f"segment ({gap['start']:.2f}-{gap['end']:.2f}s) is not described by any "
             f"segment, and it is at {gap['db']:+.1f} dB against the file — that is "
-            f"speech level. Re-decoding just that region."
+            f"speech level. NOT re-decoded: on this corpus a re-decode of an isolated "
+            f"tail invented text more often than it recovered it, once a whole "
+            f"sentence attributed to a president who was never mentioned."
         )
-        try:
-            region = audio_np[int(gap["start"] * 16000) :]
-            # THE OPTIONS MATTER MORE THAN THE REGION, and getting them wrong made
-            # this mechanism manufacture text instead of recovering it. Measured
-            # across eight clips, five recoveries: "It is not that simple." and
-            # "I think it depends." — both of them fragments of
-            # ASR_PUNCTUATION_PRIMER itself — plus "Σας ευχαριστώ." on a Hebrew news
-            # bulletin. An `initial_prompt` is text the decoder CONTINUES, so on a
-            # short region with little to hear the cheapest continuation IS the
-            # prompt; and with no language pinned, a few seconds of ambiguous audio
-            # re-detects as anything at all.
-            #
-            # So the recovery decodes bare: no primer, no conditioning, and the
-            # language the main pass already established. A recovery is only worth
-            # having if it is the audio speaking, not the configuration.
-            recovery_options = dict(
-                chosen_options,
-                condition_on_previous_text=False,
-                initial_prompt=None,
-            )
-            if detected_language:
-                recovery_options["language"] = detected_language
-            tail_segments, tail_words, _tail_info = _materialize(
-                recovery_options,
-                audio=region,
-            )
-        except Exception as exc:  # noqa: BLE001 - a recovery may never fail a job
-            logger.warning(
-                f"⚠️ v2 ASR coverage: the tail re-decode failed ({exc}) — keeping the "
-                f"transcript as it is"
-            )
-        else:
-            previous_text = str(segments[-1].get("text") or "") if segments else ""
-            usable, why_not = _recovery_is_new(
-                tail_segments,
-                previous_text,
-                transcript_text=" ".join(str(s.get("text") or "") for s in segments),
-                primer=asr_primer_for(source_lang),
-            )
-            if not usable:
-                logger.warning(f"🕳️ v2 ASR coverage: nothing appended — {why_not}")
-            else:
-                tail_segments = _shifted(tail_segments, gap["start"], ("start", "end"))
-                tail_words = _shifted(tail_words, gap["start"], ("s", "e"))
-                segments = list(segments) + tail_segments
-                words = list(words) + tail_words
-                recovered_text = " ".join(
-                    str(s.get("text") or "").strip() for s in tail_segments
-                )[:160]
-                logger.warning(
-                    f"🕳️ v2 ASR coverage: RECOVERED {len(tail_segments)} segment(s) / "
-                    f"{len(tail_words)} word(s) from the uncovered tail: "
-                    f"{recovered_text!r}"
-                )
-                transcript, terminals = _terminal_count(segments)
 
     transcription_duration = time.time() - transcription_start
     performance_monitor.log_transcription_performance(

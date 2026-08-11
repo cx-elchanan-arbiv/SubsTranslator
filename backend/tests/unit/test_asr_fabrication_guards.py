@@ -617,189 +617,63 @@ class _FakeModel:
 
 
 @pytest.mark.unit
-class TestCoverageRecoveryWiring:
-    """The ASR stopped 5.25s early on real audio and nothing said so.
+class TestCoverageIsDetectionOnly:
+    """The gap is reported. Nothing is appended. That reversal was earned.
 
-    The pure helpers are pinned above; this pins the WIRING — that a detected gap
-    actually produces a second decode whose output is appended with corrected
-    timestamps, and that a covered transcript costs nothing.
+    The mechanism began as an append and it worked twice: an ASR that stopped 5.25s
+    early on a tail LOUDER than the file average had its missing sentence recovered
+    verbatim. Over nine firings the other seven produced two fragments of the
+    punctuation primer, a Greek phrase on a Hebrew bulletin, three one-word crumbs,
+    and — the one that settled it — a fabricated United States president, four words
+    long, in a chronological list, burned into the video. Four words cleared the
+    length bar the crumbs had failed, which is the proof that no surface property of
+    the text separates speech from invention.
+
+    So these tests pin the ABSENCE of a second decode. A missing tail costs a
+    sentence nobody sees; an invented one puts words in a speaker's mouth.
     """
 
     @staticmethod
-    def _install(monkeypatch, model, seconds=20.0):
-        from services import transcription_service as svc
+    def _install(monkeypatch, model):
+        import services.transcription_service as service_module
 
-        audio = _tone(seconds)
-        monkeypatch.setattr(svc.config, "USE_FAKE_YTDLP", False, raising=False)
         monkeypatch.setattr(
-            svc, "_extract_audio_np", lambda path, cb=None: (audio, seconds)
+            service_module.smart_whisper, "load_model", lambda name: model
         )
-        monkeypatch.setattr(svc.smart_whisper, "load_model", lambda name: model)
-        return svc
-
-    def test_an_uncovered_tail_is_re_decoded_and_appended(self, monkeypatch):
-        model = _FakeModel(
-            [
-                [
-                    _FakeSegment(
-                        0.0,
-                        10.0,
-                        "Everything up to here.",
-                        [_FakeWord(0.0, 1.0, "Everything")],
-                    )
-                ],
-                [
-                    _FakeSegment(
-                        0.0,
-                        3.0,
-                        "don't forget to like and subscribe.",
-                        [_FakeWord(0.0, 1.0, "don't")],
-                    )
-                ],
-            ]
+        monkeypatch.setattr(
+            service_module, "resolve_model", lambda requested: requested or "tiny"
         )
-        svc = self._install(monkeypatch, model)
+        monkeypatch.setattr(
+            service_module,
+            "_extract_audio_np",
+            lambda *a, **k: (np.zeros(16000 * 20, dtype="f4"), 20.0),
+        )
+        return service_module
 
-        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
-
-        assert len(model.calls) == 2, "the tail was not re-decoded"
-        assert [s["text"] for s in result["segments"]] == [
-            "Everything up to here.",
-            "don't forget to like and subscribe.",
-        ]
-
-    def test_the_recovered_timestamps_are_moved_back_to_where_the_audio_was(
-        self, monkeypatch
+    def test_an_uncovered_tail_is_reported_and_not_re_decoded(
+        self, monkeypatch, caplog
     ):
         model = _FakeModel(
             [
                 [_FakeSegment(0.0, 10.0, "First.", [_FakeWord(0.0, 1.0, "First.")])],
-                [
-                    _FakeSegment(
-                        0.0,
-                        3.0,
-                        "and then the second thing happened.",
-                        [_FakeWord(0.5, 1.5, "and")],
-                    )
-                ],
+                [_FakeSegment(0.0, 3.0, "invented tail text here", [])],
             ]
         )
-        svc = self._install(monkeypatch, model)
+        service = self._install(monkeypatch, model)
 
-        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
+        with caplog.at_level("WARNING"):
+            result = service.transcribe_with_words("/x.mp4", model_preference="large")
 
-        assert result["segments"][1]["start"] == pytest.approx(10.0)
-        assert result["segments"][1]["end"] == pytest.approx(13.0)
-        assert result["words"][1]["s"] == pytest.approx(10.5)
+        assert len(result["segments"]) == 1, "a second decode was appended"
+        assert not any("invented tail" in s["text"] for s in result["segments"])
 
-    def test_a_one_word_recovery_is_refused(self, monkeypatch):
-        """Measured: six firings, one genuine (11 words), five fragments.
-
-        "more", "Uh-huh.", "country." — a decoder handed a window it cannot read
-        emits the shortest thing that terminates, so a fragment cannot be told from
-        an artefact. Skipping a real interjection is cheap; burning an invented one
-        into the video is not.
-        """
+    def test_only_one_decode_is_ever_run_for_the_main_pass(self, monkeypatch):
+        """The re-decode is gone, so a clean clip costs exactly one transcribe."""
         model = _FakeModel(
-            [
-                [_FakeSegment(0.0, 10.0, "First.", [_FakeWord(0.0, 1.0, "First.")])],
-                [_FakeSegment(0.0, 3.0, "more", [_FakeWord(0.5, 1.5, "more")])],
-            ]
+            [[_FakeSegment(0.0, 19.9, "All of it.", [_FakeWord(0.0, 1.0, "All")])]]
         )
-        svc = self._install(monkeypatch, model)
+        service = self._install(monkeypatch, model)
 
-        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
+        service.transcribe_with_words("/x.mp4", model_preference="large")
 
-        assert len(result["segments"]) == 1
-        assert "more" not in result["segments"][0]["text"]
-
-    def test_the_re_decode_is_not_conditioned_on_the_previous_output(self, monkeypatch):
-        """A region decoded on its own has no earlier output to carry a loop across."""
-        model = _FakeModel(
-            [
-                [_FakeSegment(0.0, 10.0, "First.", [])],
-                [_FakeSegment(0.0, 3.0, "Second.", [])],
-            ]
-        )
-        svc = self._install(monkeypatch, model)
-        svc.transcribe_with_words("/x.mp4", model_preference="large")
-
-        assert model.calls[0]["options"]["condition_on_previous_text"] is True
-        assert model.calls[1]["options"]["condition_on_previous_text"] is False
-
-    def test_only_the_uncovered_region_is_handed_to_the_second_decode(
-        self, monkeypatch
-    ):
-        model = _FakeModel(
-            [
-                [_FakeSegment(0.0, 10.0, "First.", [])],
-                [_FakeSegment(0.0, 3.0, "Second.", [])],
-            ]
-        )
-        svc = self._install(monkeypatch, model, seconds=20.0)
-        svc.transcribe_with_words("/x.mp4", model_preference="large")
-
-        assert model.calls[0]["samples"] == 20 * SR
-        assert model.calls[1]["samples"] == 10 * SR
-
-    def test_a_covered_transcript_costs_no_second_decode(self, monkeypatch):
-        model = _FakeModel(
-            [[_FakeSegment(0.0, 19.9, "All of it, right to the end.", [])]]
-        )
-        svc = self._install(monkeypatch, model)
-
-        svc.transcribe_with_words("/x.mp4", model_preference="large")
         assert len(model.calls) == 1
-
-    def test_a_repeated_recovery_is_skipped_rather_than_duplicated(self, monkeypatch):
-        model = _FakeModel(
-            [
-                [_FakeSegment(0.0, 10.0, "Thanks for watching.", [])],
-                [_FakeSegment(0.0, 3.0, "thanks for watching", [])],
-            ]
-        )
-        svc = self._install(monkeypatch, model)
-
-        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
-
-        assert len(model.calls) == 2
-        assert [s["text"] for s in result["segments"]] == ["Thanks for watching."]
-
-    def test_an_empty_recovery_is_skipped(self, monkeypatch):
-        model = _FakeModel([[_FakeSegment(0.0, 10.0, "First.", [])], []])
-        svc = self._install(monkeypatch, model)
-
-        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
-        assert [s["text"] for s in result["segments"]] == ["First."]
-
-    def test_a_failing_re_decode_never_fails_the_job(self, monkeypatch):
-        class _Exploding(_FakeModel):
-            def transcribe(self, audio, **options):
-                if self.calls:
-                    self.calls.append({"samples": len(audio), "options": options})
-                    raise RuntimeError("CUDA out of memory")
-                return super().transcribe(audio, **options)
-
-        model = _Exploding([[_FakeSegment(0.0, 10.0, "First.", [])]])
-        svc = self._install(monkeypatch, model)
-
-        result = svc.transcribe_with_words("/x.mp4", model_preference="large")
-        assert [s["text"] for s in result["segments"]] == ["First."]
-
-    def test_a_suspect_segment_is_logged_and_KEPT(self, monkeypatch):
-        """The deletion is gone. What is left is a grep for the next reviewer."""
-        import structlog
-
-        fast = " ".join(f"word{i}" for i in range(30))  # 12 w/s over 2.5s
-        model = _FakeModel(
-            [[_FakeSegment(0.0, 2.5, fast, []), _FakeSegment(2.5, 19.9, "Rest.", [])]]
-        )
-        svc = self._install(monkeypatch, model)
-
-        with structlog.testing.capture_logs() as captured:
-            result = svc.transcribe_with_words("/x.mp4", model_preference="large")
-        logged = "\n".join(str(entry.get("event", "")) for entry in captured)
-
-        assert len(result["segments"]) == 2, "a suspect segment was deleted"
-        assert "KEPT" in logged and "not a verdict" in logged
-        assert "dropping" not in logged and "fabricated" not in logged
