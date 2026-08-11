@@ -56,10 +56,23 @@ jobs:
     # 167 tests that never ran on a PR until now — including every pixel/render test in
     # tests/integration/test_bidi_render.py and test_subtitle_layout_render.py, i.e. the
     # only checks in the repo that look at what the burned-in subtitles actually LOOK
-    # like. Nothing here needs Docker or Redis: the suite runs against local ffmpeg and
-    # the filesystem (conftest points REDIS_URL at an unserved localhost port on
-    # purpose, and the code paths under test tolerate that).
+    # like.
     timeout-minutes: 20
+
+    # The cleanup-task tests run Celery eagerly against a real broker; without one they
+    # fail on "Connection refused" rather than on anything they are testing. A service
+    # container is the honest fix — the alternative was skipping them, which is how a
+    # gate stops being a gate.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
     - name: 📥 Checkout Code

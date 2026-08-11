@@ -16,7 +16,7 @@ import pytest
 @pytest.mark.integration
 class TestFailureScenarios:
     def test_openai_failure_is_surfaced_not_silently_downgraded(
-        self, stub_openai_rate_limiter
+        self, stub_openai_rate_limiter, monkeypatch
     ):
         """The user picked OpenAI; a rate-limited OpenAI must raise, never fall back.
 
@@ -29,7 +29,16 @@ class TestFailureScenarios:
         """
         from openai import RateLimitError
 
+        from services import translation_services
         from services.translation_services import get_translator
+
+        # The OpenAI client is fully mocked below; the constructor still refuses to
+        # build without a configured key, so an environment without one (CI) failed
+        # here instead of exercising the rate-limit path. A placeholder keeps the
+        # test measuring what it claims to measure and never reaches the network.
+        monkeypatch.setattr(
+            translation_services.config, "OPENAI_API_KEY", "test-key-not-used"
+        )
 
         with patch("openai.OpenAI") as mock_openai:
             mock_client = Mock()
@@ -105,10 +114,26 @@ class TestFailureScenarios:
         assert mock_task.update_state.called
         assert manager.steps[0].progress == 50
 
-    def test_an_unavailable_video_becomes_a_structured_youtube_error(self):
-        """Raw yt-dlp text is mapped to a typed error the API layer can classify."""
+    def test_an_unavailable_video_becomes_a_structured_youtube_error(
+        self, tmp_path, monkeypatch
+    ):
+        """Raw yt-dlp text is mapped to a typed error the API layer can classify.
+
+        The work/output directories are redirected into ``tmp_path``: the defaults are
+        absolute container paths, so on any other machine this test used to fail on
+        ``PermissionError: '/app'`` before it ever reached the behaviour it exists to
+        check — a test that passes only inside one container is not a test.
+        """
         from core.exceptions import YouTubeAccessError
+        from services import youtube_service
         from services.youtube_service import download_youtube_video
+
+        monkeypatch.setattr(
+            youtube_service.config, "FAST_WORK_DIR", str(tmp_path / "work"), raising=False
+        )
+        monkeypatch.setattr(
+            youtube_service, "DOWNLOADS_FOLDER", str(tmp_path / "out"), raising=False
+        )
 
         with patch("yt_dlp.YoutubeDL") as mock_ytdl:
             mock_instance = Mock()
