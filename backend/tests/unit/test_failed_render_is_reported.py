@@ -137,6 +137,10 @@ def run_job(tmp_path):
         watermark=False,
         spotting_v2=False,
         translation_v2=False,
+        # Pinned explicitly, all three. These tests are about what the task REPORTS
+        # when a stage fails, not about which pipeline runs — so the pipeline must
+        # not move under them when the product defaults change.
+        render_v2=False,
         target_lang="he",
         whisper_model="large",
         last_model_used=None,
@@ -240,6 +244,7 @@ def run_job(tmp_path):
                     translation_service="google",
                     watermark_config=watermark_config,
                     spotting_v2=spotting_v2,
+                    render_v2=render_v2,
                     translation_v2=translation_v2,
                 )
             finally:

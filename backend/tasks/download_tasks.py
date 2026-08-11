@@ -42,10 +42,10 @@ def download_and_process_youtube_task(
     watermark_config=None,
     start_time=None,
     end_time=None,
-    spotting_v2=False,
-    translation_v2=False,
+    spotting_v2=True,
+    translation_v2=True,
     translation_style="clean",
-    render_v2=False,
+    render_v2=True,
     subtitle_position="bottom",
 ):
     """

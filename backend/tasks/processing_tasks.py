@@ -105,10 +105,10 @@ def process_video_task(
     watermark_config=None,
     initial_timing_summary=None,
     processing_info=None,
-    spotting_v2=False,
-    translation_v2=False,
+    spotting_v2=True,
+    translation_v2=True,
     translation_style="clean",
-    render_v2=False,
+    render_v2=True,
     subtitle_position="bottom",
 ):
     """

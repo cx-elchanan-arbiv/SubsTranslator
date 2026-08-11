@@ -75,10 +75,10 @@ export interface SubtitleQualityFlags {
 }
 
 export const DEFAULT_SUBTITLE_QUALITY_FLAGS: SubtitleQualityFlags = {
-  spotting_v2: false,
-  translation_v2: false,
+  spotting_v2: true,
+  translation_v2: true,
   translation_style: 'clean',
-  render_v2: false,
+  render_v2: true,
 };
 export type WatermarkPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 export type WatermarkSize = 'small' | 'medium' | 'large';

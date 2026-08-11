@@ -54,12 +54,27 @@ SUBTITLE_POSITIONS = (
     SUBTITLE_POSITION_SIDE,
 )
 
-#: Flag name -> default. Every default is "behave exactly like today".
+#: Flag name -> default. The quality path IS the default now.
+#:
+#: These were False so that an untouched run behaved exactly like the pipeline that
+#: preceded them. That question has since been measured: eight clips, both arms on
+#: the same commit, judged BLIND — the arms were labelled A/B, which was which was
+#: decided by a coin flip, and the judges were not told what they were comparing.
+#: The quality path won 7 of 8 clips, mean 75.9 against 57.2. The losing arm was not
+#: merely rougher: in three separate clips it burned invented facts into the video
+#: (a president who was never mentioned, an event attributed to the wrong one, a
+#: fabricated claim about two countries), showed an answer 2.1s before its question,
+#: and rendered a 45-second argument as "it is not called X, it is called X".
+#:
+#: The one documented exception, kept here so nobody has to rediscover it: on clean
+#: single-speaker studio audio the older path scored HIGHER (85 vs 73). With good
+#: audio there is little for the extra machinery to fix and its own mistakes are all
+#: that is left.
 FLAG_DEFAULTS: dict[str, Any] = {
-    "spotting_v2": False,
-    "translation_v2": False,
+    "spotting_v2": True,
+    "translation_v2": True,
     "translation_style": STYLE_CLEAN,
-    "render_v2": False,
+    "render_v2": True,
 }
 
 BOOL_FLAGS = ("spotting_v2", "translation_v2", "render_v2")

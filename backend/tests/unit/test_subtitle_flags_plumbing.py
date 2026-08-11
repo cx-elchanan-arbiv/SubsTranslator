@@ -181,7 +181,7 @@ class TestParseSubtitleFlags:
             others = [
                 k for k in ("spotting_v2", "translation_v2", "render_v2") if k != name
             ]
-            assert all(flags[other] is False for other in others)
+            assert all(flags[other] is FLAG_DEFAULTS[other] for other in others)
 
 
 @pytest.mark.unit
@@ -203,13 +203,26 @@ class TestResolveFlagsAndSummary:
         }
 
     def test_any_enabled_ignores_style(self):
-        assert any_enabled(FLAG_DEFAULTS) is False
-        assert any_enabled(resolve_flags(translation_style="faithful")) is False
-        assert any_enabled(resolve_flags(render_v2=True)) is True
+        """Style is not a capability, so it never counts as "something is enabled"."""
+        all_off = {
+            "spotting_v2": False,
+            "translation_v2": False,
+            "render_v2": False,
+            "translation_style": "faithful",
+        }
+        assert any_enabled(all_off) is False
+        assert any_enabled({**all_off, "render_v2": True}) is True
+        # And the defaults themselves now enable the quality path.
+        assert any_enabled(FLAG_DEFAULTS) is True
 
     def test_summary_names_every_flag_on_one_line(self):
         summary = flags_summary(
-            resolve_flags(spotting_v2=True, translation_style="faithful")
+            resolve_flags(
+                spotting_v2=True,
+                translation_v2=False,
+                render_v2=False,
+                translation_style="faithful",
+            )
         )
         assert "\n" not in summary
         assert summary == (
@@ -625,6 +638,12 @@ class TestUploadRouteFlagParsing:
         assert kwargs["render_v2"] is False
 
     def test_one_flag_at_a_time(self, flask_client, upload_route):
+        """Each flag is parsed from its own field and no other.
+
+        The other two are sent explicitly false rather than left to the defaults —
+        the defaults now enable them, and the point here is the PARSING, not what
+        an absent field means.
+        """
         for name in ("spotting_v2", "translation_v2", "render_v2"):
             upload_route.apply_async.reset_mock()
             response = flask_client.post(
@@ -633,6 +652,10 @@ class TestUploadRouteFlagParsing:
                     "file": _video_file(),
                     "target_lang": "he",
                     "whisper_model": "base",
+                    **{
+                        other: "false"
+                        for other in ("spotting_v2", "translation_v2", "render_v2")
+                    },
                     name: "true",
                 },
                 content_type="multipart/form-data",
