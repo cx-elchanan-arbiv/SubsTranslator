@@ -8,6 +8,11 @@ downloading, using yt-dlp's generic extractor, and reports what was found:
   {"type": "multiple", "videos": [{...}, ...]}      # several -> let the user pick
   {"type": "none",     "reason": "<key>"}           # no extractable video
 
+"Several" means the URL itself is a collection: a page carrying more than one
+embedded video, or a playlist. A URL that names ONE video is always "single" —
+even when it also carries playlist context, which is what a YouTube link copied
+mid-playlist looks like (``watch?v=X&list=RD...``).
+
 This is the entry point for "paste a page URL, not just a direct video link".
 It does NOT handle JS-rendered / signed-token pages (e.g. Maven) — those need a
 headless browser and are explicitly out of scope here (see docs/URL_PAGE_EXTRACTION_POC.md).
@@ -20,6 +25,9 @@ from logging_config import get_logger
 
 config = get_config()
 logger = get_logger(__name__)
+
+#: How many candidates the picker is allowed to show.
+MAX_CANDIDATES = 50
 
 
 def _duration_string(seconds: float | None) -> str:
@@ -58,7 +66,17 @@ def resolve_video_url(url: str) -> dict:
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "noplaylist": False,  # let multi-video pages reveal all entries
+        # True, not False. The old value came from a wrong belief: that
+        # noplaylist=False was what let a multi-video PAGE reveal all its
+        # entries. It is not. --no-playlist only disambiguates a URL that names
+        # a video AND a playlist at once; a page with several embeds, or a real
+        # playlist URL, still returns every entry. Measured on all four shapes.
+        #
+        # With False, a link copied while a YouTube mix was playing
+        # (watch?v=X&list=RD...) expanded into the whole radio station: one real
+        # case returned 467 videos, and the song the user actually pasted was
+        # buried at position 135.
+        "noplaylist": True,
         "extract_flat": "in_playlist",  # fast: don't deep-fetch every entry
         "socket_timeout": config.YTDLP_SOCKET_TIMEOUT,
         "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
@@ -96,8 +114,23 @@ def resolve_video_url(url: str) -> dict:
             return {"type": "none", "reason": "no_video"}
         if len(videos) == 1:
             return {"type": "single", "video": videos[0]}
-        # Longest first — the main content usually outlasts intros/ads.
-        videos.sort(key=lambda v: v.get("duration") or 0, reverse=True)
-        return {"type": "multiple", "videos": videos}
+
+        # Ordering depends on where the list came from, because the two sources
+        # mean different things:
+        #   generic page - arbitrary embeds, so longest first is a decent guess
+        #                  at "the content" over a trailer or an ad clip
+        #   playlist     - the order IS the information. Sorting a playlist by
+        #                  duration scrambles it and hides what the user pointed at.
+        if (info.get("extractor") or "").lower() == "generic":
+            videos.sort(key=lambda v: v.get("duration") or 0, reverse=True)
+
+        total = len(videos)
+        result = {"type": "multiple", "videos": videos[:MAX_CANDIDATES]}
+        if total > MAX_CANDIDATES:
+            # A long playlist is a legitimate thing to paste; a picker with
+            # hundreds of rows is not a way to choose from it.
+            result["truncated"] = True
+            result["total"] = total
+        return result
 
     return {"type": "single", "video": _candidate(info, url)}

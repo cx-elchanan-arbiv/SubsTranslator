@@ -52,6 +52,9 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
   const [candidates, setCandidates] = useState<VideoCandidate[] | null>(null);
   // The action to run once a single video URL is known (process or download).
   const [pendingRun, setPendingRun] = useState<((url: string) => void) | null>(null);
+  // Set when the server capped a long playlist, so the picker can say so
+  // instead of silently pretending the list is all of it.
+  const [candidatesTotal, setCandidatesTotal] = useState<number | null>(null);
 
   // Validate URL in real-time with debounce
   useEffect(() => {
@@ -138,6 +141,7 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
         run(data.video.url || url);
       } else if (data.type === 'multiple' && Array.isArray(data.videos)) {
         setCandidates(data.videos);
+        setCandidatesTotal(data.truncated ? data.total : null);
         setPendingRun(() => run);
       } else {
         // type === 'none'
@@ -158,12 +162,14 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
   const handlePick = (video: VideoCandidate) => {
     const run = pendingRun;
     setCandidates(null);
+    setCandidatesTotal(null);
     setPendingRun(null);
     if (run) run(video.url);
   };
 
   const handleCancelPicker = () => {
     setCandidates(null);
+    setCandidatesTotal(null);
     setPendingRun(null);
   };
 
@@ -304,7 +310,13 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="text-lg font-bold text-gray-800">{t('videoPicker.title')}</h3>
-            <p className="text-sm text-gray-500 mt-1 mb-4">{t('videoPicker.subtitle')}</p>
+            <p className="text-sm text-gray-500 mt-1">{t('videoPicker.subtitle')}</p>
+            {candidatesTotal !== null && (
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2">
+                {t('videoPicker.truncated', { shown: candidates.length, total: candidatesTotal })}
+              </p>
+            )}
+            <div className="mb-4" />
 
             <ul className="space-y-2">
               {candidates.map((video, idx) => (

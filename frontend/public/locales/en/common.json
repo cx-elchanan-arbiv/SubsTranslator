@@ -91,7 +91,8 @@
     "untitled": "Untitled",
     "noVideo": "No video found on this page. Try pasting a direct video link.",
     "needsLogin": "This video requires logging in to the site, so it can't be extracted automatically.",
-    "unavailable": "Could not access video from this link."
+    "unavailable": "Could not access video from this link.",
+    "truncated": "Long list — showing {{shown}} of {{total}}. If the video you wanted is not here, paste its direct link."
   },
   "options": {
     "autoCreateVideo": "Create video with burned-in subtitles",
