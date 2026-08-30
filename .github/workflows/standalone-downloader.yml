@@ -95,14 +95,22 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
+      # pwsh, not powershell: PSGallery is not registered in the runner's
+      # Windows PowerShell 5.1 session, so Set-PSRepository there fails with
+      # "No repository with the name 'PSGallery' was found". PowerShell 7 has it.
+      # This only affects how the EXE is BUILT — the EXE itself still runs the
+      # same script, and the verify job above already exercised it under 5.1.
       - name: 📦 Install ps2exe
-        shell: powershell
+        shell: pwsh
         run: |
+          if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+            Register-PSRepository -Default
+          }
           Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
           Install-Module -Name ps2exe -Force -Scope CurrentUser
 
       - name: 🏗️ Compile
-        shell: powershell
+        shell: pwsh
         run: |
           Import-Module ps2exe
           # -noConsole: it is a window, not a command prompt.
