@@ -89,8 +89,9 @@ def download_youtube_video(
             # Log cleanup: Reduce yt-dlp verbosity
             "quiet": not config.DEBUG,  # Only show yt-dlp logs in DEBUG mode
             "no_warnings": not config.DEBUG,  # Suppress warnings unless debugging
-            # Use android_vr client so YouTube returns full-resolution formats
-            # (web/android are SABR-capped to 360p). See config.YTDLP_EXTRACTOR_ARGS
+            # Which YouTube player client to ask. Whichever one still returns the
+            # full format ladder without a 403 — see config.YTDLP_PLAYER_CLIENT,
+            # which documents why the answer keeps changing.
             "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
             # Phase A: Only faststart, no re-encoding
             "postprocessor_args": {
@@ -265,8 +266,25 @@ def download_youtube_video(
         raise handle_youtube_error(e, url)
 
 
+#: Audio-only download settings, applied when ``media_format="mp3"``.
+#:
+#: yt-dlp does the extraction itself — there is no separate conversion step of ours
+#: to go wrong. What DOES need care is everything the video path adds and audio must
+#: not inherit: ``merge_output_format`` (there is no second stream to merge) and the
+#: ``+faststart`` postprocessor arg (an MP4 container flag, meaningless on MP3 and
+#: passed straight to ffmpeg).
+AUDIO_ONLY_FORMAT = "bestaudio/best"
+AUDIO_ONLY_CODEC = "mp3"
+AUDIO_ONLY_QUALITY = "192"
+
+
 def download_youtube_video_with_progress(
-    url, quality="medium", progress_manager=None, start_time=None, end_time=None
+    url,
+    quality="medium",
+    progress_manager=None,
+    start_time=None,
+    end_time=None,
+    media_format="mp4",
 ):
     """
     Download video from YouTube with real-time progress updates.
@@ -277,7 +295,11 @@ def download_youtube_video_with_progress(
         progress_manager: Optional progress tracking manager
         start_time: Optional start time for partial download (format: HH:MM:SS, MM:SS, or SS)
         end_time: Optional end time for partial download (format: HH:MM:SS, MM:SS, or SS)
+        media_format: ``"mp4"`` for the video as before, or ``"mp3"`` to keep only the
+            audio. Anything unrecognised is treated as ``"mp4"``, so a caller that
+            does not know about this argument behaves exactly as it did.
     """
+    audio_only = str(media_format or "mp4").lower() == AUDIO_ONLY_CODEC
     try:
         # FAKE mode shortcut
         if config.USE_FAKE_YTDLP or (isinstance(url, str) and "mocked_video" in url):
@@ -319,7 +341,9 @@ def download_youtube_video_with_progress(
         os.makedirs(final_dir, exist_ok=True)
 
         ydl_opts = {
-            "format": config.YTDLP_OPTIMIZED_FORMAT,  # Phase A: Use optimized format
+            "format": (
+                AUDIO_ONLY_FORMAT if audio_only else config.YTDLP_OPTIMIZED_FORMAT
+            ),
             "outtmpl": f"{work_dir}/%(title)s.%(ext)s",  # Phase A: Use fast workspace
             "extract_flat": False,
             "noplaylist": True,  # Force single video download only
@@ -327,20 +351,42 @@ def download_youtube_video_with_progress(
             "fragment_retries": config.YTDLP_FRAGMENT_RETRIES,
             "retries": config.YTDLP_RETRIES,
             "cache_dir": config.YTDLP_CACHE_DIR,
-            "merge_output_format": config.YTDLP_MERGE_OUTPUT_FORMAT,
+            # No second stream to merge when only the audio was requested, and the
+            # value would otherwise ask ffmpeg for an MP4 container around an MP3.
+            **(
+                {}
+                if audio_only
+                else {"merge_output_format": config.YTDLP_MERGE_OUTPUT_FORMAT}
+            ),
             # Log cleanup: Reduce yt-dlp verbosity
             "quiet": not config.DEBUG,
             "no_warnings": not config.DEBUG,
-            # Use android_vr client so YouTube returns full-resolution formats
-            # (web/android are SABR-capped to 360p). See config.YTDLP_EXTRACTOR_ARGS
+            # Which YouTube player client to ask. Whichever one still returns the
+            # full format ladder without a 403 — see config.YTDLP_PLAYER_CLIENT,
+            # which documents why the answer keeps changing.
             "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
-            # Phase A: Only faststart, no re-encoding
+            # Video: only faststart, no re-encoding. Audio starts from an empty list
+            # (`+faststart` is an MP4 container flag that ffmpeg rejects on an MP3
+            # write) which the time-range block below can still extend.
             "postprocessor_args": {
-                "ffmpeg": [
-                    "-movflags",
-                    "+faststart",
-                ]  # Removed all codec args for remux-only
+                "ffmpeg": (
+                    [] if audio_only else ["-movflags", "+faststart"]
+                )  # Removed all codec args for remux-only
             },
+            # Audio extraction is yt-dlp's own postprocessor, not a step of ours.
+            **(
+                {
+                    "postprocessors": [
+                        {
+                            "key": "FFmpegExtractAudio",
+                            "preferredcodec": AUDIO_ONLY_CODEC,
+                            "preferredquality": AUDIO_ONLY_QUALITY,
+                        }
+                    ]
+                }
+                if audio_only
+                else {}
+            ),
             "restrict_filenames": config.YTDLP_RESTRICT_FILENAMES,
             "continue_dl": config.YTDLP_CONTINUE_DL,
         }
@@ -353,16 +399,13 @@ def download_youtube_video_with_progress(
 
                 # Use ffmpeg to trim after download (most reliable approach)
                 # -ss: start time, -to: end time, -c copy: no re-encoding (fast)
-                ydl_opts["postprocessor_args"]["ffmpeg"].extend(
-                    [
-                        "-ss",
-                        str(start_seconds),
-                        "-to",
-                        str(end_seconds),
-                        "-c",
-                        "copy",  # Stream copy (no re-encoding) for speed
-                    ]
-                )
+                trim_args = ["-ss", str(start_seconds), "-to", str(end_seconds)]
+                if not audio_only:
+                    # Stream copy (no re-encoding) for speed. The audio path is
+                    # re-encoding to MP3 anyway, and "-c copy" there would override
+                    # the codec the extractor postprocessor chose.
+                    trim_args += ["-c", "copy"]
+                ydl_opts["postprocessor_args"]["ffmpeg"].extend(trim_args)
 
                 if progress_manager:
                     progress_manager.log(
@@ -469,6 +512,26 @@ def download_youtube_video_with_progress(
                 progress_manager.log("📥 Download complete, processing...")
 
             original_filename = ydl.prepare_filename(info)
+
+            # `prepare_filename` predicts the name from the FORMAT, before any
+            # postprocessor has run. That is fine for video, where remuxing keeps the
+            # extension — but audio extraction downloads `.m4a`/`.webm` and writes
+            # `.mp3`, so the predicted path no longer exists and the block below would
+            # silently skip, leaving the caller with "no file" for a download that
+            # actually succeeded. yt-dlp records where it really put the file, so ask
+            # it instead of guessing.
+            for requested in info.get("requested_downloads") or []:
+                actual = requested.get("filepath")
+                if actual and os.path.exists(actual):
+                    original_filename = actual
+                    break
+            else:
+                if audio_only and not os.path.exists(original_filename):
+                    converted = (
+                        os.path.splitext(original_filename)[0] + f".{AUDIO_ONLY_CODEC}"
+                    )
+                    if os.path.exists(converted):
+                        original_filename = converted
 
             if os.path.exists(original_filename):
                 title = info.get("title", "video")

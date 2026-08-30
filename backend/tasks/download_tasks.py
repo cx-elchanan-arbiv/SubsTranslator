@@ -309,7 +309,7 @@ def download_highest_quality_video_task(self, url):
             "restrict_filenames": True,
             "continue_dl": True,
             "hls_prefer_native": True,
-            # android_vr client so YouTube returns full-res formats (not SABR 360p)
+            # Player client selection lives in config.YTDLP_PLAYER_CLIENT
             "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
             "format_sort": ["res:1080", "fps", "codec:avc1:m4a", "ext:mp4"],
             "compat_opts": ["format-sort-force"],
@@ -437,7 +437,7 @@ def download_highest_quality_video_task(self, url):
 
 @celery_app.task(bind=True, name="download_youtube_only_task")
 def download_youtube_only_task(
-    self, url, quality="high", start_time=None, end_time=None
+    self, url, quality="high", start_time=None, end_time=None, media_format="mp4"
 ):
     """
     Enterprise-grade YouTube video download with robust error handling.
@@ -447,6 +447,8 @@ def download_youtube_only_task(
         quality: Video quality (high, medium, low)
         start_time: Optional start time for partial download (format: HH:MM:SS, MM:SS, or SS)
         end_time: Optional end time for partial download (format: HH:MM:SS, MM:SS, or SS)
+        media_format: "mp4" (default, unchanged behaviour) or "mp3" for audio only.
+            Download-only feature; the processing pipeline needs the video.
     """
     import os
     import sys
@@ -540,7 +542,7 @@ def download_youtube_only_task(
 
         download_start_time = time.time()
         video_path, _ = download_youtube_video_with_progress(
-            url, quality, state_manager, start_time, end_time
+            url, quality, state_manager, start_time, end_time, media_format
         )
 
         download_time = f"{time.time() - download_start_time:.1f}"

@@ -325,7 +325,12 @@ function App() {
                     subtitleFlags,
                     subtitlePosition,
                   )}
-                  onQuickDownload={handleQuickDownload}
+                  onQuickDownload={(url, mediaFormat) => handleQuickDownload(
+                    url,
+                    undefined,
+                    undefined,
+                    mediaFormat,
+                  )}
                   isProcessing={isProcessing}
                   sourceLang={sourceLang}
                   targetLang={transcriptionOnly ? '' : targetLang}

@@ -13,6 +13,7 @@ import type {
   SubtitleQualityFlags,
   SubtitlePosition,
   Step,
+  DownloadMediaFormat,
 } from '../types';
 import { DEFAULT_SUBTITLE_QUALITY_FLAGS } from '../types/api';
 
@@ -728,9 +729,15 @@ export const useApi = () => {
     }
   };
 
-  const handleQuickDownload = (youtubeUrl: string, startTime?: string, endTime?: string) => {
-    const requestBody: {url: string; start_time?: string; end_time?: string} = {
+  const handleQuickDownload = (
+    youtubeUrl: string,
+    startTime?: string,
+    endTime?: string,
+    mediaFormat: DownloadMediaFormat = 'mp4',
+  ) => {
+    const requestBody: {url: string; start_time?: string; end_time?: string; media_format: DownloadMediaFormat} = {
       url: youtubeUrl,
+      media_format: mediaFormat,
     };
 
     // Add time range if provided

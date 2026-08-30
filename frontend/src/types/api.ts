@@ -46,6 +46,9 @@ export interface UserChoices {
 
 export type WhisperModel = 'tiny' | 'base' | 'small' | 'medium' | 'large' | 'gemini';
 export type TranslationService = 'openai' | 'google';
+// Download-only feature. The processing pipeline always needs the video,
+// so 'mp3' is offered on the quick-download path alone.
+export type DownloadMediaFormat = 'mp4' | 'mp3';
 
 /**
  * "clean" removes spoken filler ("uh", "you know") — subtitles are read, not heard.

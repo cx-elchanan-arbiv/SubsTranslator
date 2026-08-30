@@ -78,7 +78,10 @@
     "urlPlaceholder": "رابط الفيديو (YouTube، Vimeo، TikTok والمزيد)",
     "urlDescription": "أدخل رابط فيديو YouTube لاستخراج وترجمة الترجمات المرئية",
     "quickDownload": "تحميل سريع",
-    "processWithSubtitles": "معالجة مع الترجمات المرئية"
+    "processWithSubtitles": "معالجة مع الترجمات المرئية",
+    "downloadFormat": "صيغة التنزيل:",
+    "downloadFormat_mp4": "فيديو (MP4)",
+    "downloadFormat_mp3": "صوت (MP3)"
   },
   "options": {
     "autoCreateVideo": "إنشاء فيديو مع ترجمات مرئية مدمجة",

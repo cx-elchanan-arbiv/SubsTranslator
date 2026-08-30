@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from '../i18n/TranslationContext';
-import type { WhisperModel, TranslationService } from '../types';
+import type { WhisperModel, TranslationService, DownloadMediaFormat } from '../types';
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8081';
 
@@ -22,7 +22,7 @@ interface YoutubeFormProps {
     whisperModel: WhisperModel,
     translationService: TranslationService
   ) => void;
-  onQuickDownload: (url: string) => void;
+  onQuickDownload: (url: string, mediaFormat: DownloadMediaFormat) => void;
   isProcessing: boolean;
   sourceLang: string;
   targetLang: string;
@@ -45,6 +45,7 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [validationError, setValidationError] = useState('');
   const [isValidating, setIsValidating] = useState(false);
+  const [downloadFormat, setDownloadFormat] = useState<DownloadMediaFormat>('mp4');
 
   // Page-URL resolution + multi-video picker state
   const [resolving, setResolving] = useState(false);
@@ -197,7 +198,7 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
       return;
     }
 
-    resolveThenRun(trimmedUrl, (finalUrl) => onQuickDownload(finalUrl));
+    resolveThenRun(trimmedUrl, (finalUrl) => onQuickDownload(finalUrl, downloadFormat));
   };
 
   const busy = isProcessing || resolving;
@@ -263,8 +264,32 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
             disabled={busy || !youtubeUrl.trim() || !!validationError}
             className="youtube-btn youtube-btn-download disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
           >
-            🎬 {t('buttons.downloadOnly')}
+            {downloadFormat === 'mp3' ? '🎵' : '🎬'} {t('buttons.downloadOnly')}
           </button>
+        </div>
+
+        <div className="mt-3 flex items-center gap-2 flex-wrap" dir="rtl">
+          <span className="text-sm text-gray-600">{t('youtube.downloadFormat')}</span>
+          <div className="inline-flex rounded-xl border border-gray-300 overflow-hidden">
+            {(['mp4', 'mp3'] as DownloadMediaFormat[]).map((format) => (
+              <button
+                key={format}
+                type="button"
+                onClick={() => setDownloadFormat(format)}
+                disabled={busy}
+                aria-pressed={downloadFormat === format}
+                className={`px-3 py-1.5 text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  downloadFormat === format
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                {format === 'mp4'
+                  ? <>🎬 {t('youtube.downloadFormat_mp4')}</>
+                  : <>🎵 {t('youtube.downloadFormat_mp3')}</>}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

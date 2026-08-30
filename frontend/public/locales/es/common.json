@@ -78,7 +78,10 @@
     "urlPlaceholder": "URL del Video (YouTube, Vimeo, TikTok y más)",
     "urlDescription": "Ingresa una URL de video de YouTube para extraer y traducir subtítulos",
     "quickDownload": "Descarga Rápida",
-    "processWithSubtitles": "Procesar con Subtítulos"
+    "processWithSubtitles": "Procesar con Subtítulos",
+    "downloadFormat": "Formato de descarga:",
+    "downloadFormat_mp4": "Vídeo (MP4)",
+    "downloadFormat_mp3": "Audio (MP3)"
   },
   "options": {
     "autoCreateVideo": "Crear video con subtítulos integrados",

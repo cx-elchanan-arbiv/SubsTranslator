@@ -427,8 +427,15 @@ def download_video_only():
         logger.info(f"Starting download-only task for URL: {url}")
 
         # Use the new download-only task that doesn't do any processing
+        # "mp4" keeps today's behaviour for any caller that does not ask; only an
+        # explicit "mp3" changes anything. Validated here rather than passed through,
+        # so an unexpected value cannot reach yt-dlp's option builder.
+        media_format = str(data.get("media_format") or "mp4").lower()
+        if media_format not in ("mp4", "mp3"):
+            media_format = "mp4"
+
         task = download_youtube_only_task.apply_async(
-            args=[url, "high"], queue="processing"  # URL and quality
+            args=[url, "high", None, None, media_format], queue="processing"
         )
 
         # Return 202 with unified schema as per spec
