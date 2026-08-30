@@ -179,6 +179,8 @@
     "totalTime": "Total Time",
     "processAnother": "Process Another Video",
     "downloadVideoButton": "Download Video",
+    "downloadAudioButton": "Download Audio",
+    "audioReady": "Audio ready for download!",
     "summarizeButton": "Summarize Content by Topics",
     "summarizing": "Summarizing...",
     "summaryReady": "Summary ready!",

@@ -141,6 +141,8 @@
     "totalTime": "الوقت الإجمالي",
     "processAnother": "معالجة فيديو آخر",
     "downloadVideoButton": "تحميل الفيديو",
+    "downloadAudioButton": "تنزيل الصوت",
+    "audioReady": "الصوت جاهز للتنزيل!",
     "summarizeButton": "تلخيص المحتوى حسب المواضيع",
     "summarizing": "جارٍ التلخيص...",
     "summaryReady": "الملخص جاهز!",

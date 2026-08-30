@@ -103,6 +103,10 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ result, autoCreateVideo
   };
 
 
+  // The download-only result can now be an MP3. Derived from the filename because
+  // that is the only thing that survives a page reload from ?task=...
+  const isAudioOnly = /\.mp3$/i.test(result.filename || '');
+
   return (
     <div className="results-container">
       <div className="success-header">
@@ -141,16 +145,18 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ result, autoCreateVideo
       </div>
 
       <div className="download-section">
-        {/* Download-only result (video file) */}
+        {/* Download-only result. The same block serves the MP3 option, so what it
+            calls the file comes from the file itself, not from a remembered choice —
+            a page reloaded from ?task=... has no memory of what was clicked. */}
         {result.filename && result.download_url && (
           <div className="video-section">
             <p className="video-ready-text">
-              <span className="video-icon">🎬</span>
-              {t('results.videoReady')}
+              <span className="video-icon">{isAudioOnly ? '🎵' : '🎬'}</span>
+              {isAudioOnly ? t('results.audioReady') : t('results.videoReady')}
             </p>
             <a href={result.download_url.startsWith('/download/') ? `${process.env.REACT_APP_API_BASE_URL || 'http://localhost:8081'}${result.download_url}` : `${process.env.REACT_APP_API_BASE_URL || 'http://localhost:8081'}/download/${result.filename}`} download className="download-btn download-btn-video" target="_blank" rel="noopener noreferrer">
               <span className="btn-icon">📥</span>
-              <span className="btn-text">{t('results.downloadVideoButton')} ({result.file_size_mb} {t('fileInfo.megabytes')})</span>
+              <span className="btn-text">{isAudioOnly ? t('results.downloadAudioButton') : t('results.downloadVideoButton')} ({result.file_size_mb} {t('fileInfo.megabytes')})</span>
             </a>
             <p style={{fontSize: '0.85em', color: '#888', marginTop: '8px'}}>
               💡 {t('fileInfo.downloadHint')}
