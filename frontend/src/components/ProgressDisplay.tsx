@@ -16,6 +16,8 @@ interface ProgressDisplayProps {
   initialRequest?: any;
   processingType?: 'file_upload' | 'youtube_full' | 'youtube_download' | null;
   onRetry?: () => void;
+  /** Files that survived a failed run — the task marks these `salvaged`. */
+  salvagedResult?: { files?: Record<string, string> } | null;
 }
 
 interface EnhancedStep {
@@ -42,7 +44,9 @@ const BACKEND_LABEL_TO_I18N_KEY: Record<string, string> = {
   'Finalizing Video': 'finalizing',
 };
 
-const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progress, error, videoMetadata, fileMetadata, userChoices, initialRequest, processingType, onRetry }) => {
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8081';
+
+const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progress, error, videoMetadata, fileMetadata, userChoices, initialRequest, processingType, onRetry, salvagedResult }) => {
   const { t } = useTranslation();
   const [showLogs, setShowLogs] = useState(false);
   const subtitlePositionLabel = userChoices?.subtitle_position
@@ -212,6 +216,32 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
     const isYoutubeBotDetection = typeof error === 'object' &&
                                     (error as any)?.code === 'YOUTUBE_BOT_DETECTION';
 
+    // A failure is only useful if it says what happened and what to do about it.
+    // The backend classifies the cause into a stable code; the wording lives in the
+    // locale files so it comes out in the user's language rather than in whatever
+    // language the server happened to build the sentence in.
+    const errorCode = typeof error === 'object' ? (error as any)?.code : undefined;
+    const codedKey = errorCode ? `errors.byCode.${errorCode}` : '';
+    // A missing key comes back as the key itself, which is the same test used for
+    // the step labels above.
+    const codedTitle =
+      codedKey && t(`${codedKey}.title`) !== `${codedKey}.title` ? t(`${codedKey}.title`) : '';
+    const codedBody = codedTitle ? t(`${codedKey}.body`) : '';
+    const codedAction = codedTitle ? t(`${codedKey}.action`) : '';
+
+    // Files that survived the failure — the transcript is expensive and is already
+    // on disk, so it is offered rather than thrown away.
+    const salvagedFiles: string[] = Object.values(
+      (salvagedResult?.files ?? {}) as Record<string, string>
+    ).filter((name): name is string => typeof name === 'string' && name.length > 0);
+
+    // "Try again" is hidden where the backend says a retry cannot succeed — an empty
+    // account or a rejected key fails identically every time, and offering the button
+    // invites the user to pay for another transcription for the same error.
+    const retryWorthTrying = typeof error === 'object' && (error as any)?.recoverable === false
+      ? false
+      : true;
+
     if (isYoutubeBotDetection) {
       return (
         <motion.div
@@ -323,7 +353,7 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
             transition={{ delay: 0.3 }}
             className="text-2xl font-bold text-red-600 mb-6"
           >
-            {t('errors.processingError')}
+            {codedTitle || t('errors.processingError')}
           </motion.h2>
           <motion.div
             initial={{ opacity: 0, y: 10 }}
@@ -335,18 +365,49 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
               {/* eslint-disable-next-line i18next/no-literal-string */}
               <span className="text-red-500 text-lg mt-1">⚠️</span>
               <div className="flex-1">
-                {(typeof error === 'string'
-                  ? error
-                  : (error as any)?.user_facing_message || (error as any)?.message || JSON.stringify(error)
-                ).split('\n').map((line, index) => (
-                  <p key={index} className={`text-lg leading-relaxed ${index > 0 ? 'mt-2 font-mono text-sm bg-red-50 p-2 rounded' : ''}`}>
-                    {line}
-                  </p>
-                ))}
+                {codedTitle ? (
+                  <>
+                    <p className="text-lg leading-relaxed">{codedBody}</p>
+                    <p className="text-lg leading-relaxed mt-3 font-medium">{codedAction}</p>
+                  </>
+                ) : (
+                  (typeof error === 'string'
+                    ? error
+                    : (error as any)?.user_facing_message || (error as any)?.message || JSON.stringify(error)
+                  ).split('\n').map((line, index) => (
+                    <p key={index} className={`text-lg leading-relaxed ${index > 0 ? 'mt-2 font-mono text-sm bg-red-50 p-2 rounded' : ''}`}>
+                      {line}
+                    </p>
+                  ))
+                )}
               </div>
             </div>
           </motion.div>
-          {onRetry && (
+          {salvagedFiles.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.45 }}
+              className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 mb-8 text-emerald-900"
+            >
+              <p className="font-semibold mb-3">{t('errors.salvageTitle')}</p>
+              <div className="flex flex-wrap gap-3 justify-center">
+                {salvagedFiles.map((filename) => (
+                  <a
+                    key={filename}
+                    href={`${API_BASE_URL}/download/${encodeURIComponent(filename)}`}
+                    download
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-2 px-5 rounded-lg transition-colors"
+                  >
+                    {/* eslint-disable-next-line i18next/no-literal-string */}
+                    <span>⬇ </span>
+                    {t('errors.salvageDownload')}
+                  </a>
+                ))}
+              </div>
+            </motion.div>
+          )}
+          {onRetry && retryWorthTrying && (
             <motion.button
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}

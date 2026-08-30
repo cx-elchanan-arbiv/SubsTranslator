@@ -51,6 +51,7 @@ export const useApi = () => {
     logs: []
   });
   const [result, setResult] = useState<TaskResult | null>(null);
+  const [salvagedResult, setSalvagedResult] = useState<{ files?: Record<string, string> } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [videoMetadata, setVideoMetadata] = useState<VideoMetadata | undefined>(undefined);
   const [fileMetadata, setFileMetadata] = useState<FileMetadata | undefined>(undefined);
@@ -446,6 +447,15 @@ export const useApi = () => {
           // Pass the full error object to preserve the code field for bot detection UI
           setError(data.error || errorMessage);
 
+          // A failed run can still have produced files worth keeping — the transcript
+          // survives a failed translation, the .srt survives a failed burn — and the
+          // task marks that payload `salvaged`. Holding on to it is what lets the
+          // error screen offer a download instead of leaving the user with nothing
+          // after a transcription that already cost time and money.
+          setSalvagedResult(
+            data.result && (data.result as any).salvaged ? (data.result as any) : null
+          );
+
           setProgress(prev => ({
             ...prev,
             steps: prev.steps.map(step => step.status === 'in_progress' ? { ...step, status: 'error' } : step)
@@ -497,6 +507,7 @@ export const useApi = () => {
     });
     safeSetResult(null);
     setError(null);
+    setSalvagedResult(null);
     setVideoMetadata(undefined);
     setFileMetadata(undefined);
     setUserChoices(undefined);
@@ -758,6 +769,7 @@ export const useApi = () => {
     });
     safeSetResult(null);
     setError(null);
+    setSalvagedResult(null);
     setVideoMetadata(undefined);
     setFileMetadata(undefined);
     setUserChoices(undefined);
@@ -786,6 +798,7 @@ export const useApi = () => {
     progress,
     result,
     error,
+    salvagedResult,
     videoMetadata,
     fileMetadata,
     userChoices,

@@ -79,6 +79,7 @@ function App() {
     progress,
     result,
     error,
+    salvagedResult,
     videoMetadata,
     fileMetadata,
     userChoices,
@@ -215,6 +216,7 @@ function App() {
               userChoices={userChoices}
               initialRequest={initialRequest}
               processingType={currentProcessingType}
+              salvagedResult={salvagedResult}
               onRetry={() => {
                 resetState({ reason: 'retry-after-error', force: true });
                 setSelectedFile(null);

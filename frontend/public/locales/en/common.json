@@ -53,9 +53,8 @@
     }
   },
   "tabs": {
-    "upload": "File Upload",
-    "youtube": "Online Video",
-    "dashboard": "My Videos"
+    "uploadTab": "File Upload",
+    "youtubeTab": "Online Video"
   },
   "language": {
     "source": "Source Language",
@@ -265,7 +264,7 @@
   "languages": {
     "auto": "Auto Detect",
     "he": "Hebrew",
-    "en": "English", 
+    "en": "English",
     "es": "Spanish",
     "ar": "Arabic",
     "fr": "French",
@@ -365,7 +364,41 @@
       "step2": "2. Come back here and click 'File Upload'",
       "step3": "3. Upload the file - we'll handle the rest!",
       "switchButton": "Switch to File Upload"
-    }
+    },
+    "byCode": {
+      "TRANSLATION_NO_CREDITS": {
+        "title": "The translation account is out of credits",
+        "body": "OpenAI refused the translation step because the account balance is empty. The transcript was produced in full and is offered below.",
+        "action": "Add credits at platform.openai.com and run this again. Retrying before that will fail the same way."
+      },
+      "TRANSLATION_AUTH_FAILED": {
+        "title": "The API key was rejected",
+        "body": "The translation service did not accept the key. The transcript was produced and is offered below.",
+        "action": "Check the key in the server configuration. Retrying with the same key will fail again."
+      },
+      "TRANSLATION_RATE_LIMITED": {
+        "title": "The translation service is rate-limiting us",
+        "body": "Too many requests in a short window. The transcript was produced and is offered below.",
+        "action": "Wait about a minute and run it again."
+      },
+      "TRANSLATION_UNREACHABLE": {
+        "title": "The translation service could not be reached",
+        "body": "The connection failed. The transcript was produced and is offered below.",
+        "action": "Check the connection and run it again."
+      },
+      "TRANSLATION_FAILED": {
+        "title": "The translation step failed",
+        "body": "The transcript was produced and is offered below, but the translation did not finish and no video was created.",
+        "action": "Run it again. If it keeps happening, send the clip in for a look."
+      },
+      "RENDER_FAILED": {
+        "title": "Burning the subtitles failed",
+        "body": "Transcription and translation both finished and the subtitle files were written — the burn into the video did not.",
+        "action": "Download the subtitle files below and use them in any player, or run it again."
+      }
+    },
+    "salvageTitle": "What was produced and kept",
+    "salvageDownload": "Download the transcript (.srt)"
   },
   "validation": {
     "enterVideoUrl": "Please enter a video URL",
@@ -377,10 +410,6 @@
     "downloadOnly": "Download Only",
     "processButton": "Process with Subtitles",
     "retryButton": "Try Again"
-  },
-  "tabs": {
-    "uploadTab": "File Upload",
-    "youtubeTab": "Online Video"
   },
   "help": {
     "tips": "Tips"
@@ -522,5 +551,3 @@
     "errorNoVideo2": "Please select the second video file"
   }
 }
-
-

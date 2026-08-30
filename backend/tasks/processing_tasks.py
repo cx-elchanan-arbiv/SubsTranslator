@@ -67,6 +67,67 @@ class TranslationFailedWithSalvage(Exception):
         self.original_srt = original_srt
 
 
+#: Failure reason -> (stable code, English fallback sentence).
+#:
+#: The code is what the UI localises; the sentence is only a fallback for a client
+#: that does not know the code yet. Both are needed: a Hebrew string built here
+#: would be untranslatable in the browser, and a code alone would render as nothing
+#: on an older client.
+#:
+#: WHY THIS EXISTS: an out-of-credits OpenAI account produced "Processing failed.
+#: Please try again." on screen. The real reason — HTTP 429,
+#: ``credit_balance_exhausted`` — was sitting in the worker log, so the owner spent
+#: the evening looking for a bug in a pipeline that was working correctly. A retry
+#: was also the one action guaranteed not to help. An error that does not say what
+#: to do is barely better than no error.
+TRANSLATION_FAILURE_CODES: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (
+        ("insufficient_quota", "credit_balance_exhausted", "no credits remaining"),
+        "TRANSLATION_NO_CREDITS",
+        "The translation account has no credits left. Add credits and run this "
+        "again — the transcript was already produced and is offered below.",
+    ),
+    (
+        ("invalid_api_key", "incorrect api key", "401"),
+        "TRANSLATION_AUTH_FAILED",
+        "The translation service rejected the API key. Check the key in the "
+        "server configuration.",
+    ),
+    (
+        ("rate limit", "rate_limit_exceeded", "429"),
+        "TRANSLATION_RATE_LIMITED",
+        "The translation service is rate-limiting this account. Wait a minute and "
+        "run it again.",
+    ),
+    (
+        ("timeout", "timed out", "connection", "temporarily unavailable"),
+        "TRANSLATION_UNREACHABLE",
+        "The translation service could not be reached. Check the connection and "
+        "run it again.",
+    ),
+)
+
+
+def classify_translation_failure(error_text: str) -> tuple[str, str]:
+    """``(code, english_fallback)`` for a translation error, most specific first.
+
+    Matched on the provider's own message rather than on an exception class,
+    because every one of these arrives as the same exception type carrying a
+    different body. Order matters: an out-of-credits reply is ALSO an HTTP 429, so
+    the quota rule has to be tested before the rate-limit rule or every empty
+    account would be told to wait a minute.
+    """
+    haystack = (error_text or "").lower()
+    for needles, code, message in TRANSLATION_FAILURE_CODES:
+        if any(needle in haystack for needle in needles):
+            return code, message
+    return (
+        "TRANSLATION_FAILED",
+        "The translation step failed. The transcript was produced and is offered "
+        "below; the video was not created.",
+    )
+
+
 #: What the user is shown when the burn-in fails. The task result carries it as
 #: ``user_facing_message``, which is the field ``/status/<task_id>`` hands to the UI —
 #: without it the UI falls back to its generic "Processing failed" string.
@@ -1099,6 +1160,16 @@ def process_video_task(
                 break
 
         failure = {"status": "FAILURE", "error": str(e)}
+        if isinstance(e, TranslationFailedWithSalvage):
+            code, english = classify_translation_failure(str(e))
+            failure["code"] = code
+            failure["user_facing_message"] = english
+            # Retrying an empty account or a bad key just burns another
+            # transcription for the same failure.
+            failure["recoverable"] = code not in (
+                "TRANSLATION_NO_CREDITS",
+                "TRANSLATION_AUTH_FAILED",
+            )
         if isinstance(e, TranslationFailedWithSalvage) and e.original_srt:
             # Still a failure — but the transcription was expensive and its output
             # is already on disk, so hand it over instead of throwing it away.
