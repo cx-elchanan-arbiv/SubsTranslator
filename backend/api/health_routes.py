@@ -5,6 +5,12 @@ Handles health checks, feature flags, and configuration endpoints
 
 import os
 import shutil
+from datetime import datetime
+
+try:
+    import psutil
+except ImportError:  # optional; the fingerprint above is the load-bearing field
+    psutil = None
 import subprocess
 
 from flask import Blueprint, jsonify
@@ -98,14 +104,53 @@ def healthz():
     )
 
 
+def _running_code_fingerprint() -> str:
+    """Newest mtime among the loaded service/task modules, as an ISO timestamp.
+
+    Not a git SHA: this process may be running code that was edited on a
+    bind-mounted volume after it started, which no commit id can express. What
+    matters operationally is WHEN the code this process actually imported was last
+    written — a long-running Celery worker keeps serving whatever it imported at
+    startup, and every one of those staleness incidents looked like a code bug
+    until someone checked the container's start time. Reporting it turns "is this
+    running my change?" from an investigation into one request.
+    """
+    import os
+    import sys
+    from datetime import datetime
+
+    newest = 0.0
+    for name, module in list(sys.modules.items()):
+        if not (name.startswith("services.") or name.startswith("tasks.")):
+            continue
+        path = getattr(module, "__file__", None)
+        if not path:
+            continue
+        try:
+            newest = max(newest, os.path.getmtime(path))
+        except OSError:
+            continue
+    return datetime.fromtimestamp(newest).isoformat(timespec="seconds") if newest else "unknown"
+
+
 @health_bp.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint"""
+    import time
+
     return jsonify(
         {
             "status": "healthy",
             "message": "SubsTranslator is running!",
             "ffmpeg_installed": shutil.which("ffmpeg") is not None,
+            # Both are needed to spot a stale process: code newer than the start
+            # time means this process has NOT loaded it.
+            "code_last_modified": _running_code_fingerprint(),
+            "process_started": datetime.fromtimestamp(
+                psutil.Process().create_time()
+            ).isoformat(timespec="seconds")
+            if psutil
+            else time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
     )
 
