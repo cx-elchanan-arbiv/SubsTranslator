@@ -130,7 +130,11 @@ def _running_code_fingerprint() -> str:
             newest = max(newest, os.path.getmtime(path))
         except OSError:
             continue
-    return datetime.fromtimestamp(newest).isoformat(timespec="seconds") if newest else "unknown"
+    return (
+        datetime.fromtimestamp(newest).isoformat(timespec="seconds")
+        if newest
+        else "unknown"
+    )
 
 
 @health_bp.route("/health", methods=["GET"])
@@ -146,11 +150,13 @@ def health_check():
             # Both are needed to spot a stale process: code newer than the start
             # time means this process has NOT loaded it.
             "code_last_modified": _running_code_fingerprint(),
-            "process_started": datetime.fromtimestamp(
-                psutil.Process().create_time()
-            ).isoformat(timespec="seconds")
-            if psutil
-            else time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "process_started": (
+                datetime.fromtimestamp(psutil.Process().create_time()).isoformat(
+                    timespec="seconds"
+                )
+                if psutil
+                else time.strftime("%Y-%m-%dT%H:%M:%S")
+            ),
         }
     )
 
