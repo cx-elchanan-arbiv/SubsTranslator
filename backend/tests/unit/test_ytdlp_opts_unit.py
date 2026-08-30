@@ -99,7 +99,8 @@ def test_download_youtube_video_builds_opts(monkeypatch, tmp_path):
     # A playlist URL must yield one video, never the whole playlist.
     assert opts["noplaylist"] is True
 
-    # The android_vr client is what keeps YouTube from SABR-capping us to 360p.
+    # The player client comes from config, never from a literal here — which client
+    # works changes with whatever YouTube is enforcing that month.
     assert opts["extractor_args"] == real_config.YTDLP_EXTRACTOR_ARGS
 
     # Remux-only: faststart and nothing else, so no re-encode creeps back in.

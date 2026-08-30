@@ -188,15 +188,22 @@ class Config:
     YOUTUBE_RETRIES = int(os.getenv("YOUTUBE_RETRIES", 3))
     YOUTUBE_FRAGMENT_RETRIES = int(os.getenv("YOUTUBE_FRAGMENT_RETRIES", 3))
 
-    # yt-dlp player client(s). YouTube now forces SABR streaming on the default
-    # web/android clients, which strips every adaptive format and leaves only
-    # format 18 (360p) -> downloads come out at low resolution. The android_vr
-    # client still returns the full DASH ladder (1080p/4K) with no PO token,
-    # cookies, or external provider. See https://github.com/yt-dlp/yt-dlp/issues/12482
-    # Override via env e.g. YTDLP_PLAYER_CLIENT="android_vr,web_safari".
+    # yt-dlp player client(s).
+    #
+    # This used to be pinned to android_vr: YouTube forced SABR streaming on the
+    # web/android clients, which stripped every adaptive format and left only
+    # format 18 (360p). See https://github.com/yt-dlp/yt-dlp/issues/12482
+    #
+    # That workaround has since inverted. android_vr's https formats now require a
+    # GVS PO token, and without one YouTube answers **HTTP 403 on every download**,
+    # audio and video alike. Measured 2026-08-30 on yt-dlp 2026.08.19: android_vr
+    # 403s, while the default client set returns the full ladder (1080p60 avc1 +
+    # m4a, up to 2160p) and the app's own format string downloads from it.
+    # Override via env e.g. YTDLP_PLAYER_CLIENT="android_vr,web_safari" if YouTube
+    # flips this back again.
     YTDLP_PLAYER_CLIENT = [
         c.strip()
-        for c in os.getenv("YTDLP_PLAYER_CLIENT", "android_vr").split(",")
+        for c in os.getenv("YTDLP_PLAYER_CLIENT", "default").split(",")
         if c.strip()
     ]
     YTDLP_EXTRACTOR_ARGS = {"youtube": {"player_client": YTDLP_PLAYER_CLIENT}}
