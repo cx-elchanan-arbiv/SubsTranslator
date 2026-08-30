@@ -1,0 +1,6 @@
+# Windows binaries: fetched by tools/fetch-tools.sh, never committed.
+# ffmpeg.exe is larger than GitHub's 100MB per-file hard limit.
+bin/
+
+# The zip that gets sent out.
+dist/

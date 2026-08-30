@@ -1,0 +1,124 @@
+name: 📥 Standalone Downloader (Windows)
+
+# Builds and checks standalone-downloader/, the little Windows tool that lives
+# beside this project but shares no code with it. Path-filtered on purpose: this
+# never runs for a change to the app, and the app's CI never runs for a change here.
+
+on:
+  push:
+    paths:
+      - 'standalone-downloader/**'
+      - '.github/workflows/standalone-downloader.yml'
+  pull_request:
+    paths:
+      - 'standalone-downloader/**'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: 🧪 Verify on real Windows PowerShell
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: standalone-downloader
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # Windows PowerShell 5.1 — what she actually has, not PowerShell 7.
+      # This is the only place the script meets its real runtime before shipping.
+      - name: 🔤 Hebrew strings survive the file encoding
+        shell: powershell
+        run: |
+          $raw = Get-Content -Path src\Downloader.ps1 -Raw
+          # \u0590-\u05FF is the Hebrew block. Written escaped so this file stays
+          # ASCII and cannot itself be mangled by a YAML/shell encoding step.
+          if (-not [regex]::IsMatch($raw, '[\u0590-\u05FF]')) {
+            throw 'No Hebrew found: the BOM is missing and PowerShell 5.1 read the file as ANSI.'
+          }
+          Write-Host 'Hebrew strings decoded correctly.'
+
+      - name: 🧾 Script parses
+        shell: powershell
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path src\Downloader.ps1).Path, [ref]$null, [ref]$errors) | Out-Null
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host ("line {0}: {1}" -f $_.Extent.StartLineNumber, $_.Message) }
+            throw "$($errors.Count) parse error(s)"
+          }
+          Write-Host 'Parsed clean.'
+
+      - name: 🎯 Argument builder produces the right flags
+        shell: powershell
+        run: |
+          $json = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File src\Downloader.ps1 -SelfTest
+          # Joined first: the call returns an array of lines, and ConvertFrom-Json on
+          # PowerShell 5.1 would try to parse each line as its own document.
+          $report = ($json -join "`n") | ConvertFrom-Json
+
+          $mp4 = $report.mp4.Arguments
+          $mp3 = $report.mp3.Arguments
+
+          # Audio must ask for audio, and must not drag the video container along.
+          if ($mp3 -notcontains '--audio-format') { throw 'mp3: --audio-format missing' }
+          if ($mp3 -notcontains 'mp3')            { throw 'mp3: codec missing' }
+          if ($mp3 -contains '--merge-output-format') { throw 'mp3: merge-output-format leaked into the audio path' }
+
+          # Video must stay exactly as it was.
+          if ($mp4 -notcontains '--merge-output-format') { throw 'mp4: merge-output-format missing' }
+          if ($mp4 -contains '-x')                       { throw 'mp4: extract-audio leaked into the video path' }
+
+          # Both must ask yt-dlp where the file ended up, or the UI cannot report it.
+          foreach ($set in @($mp4, $mp3)) {
+            if ($set -notcontains '--print-to-file') { throw 'print-to-file missing' }
+            if ($set -notcontains '--no-playlist')   { throw 'no-playlist missing' }
+          }
+
+          # A path with a space must come back as one quoted argument.
+          if ($report.mp4.Line -notmatch '"[^"]*Test User[^"]*"') {
+            throw 'a path containing a space was not quoted'
+          }
+          Write-Host 'Argument builder OK for both formats.'
+
+  build-exe:
+    name: 🏗️ Build single EXE
+    runs-on: windows-latest
+    needs: verify
+    defaults:
+      run:
+        working-directory: standalone-downloader
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 📦 Install ps2exe
+        shell: powershell
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module -Name ps2exe -Force -Scope CurrentUser
+
+      - name: 🏗️ Compile
+        shell: powershell
+        run: |
+          Import-Module ps2exe
+          # -noConsole: it is a window, not a command prompt.
+          Invoke-ps2exe -inputFile src\Downloader.ps1 `
+                        -outputFile SimpleDownloader.exe `
+                        -noConsole `
+                        -title 'Simple Downloader' `
+                        -description 'Download a video as MP4 or MP3' `
+                        -product 'Simple Downloader' `
+                        -version '1.0.0'
+          if (-not (Test-Path SimpleDownloader.exe)) { throw 'ps2exe produced no output' }
+          Get-Item SimpleDownloader.exe | Select-Object Name, Length
+
+      - name: ⬆️ Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: SimpleDownloader-exe
+          path: standalone-downloader/SimpleDownloader.exe
+          if-no-files-found: error

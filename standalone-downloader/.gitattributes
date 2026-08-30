@@ -1,0 +1,10 @@
+# The root .gitattributes normalizes everything to LF. That is wrong for two
+# files here, and both failures are silent:
+#
+#   *.bat  - a batch file is consumed by cmd.exe on Windows. Store LF, check out
+#            CRLF, so what ships is what Windows expects.
+#   *.ps1  - keep LF, but never let git "fix" the file: the UTF-8 BOM at the top
+#            is load-bearing. Without it Windows PowerShell 5.1 reads the script
+#            as ANSI and every Hebrew string in the UI turns to garbage.
+*.bat text eol=crlf
+*.ps1 text eol=lf
