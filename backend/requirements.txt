@@ -3,7 +3,14 @@ Flask-CORS==6.0.0
 Flask-Limiter==3.8.0
 faster-whisper==1.2.0
 deep-translator==1.11.4
-yt-dlp==2025.10.14
+# Pinned, and the pin needs a date on it: YouTube changes its player and its
+# throttling every few weeks, and a yt-dlp that is a few months old starts
+# answering "HTTP Error 403: Forbidden" on every download. This pin was
+# 2025.10.14 and had gone ten months stale — every YouTube job failed while the
+# code was fine. Verified at the time of this bump by downloading a real video
+# with the app's own format selector. If downloads start failing again, check
+# this line's age BEFORE looking for a bug.
+yt-dlp==2026.08.19
 requests==2.32.4
 python-dotenv==1.1.1
 celery==5.4.0
