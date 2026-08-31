@@ -153,6 +153,23 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ result, autoCreateVideo
         {result.file_size_mb && (
           <div className="result-info">📊 {t('fileInfo.fileSizeLabel')} {result.file_size_mb} {t('fileInfo.megabytes')}</div>
         )}
+        {(() => {
+          // How long the download really took, end to end. The task has always
+          // reported it (timing.download_video, in seconds) — the card just
+          // never showed it.
+          const rawSeconds = Number(result.timing?.download_video);
+          if (!Number.isFinite(rawSeconds) || rawSeconds <= 0) return null;
+          const totalSeconds = Math.round(rawSeconds);
+          const minutes = Math.floor(totalSeconds / 60);
+          const seconds = String(totalSeconds % 60).padStart(2, '0');
+          return (
+            <div className="result-info">
+              {/* eslint-disable-next-line i18next/no-literal-string */}
+              <span>⏱️ </span>
+              {t('results.downloadTook')} {minutes}:{seconds} {t('time.minutes')}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Bug #2 fix, user's decision: warning-with-the-file, not a failure.

@@ -113,6 +113,9 @@ export interface TaskResult {
   file_size_mb?: number;
   duration?: number;
   download_url?: string;
+  // Per-stage timings of a download-only task (seconds as strings),
+  // e.g. { download_video: "239.9" } — shown on the completion card.
+  timing?: Record<string, string | number>;
   message?: string;
   task_id?: string;
   result?: TaskResult;
