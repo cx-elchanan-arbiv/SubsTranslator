@@ -6,12 +6,29 @@ from celery import Celery
 celery_app = Celery("tasks")
 celery_app.config_from_object("celery_config")
 
+# Every published task leaves a marker with the result's own TTL, so /status can
+# tell a genuinely queued PENDING from an expired/unknown id (bug #8: a dead
+# ?task= link used to spin on "processing 0%" forever). Registered here because
+# BOTH processes import this module: the Flask app publishes, the worker consumes
+# — and the hook must run wherever apply_async is called.
+from celery.signals import before_task_publish
+
 # This import is placed here to avoid circular imports.
 # The tasks module needs the `celery_app` object, so it's imported after the app is
 # created. It is a SIDE-EFFECT import: importing `tasks` is what runs every
 # @celery_app.task decorator and registers the tasks on the worker. It looks unused
 # to a linter, but removing it silently produces a worker with zero tasks.
 import tasks  # noqa: F401  (side-effect import: registers Celery tasks)
+from services.task_registry import mark_submitted
+
+
+@before_task_publish.connect
+def _mark_task_submitted(headers=None, body=None, **_kwargs):
+    # Protocol 2 carries the id in headers; protocol 1 carried it in the body.
+    task_id = (headers or {}).get("id") or (body or {}).get("id")
+    if task_id:
+        mark_submitted(task_id)
+
 
 # Get logger for startup messages
 from logging_config import get_logger

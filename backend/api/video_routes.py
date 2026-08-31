@@ -14,6 +14,7 @@ from config import get_config
 from i18n.translations import t
 from logging_config import get_logger
 from logo_manager import LogoManager
+from services import task_registry
 from services.subtitle_pipeline import parse_subtitle_flags, parse_subtitle_position
 from services.token_service import use_download_token
 from services.url_resolver_service import resolve_video_url
@@ -473,6 +474,31 @@ def get_task_status(task_id):
     task_result = AsyncResult(task_id, app=process_video_task.app)
 
     status = task_result.state
+
+    # Celery reports PENDING for ids it has never seen — an expired job and a
+    # made-up id look exactly like a queued one, and a browser that remembered a
+    # dead task id used to poll that PENDING forever (an eternal 0% spinner).
+    # The registry knows which ids were really published; PENDING without its
+    # marker means "gone", and saying so lets the frontend clean up and go home.
+    if status == "PENDING" and not task_registry.is_known(task_id):
+        return (
+            jsonify(
+                {
+                    "task_id": task_id,
+                    "state": "UNKNOWN",
+                    "error": {
+                        "code": "TASK_UNKNOWN",
+                        "message": f"Task {task_id} is not known to the system",
+                        "user_facing_message": (
+                            "This job is no longer available — it has likely "
+                            "expired. Start a new one."
+                        ),
+                        "recoverable": False,
+                    },
+                }
+            ),
+            404,
+        )
     result = None
     error_info = None
     progress_info = {"overall_percent": 0, "steps": []}

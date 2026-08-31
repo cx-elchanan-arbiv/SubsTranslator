@@ -244,9 +244,9 @@ export const useApi = () => {
             setIsProcessing(true);
             pollStatus(canonicalTaskId, false);
           } else if (data.state === 'FAILURE') {
-            // Task failed - show error
-            setIsProcessing(false);
-            setError(data.error?.user_facing_message || data.error?.message || 'העיבוד נכשל');
+            // Task failed — restore the FULL failure experience (coded card,
+            // salvaged files, retry gating), not just the message string.
+            applyFailure(data);
           }
         } else {
           localStorage.removeItem('active_task_id');
@@ -259,6 +259,62 @@ export const useApi = () => {
 
     resumeTask();
   }, []); // Only on mount
+
+  // One failure-application path for BOTH live polling and ?task= restore.
+  // The restore branch used to keep only the message STRING, which silently
+  // dropped the error code (no Hebrew coded card), the salvaged files (no
+  // download button for the transcript that survived) and the retry gating —
+  // reopening a failed job's link showed a degraded generic error while the
+  // server was returning everything needed for the full one. Bug #16.
+  const applyFailure = useCallback((data: TaskStatusResponse) => {
+    setIsProcessing(false);
+    isProcessingRef.current = false;
+    setCurrentProcessingType(null);
+
+    // Handle new error structure (can be object or string)
+    let errorMessage = 'העיבוד נכשל';
+    let originalError = '';
+    if (typeof data.error === 'string') {
+      errorMessage = data.error;
+      originalError = data.error;
+    } else if (data.error && typeof data.error === 'object') {
+      errorMessage = (data.error as any).user_facing_message ||
+                    (data.error as any).message ||
+                    'העיבוד נכשל';
+      originalError = (data.error as any).message || '';
+    }
+
+    // Extract specific error details (e.g., "Private video")
+    const errorDetails = originalError.match(/ERROR: \[youtube\] [^:]+: (.+?)(?:\. |$)/);
+    if (errorDetails && errorDetails[1]) {
+      errorMessage = `${errorMessage}\n\n${errorDetails[1]}`;
+    } else if (originalError && originalError !== errorMessage) {
+      errorMessage = `${errorMessage}\n\n${originalError}`;
+    }
+
+    // Pass the full error object to preserve the code field for the coded card
+    setError((data.error as any) || errorMessage);
+
+    // A failed run can still have produced files worth keeping — the transcript
+    // survives a failed translation, the .srt survives a failed burn — and the
+    // task marks that payload `salvaged`. Holding on to it is what lets the
+    // error screen offer a download instead of leaving the user with nothing.
+    setSalvagedResult(
+      data.result && (data.result as any).salvaged ? (data.result as any) : null
+    );
+
+    setProgress(prev => ({
+      ...prev,
+      steps: prev.steps.map(step => step.status === 'in_progress' ? { ...step, status: 'error' } : step)
+    }));
+
+    // Clean up localStorage and URL on failure
+    localStorage.removeItem('active_task_id');
+    const newUrl = new URL(window.location.href);
+    newUrl.searchParams.delete('task');
+    window.history.replaceState({}, '', newUrl.toString());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const pollStatus = useCallback((taskId: string, isQuickDownload = false) => {
     if (pollTimeoutRef.current) {
@@ -419,54 +475,7 @@ export const useApi = () => {
             clearTimeout(pollTimeoutRef.current);
             pollTimeoutRef.current = null;
           }
-          setIsProcessing(false);
-          isProcessingRef.current = false;  // Stop polling immediately to prevent race condition
-          setCurrentProcessingType(null);
-
-          // Handle new error structure (can be object or string)
-          let errorMessage = 'העיבוד נכשל';
-          let originalError = '';
-          if (typeof data.error === 'string') {
-            errorMessage = data.error;
-            originalError = data.error;
-          } else if (data.error && typeof data.error === 'object') {
-            errorMessage = data.error.user_facing_message ||
-                          data.error.message ||
-                          'העיבוד נכשל';
-            originalError = data.error.message || '';
-          }
-
-          // Extract specific error details (e.g., "Private video")
-          const errorDetails = originalError.match(/ERROR: \[youtube\] [^:]+: (.+?)(?:\. |$)/);
-          if (errorDetails && errorDetails[1]) {
-            errorMessage = `${errorMessage}\n\n${errorDetails[1]}`;
-          } else if (originalError && originalError !== errorMessage) {
-            // If we have original error that's different, append it
-            errorMessage = `${errorMessage}\n\n${originalError}`;
-          }
-
-          // Pass the full error object to preserve the code field for bot detection UI
-          setError(data.error || errorMessage);
-
-          // A failed run can still have produced files worth keeping — the transcript
-          // survives a failed translation, the .srt survives a failed burn — and the
-          // task marks that payload `salvaged`. Holding on to it is what lets the
-          // error screen offer a download instead of leaving the user with nothing
-          // after a transcription that already cost time and money.
-          setSalvagedResult(
-            data.result && (data.result as any).salvaged ? (data.result as any) : null
-          );
-
-          setProgress(prev => ({
-            ...prev,
-            steps: prev.steps.map(step => step.status === 'in_progress' ? { ...step, status: 'error' } : step)
-          }));
-
-          // Clean up localStorage and URL on failure
-          localStorage.removeItem('active_task_id');
-          const newUrl = new URL(window.location.href);
-          newUrl.searchParams.delete('task');
-          window.history.replaceState({}, '', newUrl.toString());
+          applyFailure(data);
         }
       } catch (err) {
         if (pollTimeoutRef.current) {
