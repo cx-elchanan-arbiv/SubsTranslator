@@ -104,6 +104,9 @@ export interface TaskResult {
   // How many cues fell back to source text in the translated SRT (bug #2 fix:
   // the job succeeds, but the gap count must be shown, never hidden).
   translation_gaps?: number;
+  // The translator that actually RAN (the quality path always uses OpenAI,
+  // whatever the selector said) — shown on the results screen for honesty.
+  translation_service_used?: string;
   video_metadata?: VideoMetadata;
   user_choices?: UserChoices;
   filename?: string;

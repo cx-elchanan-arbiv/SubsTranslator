@@ -543,3 +543,65 @@ class TestStructuredFailuresKeepTheirStory:
         assert run.result["status"] == "SUCCESS"
         # Clean payload: the key appears only when there is something to say.
         assert "translation_gaps" not in run.result["result"]
+
+
+# ==================================================================================
+# 6. the recorded translation provider is the one that RAN (bug #13)
+# ==================================================================================
+
+
+class TestTranslationProviderHonesty:
+    """ "google" was chosen, OpenAI billed, and "google" recorded — because the
+    v2 quality path translates with OpenAI regardless of the selector, and the
+    stats echoed the REQUEST. Same correction the transcription model already
+    got: record what ran, keep what was asked as its own field."""
+
+    def test_legacy_path_records_the_requested_service_because_it_honors_it(
+        self, run_job
+    ):
+        run = run_job()  # default: legacy P1, translation_service="google"
+        assert run.result["status"] == "SUCCESS"
+        assert run.result["result"]["translation_service_used"] == "google"
+        stats = run.stats[0]
+        assert stats["translation_service"] == "google"
+        assert stats["translation_service_requested"] == "google"
+
+    def test_v2_path_records_openai_even_when_google_was_requested(self, run_job):
+        from tasks import processing_tasks
+
+        class FakeUsage:
+            total_tokens = 42
+            cost_usd = 0.001
+
+            def as_dict(self):
+                return {"total_tokens": self.total_tokens, "cost_usd": self.cost_usd}
+
+        class FakeTranslated(list):
+            """translate_cues/enforce_cps contract: an iterable of cues that
+            also carries .usage (and optionally .mode)."""
+
+            usage = FakeUsage()
+            mode = "translate"
+
+        def fake_translate_cues(cues, target, **kwargs):
+            return FakeTranslated(
+                {**cue, "translated_text": f"[he] {cue.get('text', '')}"}
+                for cue in cues
+            )
+
+        def fake_enforce_cps(translated, **kwargs):
+            return FakeTranslated(dict(cue) for cue in translated)
+
+        with patch.multiple(
+            processing_tasks,
+            translate_cues=fake_translate_cues,
+            enforce_cps=fake_enforce_cps,
+        ):
+            run = run_job(spotting_v2=True, translation_v2=True)
+
+        assert run.result["status"] == "SUCCESS"
+        # The user asked for google; OpenAI is what the v2 path actually runs.
+        assert run.result["result"]["translation_service_used"] == "openai"
+        stats = run.stats[0]
+        assert stats["translation_service"] == "openai"
+        assert stats["translation_service_requested"] == "google"

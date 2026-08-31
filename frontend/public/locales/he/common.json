@@ -182,6 +182,7 @@
     "downloadVideoButton": "הורד וידאו",
     "downloadAudioButton": "הורד אודיו",
     "audioReady": "אודיו מוכן להורדה!",
+    "translatedWith": "תורגם בפועל באמצעות:",
     "translationGaps": "{{gaps}} שורות לא תורגמו ונשארו בשפת המקור בתוך קובץ התרגום.",
     "summarizeButton": "סכמו את התוכן לפי נושאים",
     "summarizing": "מסכם...",

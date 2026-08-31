@@ -182,6 +182,7 @@
     "downloadVideoButton": "Download Video",
     "downloadAudioButton": "Download Audio",
     "audioReady": "Audio ready for download!",
+    "translatedWith": "Actually translated with:",
     "translationGaps": "{{gaps}} lines could not be translated and remain in the source language inside the translated file.",
     "summarizeButton": "Summarize Content by Topics",
     "summarizing": "Summarizing...",

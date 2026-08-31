@@ -29,6 +29,12 @@ const DEFAULT_PROMPTS: Record<string, string> = {
 
 const MAX_PROMPT_LENGTH = 1500;
 
+// Brand names, not translatable copy — shown as-is in every language.
+const PROVIDER_NAMES: Record<string, string> = {
+  openai: 'OpenAI (GPT-4o)',
+  google: 'Google Translate',
+};
+
 const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ result, autoCreateVideo, onStartNew }) => {
   const { t } = useTranslation();
   const [summary, setSummary] = useState<string | null>(null);
@@ -131,6 +137,11 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ result, autoCreateVideo
             <span className="result-metadata-item">
               {t('results.transcriptionQuality') || 'איכות תמלול'}: {t(`whisperModels.${result.user_choices.whisper_model}`) || result.user_choices.whisper_model}
               {result.user_choices.whisper_model === 'large' && ` [${t('whisperModels.pro')}]`}
+            </span>
+          )}
+          {result.translation_service_used && (
+            <span className="result-metadata-item">
+              {t('results.translatedWith')} {PROVIDER_NAMES[result.translation_service_used] || result.translation_service_used}
             </span>
           )}
           {(result.video_metadata?.duration_string || result.duration) && (

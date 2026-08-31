@@ -269,6 +269,12 @@ def process_video_task(
 
         progress_manager.log(f"Starting video processing for {video_path}")
 
+        # Which translator actually RAN — not which one was requested. The v2
+        # quality path translates with OpenAI regardless of the selector, so the
+        # request alone is not a fact about the run (bug #13: "google" was chosen,
+        # OpenAI billed, and "google" recorded). None until translation happens.
+        translation_service_used = None
+
         timing_summary = initial_timing_summary or {}
         raw_base_name = os.path.splitext(os.path.basename(video_path))[0]
         base_name = clean_filename(raw_base_name)
@@ -513,6 +519,9 @@ def process_video_task(
                             recorder=recorder,
                             source_lang=detected_language,
                         )
+                        # translate_cues is built on OpenAI and takes no service
+                        # argument — whatever the selector said, THIS is what ran.
+                        translation_service_used = "openai"
                         translation_mode = getattr(translated, "mode", "translate")
                         translation_usage = translated.usage
                         logger.info(
@@ -596,6 +605,7 @@ def process_video_task(
                                 segments, target_lang, service=translation_service
                             )
                         )
+                        translation_service_used = translation_service
                     except Exception as exc:
                         logger.error(
                             f"legacy translation failed after the source SRT was "
@@ -687,6 +697,9 @@ def process_video_task(
             progress_manager.set_step_status(3, "in_progress")
             progress_manager.complete_step(3)
 
+            # The streamed path passes translation_service through and honors it.
+            translation_service_used = translation_service
+
             logger.info(
                 f"P1 Pipeline complete: {len(segments)} segments | {transcribe_duration:.1f}s total | "
                 f"{detected_language} -> {target_lang}"
@@ -744,6 +757,21 @@ def process_video_task(
         recorder.update_meta(
             transcription_model_requested=whisper_model,
             transcription_model_used=model_actually_used,
+        )
+
+        # Same honesty rule as the transcription model above: what the user PICKED
+        # and what RAN are two different facts, and pretending otherwise is how a
+        # "google" job quietly billed OpenAI credits with no trace anywhere.
+        if translation_service_used and translation_service_used != translation_service:
+            logger.warning(
+                f"Translation provider substitution [task={task_id}]: "
+                f"'{translation_service}' was requested but "
+                f"'{translation_service_used}' actually ran "
+                f"(the quality path translates with OpenAI)"
+            )
+        recorder.update_meta(
+            translation_service_requested=translation_service,
+            translation_service_used=translation_service_used,
         )
 
         # Zero segments is not a result — it is a failure that used to sail
@@ -1037,6 +1065,9 @@ def process_video_task(
         final_result["user_choices"] = {**final_result["user_choices"], **flags}
         final_result["user_choices"]["subtitle_position"] = subtitle_position
 
+        if translation_service_used:
+            final_result["translation_service_used"] = translation_service_used
+
         # A green job with untranslated lines inside is acceptable only if it SAYS
         # so. The user chose warning-over-failure for this case: the files are
         # delivered, and the result carries the count for the UI to display.
@@ -1121,7 +1152,11 @@ def process_video_task(
                 "transcription_model_requested": whisper_model,
                 "transcription_duration": round(transcription_duration, 2),
                 "transcription_speed_ratio": round(transcription_speed_ratio, 2),
-                "translation_service": translation_service,
+                # What RAN, not what was asked — same correction the transcription
+                # model got above. Falls back to the request only when no
+                # translation happened (nothing ran, nothing to contradict).
+                "translation_service": translation_service_used or translation_service,
+                "translation_service_requested": translation_service,
                 "translation_duration": round(translation_duration, 2),
                 # Real numbers on the translation_v2 path (TokenUsage is accumulated
                 # across translate_cues + enforce_cps). The legacy translators do not
