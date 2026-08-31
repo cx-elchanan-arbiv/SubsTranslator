@@ -16,6 +16,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
  && rm -rf /var/lib/apt/lists/*
 
+# deno: a JavaScript runtime for yt-dlp's benefit, not ours. YouTube's newer
+# protections are small JS challenges; yt-dlp can solve them but needs a JS
+# engine on the machine, and it already WARNS on every run that extraction
+# without one is deprecated ("some formats may be missing"). Installing deno
+# now is insurance against the next YouTube flip — the third one this month,
+# after the stale-pin 403s and the android_vr 403s. yt-dlp detects it on PATH
+# automatically; nothing else needs configuring.
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in \
+      x86_64)  DENO_ARCH=x86_64-unknown-linux-gnu ;; \
+      aarch64) DENO_ARCH=aarch64-unknown-linux-gnu ;; \
+      *) echo "unsupported arch $ARCH" && exit 1 ;; \
+    esac && \
+    wget -q "https://github.com/denoland/deno/releases/latest/download/deno-${DENO_ARCH}.zip" -O /tmp/deno.zip && \
+    apt-get update && apt-get install -y --no-install-recommends unzip && \
+    unzip -q /tmp/deno.zip -d /usr/local/bin && \
+    chmod 755 /usr/local/bin/deno && \
+    rm /tmp/deno.zip && \
+    apt-get purge -y unzip && rm -rf /var/lib/apt/lists/* && \
+    deno --version
+
 # Create non-root user for security (Celery warns when running as root)
 RUN groupadd -r appgroup && useradd -r -g appgroup appuser
 
