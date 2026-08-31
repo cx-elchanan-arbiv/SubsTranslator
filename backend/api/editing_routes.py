@@ -7,12 +7,11 @@ import os
 import uuid
 
 from flask import Blueprint, jsonify, request, send_file, session
-from werkzeug.utils import secure_filename
 
 from config import get_config
 from logging_config import get_logger
 from logo_manager import LogoManager
-from utils.file_utils import safe_int
+from utils.file_utils import clean_filename, safe_int
 from utils.video_utils import (
     add_watermark_to_video,
     cut_video_ffmpeg,
@@ -53,7 +52,7 @@ def cut_video():
         )
 
         # Save uploaded video
-        video_filename = secure_filename(video_file.filename)
+        video_filename = clean_filename(video_file.filename)
         input_path = os.path.join(
             config.UPLOAD_FOLDER, f"cut_input_{uuid.uuid4()}_{video_filename}"
         )
@@ -134,7 +133,7 @@ def embed_subtitles():
         logger.info(f"Embedding subtitles into: {video_file.filename}")
 
         # Save uploaded video
-        video_filename = secure_filename(video_file.filename)
+        video_filename = clean_filename(video_file.filename)
         input_video_path = os.path.join(
             config.UPLOAD_FOLDER, f"embed_input_{uuid.uuid4()}_{video_filename}"
         )
@@ -143,7 +142,7 @@ def embed_subtitles():
         # Handle subtitles
         if srt_file:
             # Save SRT file
-            srt_filename = secure_filename(srt_file.filename)
+            srt_filename = clean_filename(srt_file.filename)
             srt_path = os.path.join(
                 config.UPLOAD_FOLDER, f"srt_{uuid.uuid4()}_{srt_filename}"
             )
@@ -346,7 +345,7 @@ def extract_audio():
         logger.info(f"Extracting audio from: {video_file.filename} as {audio_format}")
 
         # Save uploaded video
-        video_filename = secure_filename(video_file.filename)
+        video_filename = clean_filename(video_file.filename)
         input_path = os.path.join(
             config.UPLOAD_FOLDER, f"audio_input_{uuid.uuid4()}_{video_filename}"
         )

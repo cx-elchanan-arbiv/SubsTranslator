@@ -164,6 +164,30 @@ if ($SelfTest) {
 $script:YtDlpUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
 $script:FfmpegUrl = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip'
 
+function Update-YtDlp {
+    <#
+        yt-dlp is the one moving part: YouTube changes something every few weeks
+        and the fix always ships as a new yt-dlp release. `-U` is the official
+        binary's built-in self-update. ffmpeg is deliberately NOT updated - it
+        has no YouTube coupling and never needs to move.
+
+        Failure here must never block a download attempt: the current version
+        may still work, and if it does not, the download error will say so.
+        Bounded wait so a hung network cannot freeze the window forever.
+    #>
+    param([Parameter(Mandatory)]$Tools)
+    try {
+        $process = Start-Process -FilePath $Tools.YtDlp -ArgumentList '-U' `
+            -WindowStyle Hidden -PassThru
+        if (-not $process.WaitForExit(60000)) {
+            $process.Kill()
+            return $false
+        }
+        return ($process.ExitCode -eq 0)
+    }
+    catch { return $false }
+}
+
 function Install-Tools {
     param([Parameter(Mandatory)]$Tools)
 
@@ -410,6 +434,10 @@ $form.Add_Shown({
         Set-Busy $false
     }
     else {
+        Set-Busy $true
+        Set-Status 'בודק אם יש עדכון לכלי ההורדה...'
+        Update-YtDlp -Tools $script:Tools | Out-Null
+        Set-Busy $false
         Set-Status 'מוכן. הדביקי קישור ולחצי הורד.'
     }
 })

@@ -47,22 +47,58 @@ def safe_int(
     return result, None
 
 
+#: Longest cleaned name, in UTF-8 BYTES, not characters. Filesystems cap a name
+#: at 255 bytes, and the pipeline prepends things like ``with_subs_<uuid>_`` and
+#: appends extensions — 150 leaves room for all of them. Bytes matter because
+#: Hebrew is 2 bytes per character in UTF-8: a 200-character Hebrew title is 400
+#: bytes, and a character cap alone would sail past the limit and crash the
+#: rename with OSError.
+MAX_FILENAME_BYTES = 150
+
+
 def clean_filename(filename):
-    """Clean filename by removing problematic characters"""
-    # First normalize Unicode characters (convert fullwidth to normal)
+    """Make a filename safe for disk and URLs while keeping its language.
+
+    Keeps every Unicode letter and digit — a Hebrew title stays Hebrew. This
+    used to be ``re.ASCII``, which defined "letter" as a-z only and turned
+    "שי צברי // רחמנא // מתוך אלבום צמאה 1" into ``1`` — the digit was the only
+    character that survived, and it became the whole filename.
+
+    What still gets replaced with underscores, because each class genuinely
+    breaks something:
+      * path separators and ``..`` runs — path traversal
+      * Windows-forbidden characters ``< > : " | ? *`` — the file is downloaded
+        to Windows machines
+      * URL metacharacters ``# ? % &`` — the name is embedded in the download
+        link, where ``#`` starts a fragment and ``%`` breaks decoding
+      * control characters, and emoji (not letters, and 4 bytes each)
+
+    Safety note: this is also used on user-supplied UPLOAD names in place of
+    werkzeug's ``secure_filename`` (which strips all non-ASCII). The traversal
+    properties it must uphold: no ``/`` or ``\\``, no ``..``, no leading dot.
+    ``tests/unit/test_clean_filename_unit.py`` pins each of these.
+    """
+    # Normalize Unicode (fullwidth → normal, composed forms) before filtering.
     normalized = unicodedata.normalize("NFKC", filename)
 
-    # Replace any non-ASCII, non-alphanumeric characters with underscores
-    cleaned = re.sub(r"[^\w\s\-_.]", "_", normalized, flags=re.ASCII)
+    # \w without re.ASCII is Unicode-aware: keeps letters/digits in any script.
+    cleaned = re.sub(r"[^\w\s\-.]", "_", normalized)
 
-    # Replace multiple spaces/underscores with single underscore
-    cleaned = re.sub(r"[\s_]+", "_", cleaned).strip("_")
+    # Collapse whitespace/underscore runs; collapse dot runs (kills "..").
+    cleaned = re.sub(r"[\s_]+", "_", cleaned)
+    cleaned = re.sub(r"\.{2,}", ".", cleaned)
 
-    # Ensure it's not empty and not too long
-    if not cleaned or cleaned == "_":
+    # No leading/trailing junk: hidden-file dots, stray dashes, underscores.
+    cleaned = cleaned.strip("_.-")
+
+    if not cleaned:
         cleaned = "video"
-    if len(cleaned) > 100:
-        cleaned = cleaned[:100].rstrip("_")
+
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) > MAX_FILENAME_BYTES:
+        # Truncate on the byte budget, then drop any half character the cut
+        # left behind (errors="ignore") and any junk the cut exposed.
+        cleaned = encoded[:MAX_FILENAME_BYTES].decode("utf-8", "ignore").rstrip("_.-")
 
     return cleaned
 

@@ -9,7 +9,6 @@ import re
 
 from celery.result import AsyncResult
 from flask import Blueprint, jsonify, request, send_file, session
-from werkzeug.utils import secure_filename
 
 from config import get_config
 from i18n.translations import t
@@ -24,7 +23,7 @@ from tasks import (
     process_video_task,
 )
 from utils.file_probe import probe_file_safe
-from utils.file_utils import safe_int
+from utils.file_utils import clean_filename, safe_int
 
 # Configuration
 config = get_config()
@@ -121,8 +120,12 @@ def upload_file_async():
                 403,
             )
 
-        safe_filename = secure_filename(file.filename)
-        filename = safe_filename.replace(" ", "_")
+        # clean_filename, not werkzeug's secure_filename: secure_filename strips
+        # every non-ASCII character, so a Hebrew upload like "הרצאה.mp4" became
+        # literally "mp4". clean_filename keeps the language and still guarantees
+        # the same traversal safety (no separators, no "..", no leading dot) —
+        # pinned by tests/unit/test_clean_filename_unit.py.
+        filename = clean_filename(file.filename)
         filepath = os.path.join(config.UPLOAD_FOLDER, filename)
         file.save(filepath)
         logger.info(f"File saved: {filename}")
