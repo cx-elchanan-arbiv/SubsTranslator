@@ -605,3 +605,28 @@ class TestTranslationProviderHonesty:
         stats = run.stats[0]
         assert stats["translation_service"] == "openai"
         assert stats["translation_service_requested"] == "google"
+
+
+class TestUnsupportedLanguageClassification:
+    """Bug #17: an unsupported target language was classified as a generic
+    transient failure and told the user to "try again" — advice that cannot
+    work, since the same language pair is rejected every time."""
+
+    def test_unsupported_language_gets_its_own_code(self):
+        from tasks.processing_tasks import classify_translation_failure
+
+        code, message = classify_translation_failure(
+            "TranslationServiceError: google: No support for the provided language he-XX"
+        )
+        assert code == "TRANSLATION_UNSUPPORTED_LANGUAGE"
+        assert "different target language" in message
+
+    def test_quota_still_wins_over_everything(self):
+        """Regression guard for the existing ordering: an out-of-credits reply
+        is ALSO a 429, and must keep classifying as credits, not rate limit."""
+        from tasks.processing_tasks import classify_translation_failure
+
+        code, _ = classify_translation_failure(
+            "Error code: 429 - insufficient_quota: no credits remaining"
+        )
+        assert code == "TRANSLATION_NO_CREDITS"

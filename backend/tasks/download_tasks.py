@@ -380,14 +380,16 @@ def download_highest_quality_video_task(self, url):
                 ]
 
             if not possible_files:
-                all_mp4s = [f for f in os.listdir(download_dir) if f.endswith(".mp4")]
-                if all_mp4s:
-                    all_mp4s.sort(
-                        key=lambda x: os.path.getmtime(os.path.join(download_dir, x)),
-                        reverse=True,
-                    )
-                    possible_files = [all_mp4s[0]]
-                    logger.info(f"Using newest file: {all_mp4s[0]}")
+                # This used to fall back to "take the NEWEST .mp4 in the folder" —
+                # which, with concurrent jobs, can hand the caller a completely
+                # different video under this task's name. A wrong file delivered
+                # as a success is strictly worse than a failure that says what
+                # happened. (Since the service resolves the real output path from
+                # yt-dlp's own report, this branch should be nearly unreachable.)
+                logger.error(
+                    f"Downloaded file could not be located for '{title_part}' "
+                    f"in {download_dir} — refusing to guess"
+                )
 
             if possible_files:
                 actual_file = os.path.join(download_dir, possible_files[0])

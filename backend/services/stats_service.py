@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -40,6 +41,33 @@ try:
 except Exception as e:
     logger.error(f"❌ Stats service failed to connect to Redis: {e}")
     redis_client = None
+
+# A Redis that was down for the ONE second this module imported used to stay
+# disconnected forever — every stat silently dropped until a process restart.
+# Reconnection is retried lazily, at most once per cooldown window.
+_RECONNECT_COOLDOWN_SECONDS = 30
+_last_reconnect_attempt = 0.0
+
+
+def _get_redis():
+    """The live client, or a lazy reconnection attempt (rate-limited), or None."""
+    global redis_client, _last_reconnect_attempt
+    if redis_client is not None:
+        return redis_client
+    now = time.time()
+    if now - _last_reconnect_attempt < _RECONNECT_COOLDOWN_SECONDS:
+        return None
+    _last_reconnect_attempt = now
+    try:
+        client = redis.from_url(
+            config.REDIS_URL, decode_responses=True, socket_timeout=2
+        )
+        client.ping()
+        redis_client = client
+        logger.info("✅ Stats service reconnected to Redis")
+    except Exception as e:  # noqa: BLE001 - stats must never break the task
+        logger.warning(f"Stats service: Redis still unreachable: {e}")
+    return redis_client
 
 
 # Configuration
@@ -113,7 +141,7 @@ def save_video_stats(stats: dict[str, Any]) -> bool:
     Returns:
         bool: True if saved successfully, False otherwise
     """
-    if not redis_client:
+    if not _get_redis():
         logger.warning("⚠️ Stats service not available (Redis not connected)")
         return False
 
@@ -193,7 +221,7 @@ def get_stats_by_task_id(task_id: str) -> dict[str, Any] | None:
     Returns:
         Dictionary with stats or None if not found
     """
-    if not redis_client:
+    if not _get_redis():
         return None
 
     try:
@@ -216,7 +244,7 @@ def get_stats_by_date(date_str: str) -> list[dict[str, Any]]:
     Returns:
         List of stat dictionaries
     """
-    if not redis_client:
+    if not _get_redis():
         return []
 
     try:
@@ -245,7 +273,7 @@ def get_stats_by_model(model: str, limit: int | None = None) -> list[dict[str, A
     Returns:
         List of stat dictionaries
     """
-    if not redis_client:
+    if not _get_redis():
         return []
 
     try:
@@ -456,7 +484,7 @@ def delete_old_stats(days: int = 30) -> int:
     Returns:
         Number of deleted entries
     """
-    if not redis_client:
+    if not _get_redis():
         return 0
 
     try:
@@ -486,7 +514,7 @@ def delete_old_stats(days: int = 30) -> int:
 # Health check
 def is_stats_service_available() -> bool:
     """Check if stats service is available."""
-    if not redis_client:
+    if not _get_redis():
         return False
     try:
         redis_client.ping()

@@ -37,6 +37,12 @@ timezone = config.CELERY_TIMEZONE
 enable_utc = config.CELERY_ENABLE_UTC
 result_expires = config.CELERY_RESULT_EXPIRES
 
+# The worker's own log handlers already format and level every line. Celery's
+# default additionally CAPTURES stdout and re-emits it at WARNING — which is how
+# 13 of every 200 worker lines were INFO content wearing a WARNING label
+# ("WARNING/ForkPoolWorker-2] ... [info] ..."), burying real warnings in noise.
+worker_redirect_stdouts = False
+
 # Task Queues
 # Defines the queues that Celery will use.
 # This setup separates different types of tasks to allow for dedicated workers.

@@ -101,6 +101,21 @@ TRANSLATION_FAILURE_CODES: tuple[tuple[tuple[str, ...], str, str], ...] = (
         "run it again.",
     ),
     (
+        # deep-translator: "No support for the provided language" / "invalid
+        # destination language"; OpenAI phrases it as unsupported. Retrying the
+        # same pair fails identically, so this must not be sold as transient.
+        (
+            "unsupported language",
+            "invalid destination",
+            "language not supported",
+            "no support for the provided language",
+        ),
+        "TRANSLATION_UNSUPPORTED_LANGUAGE",
+        "The chosen target language is not supported by the translation service. "
+        "Pick a different target language — running again with this one will fail "
+        "the same way.",
+    ),
+    (
         ("timeout", "timed out", "connection", "temporarily unavailable"),
         "TRANSLATION_UNREACHABLE",
         "The translation service could not be reached. Check the connection and "
@@ -1243,6 +1258,9 @@ def process_video_task(
             failure["recoverable"] = code not in (
                 "TRANSLATION_NO_CREDITS",
                 "TRANSLATION_AUTH_FAILED",
+                # Same language pair -> same rejection; a retry only burns
+                # another transcription.
+                "TRANSLATION_UNSUPPORTED_LANGUAGE",
             )
         elif isinstance(e, VideoProcessingError):
             # Structured failure: the exception already carries the code, the

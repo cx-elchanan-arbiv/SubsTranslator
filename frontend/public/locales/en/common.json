@@ -493,6 +493,11 @@
         "title": "File analysis failed",
         "body": "The file's structure could not be read — it may be corrupted or truncated.",
         "action": "Re-export the file from its source and upload again."
+      },
+      "TRANSLATION_UNSUPPORTED_LANGUAGE": {
+        "title": "Target language not supported",
+        "body": "The translation service rejected this language pair. The original transcript was already produced and is offered below.",
+        "action": "Pick a different target language — running again with this one will fail the same way."
       }
     },
     "salvageTitle": "What was produced and kept",
