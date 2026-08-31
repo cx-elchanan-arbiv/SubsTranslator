@@ -463,3 +463,83 @@ class TestLegacyTranslationFailuresAreReported:
         translated = run.path(run.result["result"]["files"]["translated_srt"])
         with open(translated, encoding="utf-8") as handle:
             assert "[legacy-he]" in handle.read()
+
+
+# ==================================================================================
+# 5. structured failures keep their story; translation gaps are counted
+# ==================================================================================
+
+
+class TestStructuredFailuresKeepTheirStory:
+    """The two decisions from the bug review, plus the pipe that carries them.
+
+    #1 (decision: FAILURE): zero transcription segments used to sail through as a
+    green job with two 0-byte SRT files. Now it is a classified failure.
+
+    #2 (decision: WARNING): a cue written from source text because its translation
+    is missing no longer hides — the job succeeds and carries the count.
+
+    #4: a ``VideoProcessingError`` reaching the task boundary keeps its code,
+    user-facing message and recoverability instead of collapsing into a bare
+    "Task failed".
+    """
+
+    def test_empty_transcription_is_a_classified_failure(self, run_job):
+        run = run_job(
+            transcribe_streamed=lambda path, **kw: {"language": "en", "segments": []},
+        )
+        assert run.result["status"] == "FAILURE"
+        assert run.result["code"] == "TRANSCRIPTION_EMPTY"
+        assert run.result["recoverable"] is False
+        assert "speech" in run.result["user_facing_message"].lower()
+        # No 0-byte files are offered with the failure.
+        assert "files" not in run.result
+
+    def test_a_structured_error_keeps_code_message_and_recoverability(self, run_job):
+        from core.exceptions import VideoProcessingError
+
+        def exploding(path, **kw):
+            raise VideoProcessingError(
+                message="disk exploded mid-write",
+                error_code="FILE_PERMISSION_ERROR",
+                recoverable=False,
+                user_message="Permission denied to write the file.",
+            )
+
+        run = run_job(transcribe_streamed=exploding)
+        assert run.result["status"] == "FAILURE"
+        assert run.result["code"] == "FILE_PERMISSION_ERROR"
+        assert (
+            run.result["user_facing_message"] == "Permission denied to write the file."
+        )
+        assert run.result["recoverable"] is False
+        # The raw message is still there; the traceback goes to the logs, where
+        # log_task_error already writes it.
+        assert "disk exploded" in run.result["error"]
+
+    def test_untranslated_cues_are_counted_and_reported(self, run_job):
+        def leaky(path, **kw):
+            return {
+                "language": "en",
+                "segments": [
+                    {"start": 0.0, "end": 1.0, "text": "one", "translated_text": "אחת"},
+                    {"start": 1.0, "end": 2.0, "text": "two"},  # missing entirely
+                    {"start": 2.0, "end": 3.0, "text": "three", "translated_text": ""},
+                ],
+            }
+
+        run = run_job(transcribe_streamed=leaky)
+        assert run.result["status"] == "SUCCESS"
+        assert run.result["result"]["translation_gaps"] == 2
+        # The holes were filled with SOURCE text (the file is usable), not dropped.
+        with open(run.path("clip_translated.srt"), encoding="utf-8") as handle:
+            translated = handle.read()
+        assert "two" in translated
+        assert "three" in translated
+        assert "אחת" in translated
+
+    def test_a_fully_translated_job_reports_no_gaps(self, run_job):
+        run = run_job()
+        assert run.result["status"] == "SUCCESS"
+        # Clean payload: the key appears only when there is something to say.
+        assert "translation_gaps" not in run.result["result"]

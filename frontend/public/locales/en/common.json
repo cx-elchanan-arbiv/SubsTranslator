@@ -182,6 +182,7 @@
     "downloadVideoButton": "Download Video",
     "downloadAudioButton": "Download Audio",
     "audioReady": "Audio ready for download!",
+    "translationGaps": "{{gaps}} lines could not be translated and remain in the source language inside the translated file.",
     "summarizeButton": "Summarize Content by Topics",
     "summarizing": "Summarizing...",
     "summaryReady": "Summary ready!",
@@ -401,6 +402,71 @@
         "title": "Burning the subtitles failed",
         "body": "Transcription and translation both finished and the subtitle files were written — the burn into the video did not.",
         "action": "Download the subtitle files below and use them in any player, or run it again."
+      },
+      "TRANSCRIPTION_EMPTY": {
+        "title": "No speech detected in the video",
+        "body": "Transcription finished with zero sentences — the video likely contains no speech (music or noise only), so there is nothing to make subtitles from.",
+        "action": "Make sure the video contains speech. If it does, try a different transcription model — running again with the same settings will give the same result."
+      },
+      "WHISPER_MODEL_ERROR": {
+        "title": "The transcription model failed",
+        "body": "The selected transcription model could not be loaded or run.",
+        "action": "Try again. If it repeats, pick a smaller model from the list."
+      },
+      "AUDIO_EXTRACTION_ERROR": {
+        "title": "Audio extraction failed",
+        "body": "The audio track could not be extracted — the file may be corrupted or have no audio stream.",
+        "action": "Check that the file plays with sound in a regular player, then try again."
+      },
+      "FFMPEG_TIMEOUT": {
+        "title": "Video processing took too long and was stopped",
+        "body": "The processing step exceeded its time limit — usually a very long video or a busy machine.",
+        "action": "Try again. If it repeats on a long video, try a shorter section."
+      },
+      "FFMPEG_PROCESS_ERROR": {
+        "title": "Video processing failed",
+        "body": "The video engine (ffmpeg) returned an error while working on the file.",
+        "action": "Try again. If it repeats with this file, the file may be corrupted — try another one."
+      },
+      "FFMPEG_NOT_FOUND": {
+        "title": "The video engine is missing on the server",
+        "body": "ffmpeg was not found on the machine — a server installation problem, not an issue with your file.",
+        "action": "Retrying will not help until the component is installed on the server."
+      },
+      "YOUTUBE_ACCESS_ERROR": {
+        "title": "YouTube blocked access to this video",
+        "body": "The video is private, age/region restricted, or YouTube is currently blocking its download.",
+        "action": "Make sure the video is public and accessible, and try again later — or try another video."
+      },
+      "YOUTUBE_NETWORK_ERROR": {
+        "title": "Network problem reaching YouTube",
+        "body": "The download was interrupted by a connectivity problem between us and YouTube.",
+        "action": "Check your internet connection and try again — this usually clears on its own."
+      },
+      "YOUTUBE_BOT_DETECTION": {
+        "title": "YouTube is asking for human verification",
+        "body": "YouTube flagged the download as automated activity and is temporarily blocking it.",
+        "action": "Wait a few minutes and try again."
+      },
+      "TRANSLATION_SERVICE_ERROR": {
+        "title": "The translation service failed",
+        "body": "The translation provider returned an error and did not deliver a complete translation. The original transcript was already produced and is offered below.",
+        "action": "Try again. If it repeats, switch the translation provider in the settings."
+      },
+      "TRANSLATION_QUOTA_ERROR": {
+        "title": "The translation service is out of quota",
+        "body": "The translation account has exhausted its quota. The original transcript was already produced and is offered below.",
+        "action": "Add credits to the account or wait for the quota to reset, then run again."
+      },
+      "FILE_NOT_FOUND": {
+        "title": "The file was not found",
+        "body": "The file this job ran on no longer exists on the server — it may have been removed by periodic cleanup.",
+        "action": "Upload the file again (or paste the link again) and re-run."
+      },
+      "FILE_PERMISSION_ERROR": {
+        "title": "No permission for the file",
+        "body": "The server has no read or write permission for the file — a server configuration problem.",
+        "action": "Retrying will not help until the server permissions are fixed."
       }
     },
     "salvageTitle": "What was produced and kept",

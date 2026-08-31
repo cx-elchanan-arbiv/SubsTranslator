@@ -27,4 +27,8 @@ billiard==4.2.1
 structlog==24.4.0
 tiktoken==0.8.0  # Phase A+: Precise token counting for OpenAI
 browser-cookie3==0.20.1  # Fix YouTube 403 errors
-# Phase A: psutil optional for system monitoring (will work without it)
+# psutil: /health uses Process().create_time() to detect a process running
+# stale code. It was documented as "optional" — but without it the fallback
+# reports the CURRENT time as the process start, so the staleness check always
+# answered "fresh". A detector that lies is worse than none.
+psutil==7.2.2

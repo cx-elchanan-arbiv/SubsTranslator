@@ -9,6 +9,7 @@ import time
 
 from celery_worker import celery_app
 from config import get_config
+from core.exceptions import TranscriptionError, VideoProcessingError
 from logging_config import (
     get_logger,
     log_task_complete,
@@ -745,6 +746,24 @@ def process_video_task(
             transcription_model_used=model_actually_used,
         )
 
+        # Zero segments is not a result — it is a failure that used to sail
+        # through: seven green steps, 100%, and two 0-byte SRT files offered for
+        # download. Exact zero only, no "too few" heuristics: Whisper returning
+        # nothing at all is rare (it prefers to invent text), and every attempt at
+        # surface-property thresholds in this codebase has aged badly.
+        if not segments:
+            raise TranscriptionError(
+                message=f"Transcription produced 0 segments for {video_path}",
+                error_code="TRANSCRIPTION_EMPTY",
+                recoverable=False,
+                user_message=(
+                    "No speech was detected in this video, so there is nothing to "
+                    "transcribe or translate. If the video does contain speech, try "
+                    "a different transcription model — running again with the same "
+                    "settings will give the same result."
+                ),
+            )
+
         progress_manager.set_step_status(4, "in_progress")
         progress_manager.log("Creating subtitle files...", step_index=4)
         # Rewritten unconditionally: the v2 branch already wrote this file before
@@ -755,11 +774,16 @@ def process_video_task(
             os.path.join(DOWNLOADS_FOLDER, f"{base_name}_original.srt"),
             use_translation=False,
         )
+        # The writer counts its own source-text fallbacks into this dict. Only a
+        # translation job reads it: in a transcription-only job EVERY cue lacks a
+        # translation by design and the count would be meaningless noise.
+        translation_gap_stats: dict = {}
         translated_srt_path = subtitle_service.create_srt_file(
             segments,
             os.path.join(DOWNLOADS_FOLDER, f"{base_name}_translated.srt"),
             use_translation=True,
             language=target_lang or detected_language,
+            stats=translation_gap_stats,
         )
         progress_manager.complete_step(4)
         recorder.copy_output(original_srt_path)
@@ -1013,6 +1037,21 @@ def process_video_task(
         final_result["user_choices"] = {**final_result["user_choices"], **flags}
         final_result["user_choices"]["subtitle_position"] = subtitle_position
 
+        # A green job with untranslated lines inside is acceptable only if it SAYS
+        # so. The user chose warning-over-failure for this case: the files are
+        # delivered, and the result carries the count for the UI to display.
+        translation_gaps = translation_gap_stats.get("missing_translations", 0)
+        if wants_translation and translation_gaps:
+            logger.warning(
+                f"{translation_gaps} cues lacked a translation and kept their "
+                f"source text [task={task_id}]"
+            )
+            progress_manager.log(
+                f"⚠️ {translation_gaps} cues left untranslated (source text kept)"
+            )
+            final_result["translation_gaps"] = translation_gaps
+            recorder.update_meta(translation_gaps=translation_gaps)
+
         # Structured logging. A run whose video never rendered is not a completion, and
         # logging it as one is how this failure stayed invisible in the logs too.
         duration = time.time() - start_time
@@ -1170,6 +1209,14 @@ def process_video_task(
                 "TRANSLATION_NO_CREDITS",
                 "TRANSLATION_AUTH_FAILED",
             )
+        elif isinstance(e, VideoProcessingError):
+            # Structured failure: the exception already carries the code, the
+            # user-facing message and whether a retry is worth trying — to_dict()
+            # is exactly the contract /status hands to the UI. Until now every
+            # non-translation failure fell to the bare payload above and reached
+            # the user as a generic "Processing failed", even though the raise
+            # site had already written a better message.
+            failure.update(e.to_dict())
         if isinstance(e, TranslationFailedWithSalvage) and e.original_srt:
             # Still a failure — but the transcription was expensive and its output
             # is already on disk, so hand it over instead of throwing it away.
@@ -1251,6 +1298,22 @@ def create_video_with_subtitles_from_segments(
                 "error": "Failed to create video with subtitles",
             }
 
+    except VideoProcessingError as e:
+        # A structured failure: the exception already carries the code, the
+        # user-facing message and whether a retry is worth trying — to_dict() is
+        # exactly the contract /status hands to the UI. This used to fall through
+        # to the generic handler below, which stripped all three and left every
+        # non-translation failure as a bare "Processing failed".
+        import traceback
+
+        traceback_msg = traceback.format_exc()
+        logger.error(f"Task failed ({e.error_code}): {e.message}\n{traceback_msg}")
+        return {
+            "status": "FAILURE",
+            "error": e.message,
+            "traceback": traceback_msg,
+            **e.to_dict(),
+        }
     except Exception as e:
         import traceback
 

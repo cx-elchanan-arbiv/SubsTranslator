@@ -121,7 +121,15 @@ def _running_code_fingerprint() -> str:
 
     newest = 0.0
     for name, module in list(sys.modules.items()):
-        if not (name.startswith("services.") or name.startswith("tasks.")):
+        # Every package this app actually runs from — not just services/ and
+        # tasks/. The old filter was blind to api/, core/, utils/, i18n/ and the
+        # top-level modules, so an edit to a route or to config never moved the
+        # fingerprint and the staleness comparison said "fresh" anyway.
+        if not (
+            name.startswith(("services.", "tasks.", "api.", "core.", "utils.", "i18n."))
+            or name
+            in ("config", "app", "celery_worker", "celery_config", "logging_config")
+        ):
             continue
         path = getattr(module, "__file__", None)
         if not path:

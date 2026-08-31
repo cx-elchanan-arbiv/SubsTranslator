@@ -101,6 +101,9 @@ export interface TaskResult {
   detected_language?: string;
   files?: ProcessedFiles;
   timing_summary?: TimingSummary;
+  // How many cues fell back to source text in the translated SRT (bug #2 fix:
+  // the job succeeds, but the gap count must be shown, never hidden).
+  translation_gaps?: number;
   video_metadata?: VideoMetadata;
   user_choices?: UserChoices;
   filename?: string;

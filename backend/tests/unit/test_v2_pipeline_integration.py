@@ -762,7 +762,7 @@ class TestTheContentAssertionsActuallyCatchTheRegression:
 
     @staticmethod
     def _pre_fix_create_srt_file(
-        segments, output_path, use_translation=False, language="en"
+        segments, output_path, use_translation=False, language="en", stats=None
     ):
         """``create_srt_file`` as it was before the fix, reduced to the deciding line."""
         from services.subtitle_service import format_timestamp

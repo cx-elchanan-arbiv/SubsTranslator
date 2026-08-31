@@ -144,6 +144,17 @@ const ResultsDisplay: React.FC<ResultsDisplayProps> = ({ result, autoCreateVideo
         )}
       </div>
 
+      {/* Bug #2 fix, user's decision: warning-with-the-file, not a failure.
+          The count comes from the SRT writer itself — every cue it had to fill
+          with source text because the translation was missing. */}
+      {typeof result.translation_gaps === 'number' && result.translation_gaps > 0 && (
+        <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 mb-4 text-amber-900 text-sm" dir="rtl">
+          {/* eslint-disable-next-line i18next/no-literal-string */}
+          <span>⚠️ </span>
+          {t('results.translationGaps', { gaps: result.translation_gaps })}
+        </div>
+      )}
+
       <div className="download-section">
         {/* Download-only result. The same block serves the MP3 option, so what it
             calls the file comes from the file itself, not from a remembered choice —

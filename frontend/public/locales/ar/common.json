@@ -143,6 +143,7 @@
     "downloadVideoButton": "تحميل الفيديو",
     "downloadAudioButton": "تنزيل الصوت",
     "audioReady": "الصوت جاهز للتنزيل!",
+    "translationGaps": "{{gaps}} أسطر لم تُترجم وبقيت بلغة المصدر داخل ملف الترجمة.",
     "summarizeButton": "تلخيص المحتوى حسب المواضيع",
     "summarizing": "جارٍ التلخيص...",
     "summaryReady": "الملخص جاهز!",

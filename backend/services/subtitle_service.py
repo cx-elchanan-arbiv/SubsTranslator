@@ -198,6 +198,7 @@ class SubtitleService:
         output_path: str,
         use_translation: bool = False,
         language: str = "en",
+        stats: dict | None = None,
     ) -> str:
         """
         Create an SRT file from segments with enhanced formatting, including RTL support.
@@ -207,6 +208,9 @@ class SubtitleService:
             output_path: Path where the SRT file will be saved
             use_translation: Whether to use translated text instead of original
             language: Target language code for RTL handling
+            stats: Optional dict the writer fills with ``missing_translations`` — how
+                many cues fell back to SOURCE text in a translation write. The caller
+                decides what that number means; the writer only refuses to hide it.
 
         Returns:
             Path to the created SRT file
@@ -238,7 +242,17 @@ class SubtitleService:
                     # translation (spotting_v2 on, translation off), so an
                     # identity check here wrote a whole file of blank subtitles.
                     if not text:
-                        text = segment.get("text", "") or ""
+                        source = segment.get("text", "") or ""
+                        # In a translation write, source text standing in for a
+                        # missing translation is a GAP. Counted (not blocked): the
+                        # fallback itself is load-bearing for transcription-only
+                        # jobs, where every cue legitimately has no translation.
+                        # Empty-source cues are not gaps — nothing to translate.
+                        if use_translation and stats is not None and source.strip():
+                            stats["missing_translations"] = (
+                                stats.get("missing_translations", 0) + 1
+                            )
+                        text = source
 
                     # Clean up text
                     text = text.replace("\n", " ").replace("\r", " ")
