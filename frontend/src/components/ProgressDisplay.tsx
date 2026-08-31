@@ -228,6 +228,14 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
       codedKey && t(`${codedKey}.title`) !== `${codedKey}.title` ? t(`${codedKey}.title`) : '';
     const codedBody = codedTitle ? t(`${codedKey}.body`) : '';
     const codedAction = codedTitle ? t(`${codedKey}.action`) : '';
+    // The raw server message, shown small under the coded card. This is what
+    // distinguishes "disk full" from "font missing" under one RENDER_FAILED
+    // code, and carries the exact size limit under FILE_TOO_LARGE — the coded
+    // copy explains, the detail line is the evidence.
+    const technicalDetail =
+      codedTitle && typeof error === 'object' && (error as any)?.message
+        ? String((error as any).message)
+        : '';
 
     // Files that survived the failure — the transcript is expensive and is already
     // on disk, so it is offered rather than thrown away.
@@ -369,6 +377,11 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
                   <>
                     <p className="text-lg leading-relaxed">{codedBody}</p>
                     <p className="text-lg leading-relaxed mt-3 font-medium">{codedAction}</p>
+                    {technicalDetail && technicalDetail !== codedBody && (
+                      <p className="mt-3 font-mono text-xs text-red-700/80 bg-red-50 p-2 rounded" dir="ltr">
+                        {technicalDetail}
+                      </p>
+                    )}
                   </>
                 ) : (
                   (typeof error === 'string'

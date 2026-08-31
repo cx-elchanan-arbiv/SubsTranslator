@@ -468,6 +468,31 @@
         "title": "No permission for the file",
         "body": "The server has no read or write permission for the file — a server configuration problem.",
         "action": "Retrying will not help until the server permissions are fixed."
+      },
+      "FILE_TOO_LARGE": {
+        "title": "The file is too large",
+        "body": "The uploaded file exceeds the maximum size the server accepts. The exact limit appears in the technical line below.",
+        "action": "Compress the video or cut a shorter section, then upload again."
+      },
+      "INVALID_FILE_TYPE": {
+        "title": "Unsupported file type",
+        "body": "Only recognized video or audio files can be uploaded (e.g. MP4, MOV, MP3, WAV).",
+        "action": "Check the file extension and upload a supported format."
+      },
+      "NO_FILE": {
+        "title": "No file selected",
+        "body": "The request arrived without an attached file.",
+        "action": "Choose a file and try again."
+      },
+      "UNSUPPORTED_MEDIA": {
+        "title": "Not a valid media file",
+        "body": "The file uploaded, but no video or audio could be recognized in it — it may be corrupted or not a media file at all.",
+        "action": "Try playing the file in a regular player; if it does not play, there is nothing for us to process either."
+      },
+      "PROBE_FAILED": {
+        "title": "File analysis failed",
+        "body": "The file's structure could not be read — it may be corrupted or truncated.",
+        "action": "Re-export the file from its source and upload again."
       }
     },
     "salvageTitle": "What was produced and kept",

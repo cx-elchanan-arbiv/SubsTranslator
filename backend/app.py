@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 # Load environment variables BEFORE importing config or other modules that read env
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-from flask import Flask, request
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -35,6 +35,27 @@ logo_manager = LogoManager(config.ASSETS_FOLDER)
 # Flask app setup
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = config.MAX_FILE_SIZE  # Set file size limit
+
+
+@app.errorhandler(413)
+def _payload_too_large(_error):
+    """Flask rejects oversized bodies BEFORE any route runs, and its default 413
+    is an HTML page — response.json() in the frontend then throws and the user
+    got a generic techno-string. JSON with a stable code lets the UI show the
+    same coded Hebrew card every other failure gets (bug #15)."""
+    max_mb = config.MAX_FILE_SIZE // (1024 * 1024)
+    return (
+        jsonify(
+            {
+                "error": f"File too large. Maximum size: {max_mb}MB",
+                "code": "FILE_TOO_LARGE",
+                "max_mb": max_mb,
+            }
+        ),
+        413,
+    )
+
+
 # SECRET_KEY is required for session security - must be set in production
 _secret_key = os.getenv("SECRET_KEY")
 if not _secret_key or _secret_key in (

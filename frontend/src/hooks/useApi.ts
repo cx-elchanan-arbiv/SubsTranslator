@@ -531,8 +531,33 @@ export const useApi = () => {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Request failed');
+        // Pre-task rejections (file too large / wrong type / unreadable media)
+        // used to surface as raw English strings on a Hebrew screen (bug #15).
+        // When the server sends a stable code, hand the WHOLE object to the
+        // error state — ProgressDisplay renders it through the same coded
+        // Hebrew card every task failure gets. Flask's own 413 can arrive as
+        // HTML, so the JSON parse is guarded and 413 is synthesized.
+        let errorData: any = null;
+        try {
+          errorData = await response.json();
+        } catch {
+          errorData = null;
+        }
+        if (!errorData?.code && response.status === 413) {
+          errorData = { error: 'File too large', code: 'FILE_TOO_LARGE' };
+        }
+        if (errorData?.code) {
+          setIsProcessing(false);
+          isProcessingRef.current = false;
+          setCurrentProcessingType(null);
+          setError({
+            code: errorData.code,
+            message: errorData.error || '',
+            user_facing_message: errorData.error || '',
+          } as any);
+          return;
+        }
+        throw new Error(errorData?.error || 'Request failed');
       }
 
       const responseData = await response.json();

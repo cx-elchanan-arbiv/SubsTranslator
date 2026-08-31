@@ -9,6 +9,7 @@ import re
 
 from celery.result import AsyncResult
 from flask import Blueprint, jsonify, request, send_file, session
+from werkzeug.exceptions import HTTPException
 
 from config import get_config
 from i18n.translations import t
@@ -49,12 +50,18 @@ def allowed_file(filename):
 def upload_file_async():
     """Upload a file and start the processing task asynchronously."""
     try:
+        # Every 4xx here carries a stable ``code``: these are the most common
+        # user-facing failures, and without a code they reached a Hebrew screen
+        # as raw English strings (bug #15). The code keys into errors.byCode.
         if "file" not in request.files:
-            return jsonify({"error": "No file provided"}), 400
+            return jsonify({"error": "No file provided", "code": "NO_FILE"}), 400
 
         file = request.files["file"]
         if file.filename == "" or not allowed_file(file.filename):
-            return jsonify({"error": "Invalid file type"}), 400
+            return (
+                jsonify({"error": "Invalid file type", "code": "INVALID_FILE_TYPE"}),
+                400,
+            )
 
         # Check file size explicitly (in addition to Flask's MAX_CONTENT_LENGTH)
         file.seek(0, 2)  # Seek to end of file
@@ -62,10 +69,15 @@ def upload_file_async():
         file.seek(0)  # Reset to beginning
 
         if file_size > config.MAX_FILE_SIZE:
+            # Backstop only: Flask's MAX_CONTENT_LENGTH aborts oversized bodies
+            # before this route runs (see the 413 handler in app.py). Same code
+            # either way, so the UI cannot tell the two rejections apart.
             return (
                 jsonify(
                     {
-                        "error": f"File too large. Maximum size: {config.MAX_FILE_SIZE // (1024*1024)}MB"
+                        "error": f"File too large. Maximum size: {config.MAX_FILE_SIZE // (1024*1024)}MB",
+                        "code": "FILE_TOO_LARGE",
+                        "max_mb": config.MAX_FILE_SIZE // (1024 * 1024),
                     }
                 ),
                 413,
@@ -213,6 +225,11 @@ def upload_file_async():
             202,
         )
 
+    except HTTPException:
+        # Flask/werkzeug aborts (e.g. the 413 from MAX_CONTENT_LENGTH) carry
+        # their own status and are answered by their errorhandlers — the
+        # catch-all below used to swallow them into a generic 500.
+        raise
     except Exception as e:
         logger.error(f"Upload failed: {e}")
         return jsonify({"error": str(e)}), 500
