@@ -232,6 +232,13 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
     // distinguishes "disk full" from "font missing" under one RENDER_FAILED
     // code, and carries the exact size limit under FILE_TOO_LARGE — the coded
     // copy explains, the detail line is the evidence.
+    // Which translation provider was on the failing job — the user could not
+    // tell from the card whether Google or OpenAI was the one that fell over.
+    const providerNames: Record<string, string> = { openai: 'OpenAI (GPT-4o)', google: 'Google Translate' };
+    const failedProvider =
+      typeof error === 'object' && (error as any)?.provider
+        ? providerNames[(error as any).provider] || String((error as any).provider)
+        : '';
     const technicalDetail =
       codedTitle && typeof error === 'object' && (error as any)?.message
         ? String((error as any).message)
@@ -377,6 +384,11 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
                   <>
                     <p className="text-lg leading-relaxed">{codedBody}</p>
                     <p className="text-lg leading-relaxed mt-3 font-medium">{codedAction}</p>
+                    {failedProvider && (
+                      <p className="text-sm mt-3 text-red-700/90">
+                        {t('errors.providerLabel')} <span className="font-medium">{failedProvider}</span>
+                      </p>
+                    )}
                     {technicalDetail && technicalDetail !== codedBody && (
                       <p className="mt-3 font-mono text-xs text-red-700/80 bg-red-50 p-2 rounded" dir="ltr">
                         {technicalDetail}

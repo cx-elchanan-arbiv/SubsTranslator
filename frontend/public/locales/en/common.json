@@ -502,6 +502,7 @@
         "action": "Pick a different target language — running again with this one will fail the same way."
       }
     },
+    "providerLabel": "Translation service in use:",
     "salvageTitle": "What was produced and kept",
     "salvageDownload": "Download the transcript (.srt)"
   },

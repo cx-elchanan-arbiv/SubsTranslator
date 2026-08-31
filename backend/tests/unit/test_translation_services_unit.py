@@ -158,3 +158,54 @@ class TestCollapsedBatchGuard:
         sources = ["Yes!", "Yes.", "We signed the deal."]
         translations = ["כן.", "כן.", "חתמנו על העסקה."]
         assert _batch_collapsed_to_one_answer(sources, translations) is False
+
+
+class TestTailBatchAndScriptGuards:
+    """The 3-distinct-sources rule left a hole, found live: a 2-line FINAL batch
+    broke entirely and two cues shipped as Google's error page. Two new layers,
+    neither of which knows what an error page looks like."""
+
+    def test_a_whole_tiny_batch_collapsing_to_one_long_string_is_flagged(self):
+        from services.translation_services import _batch_collapsed_to_one_answer
+
+        page = "Error 500 (Server Error)!!1 That's an error. That's all we know."
+        assert (
+            _batch_collapsed_to_one_answer(
+                ["We are nearly done.", "It was a historic day."], [page, page]
+            )
+            is True
+        )
+
+    def test_two_short_identical_answers_stay_legitimate(self):
+        from services.translation_services import _batch_collapsed_to_one_answer
+
+        # "Yes!" / "Yes." legitimately share one short translation.
+        assert _batch_collapsed_to_one_answer(["Yes!", "Yes."], ["כן.", "כן."]) is False
+
+    def test_long_line_without_hebrew_letters_looks_untranslated(self):
+        from services.translation_services import _looks_untranslated
+
+        assert (
+            _looks_untranslated("There was an error. Please try again later.", "iw")
+            is True
+        )
+
+    def test_short_latin_lines_are_exempt(self):
+        from services.translation_services import _looks_untranslated
+
+        # Names, numbers and interjections survive translation unchanged.
+        assert _looks_untranslated("OK!", "iw") is False
+        assert _looks_untranslated("ICC 2026", "iw") is False
+
+    def test_real_hebrew_passes(self):
+        from services.translation_services import _looks_untranslated
+
+        assert _looks_untranslated("היום הייתה לנו פגישה מאוד טובה.", "iw") is False
+
+    def test_latin_target_languages_are_left_alone(self):
+        from services.translation_services import _looks_untranslated
+
+        # For en/es/fr the check cannot tell translated from untranslated.
+        assert (
+            _looks_untranslated("This is a long English sentence here.", "en") is False
+        )

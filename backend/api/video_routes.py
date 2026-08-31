@@ -566,6 +566,11 @@ def get_task_status(task_id):
                         "user_facing_message", "Processing failed. Please try again."
                     ),
                     "recoverable": result.get("recoverable", True),
+                    **(
+                        {"provider": result["provider"]}
+                        if result.get("provider")
+                        else {}
+                    ),
                 }
             else:
                 # Extract metadata from successful result
@@ -599,6 +604,12 @@ def get_task_status(task_id):
                     "An error occurred during processing. Please try again.",
                 ),
                 "recoverable": result_dict.get("recoverable", True),
+                # Which translation provider was on the failing job, when known.
+                **(
+                    {"provider": result_dict["provider"]}
+                    if result_dict.get("provider")
+                    else {}
+                ),
             }
             error_message = result_dict.get("message", "Task failed")
             # Optional progress logs exposure

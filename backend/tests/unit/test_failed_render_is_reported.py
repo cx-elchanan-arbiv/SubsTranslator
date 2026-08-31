@@ -654,3 +654,22 @@ class TestUnsupportedLanguageClassification:
             "Error code: 429 - insufficient_quota: no credits remaining"
         )
         assert code == "TRANSLATION_NO_CREDITS"
+
+    def test_a_translation_failure_names_the_provider(self, run_job):
+        """The failure card could not say WHICH provider fell over. The salvage
+        payload now carries it: legacy path -> the requested (and enforced)
+        service; the status route passes it through to the UI."""
+
+        def broken_translator(segments, target, **kwargs):
+            raise Exception("google exploded mid-batch")
+
+        run = run_job(
+            spotting_v2=True,
+            translation_v2=False,
+            translation_service="google",
+            translate_segments_impl=broken_translator,
+        )
+        assert run.result["status"] == "FAILURE"
+        assert run.result["provider"] == "google"
+        # The transcript survives the failed translation.
+        assert run.result["files"]["original_srt"].endswith("_original.srt")

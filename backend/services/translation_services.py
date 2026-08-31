@@ -87,6 +87,40 @@ class Translator(ABC):
         pass
 
 
+#: Unicode letter ranges per target language, for the untranslated-line check.
+#: Only scripts DISTINCT from Latin are listed: for Latin-target languages the
+#: check cannot distinguish "untranslated" from "translated", so it stays off.
+_TARGET_SCRIPT_RANGES = {
+    "he": ("\u0590", "\u05ff"),
+    "iw": ("\u0590", "\u05ff"),
+    "ar": ("\u0600", "\u06ff"),
+    "ru": ("\u0400", "\u04ff"),
+    "uk": ("\u0400", "\u04ff"),
+    "el": ("\u0370", "\u03ff"),
+    "ja": ("\u3040", "\u30ff"),
+    "ko": ("\uac00", "\ud7af"),
+    "zh": ("\u4e00", "\u9fff"),
+    "zh-CN": ("\u4e00", "\u9fff"),
+}
+
+
+def _looks_untranslated(text: str, target_language: str) -> bool:
+    """A LONG output with zero target-script letters is not a translation.
+
+    Found live: Google's error page ("Error 500 ... That's all we know.") shipped
+    as the "translation" of two Hebrew-target cues. No error-page sniffing here —
+    the general rule is that a 20+ character translation into Hebrew contains at
+    least one Hebrew letter. Short outputs are exempt: names, numbers, "OK!" and
+    interjections legitimately survive translation unchanged.
+    """
+    span = _TARGET_SCRIPT_RANGES.get(target_language)
+    text = (text or "").strip()
+    if not span or len(text) < 20:
+        return False
+    low, high = span
+    return not any(low <= ch <= high for ch in text)
+
+
 def _batch_collapsed_to_one_answer(sources: list[str], translations: list[str]) -> bool:
     """True when a translation batch is a broken response wearing a valid shape.
 
@@ -100,7 +134,7 @@ def _batch_collapsed_to_one_answer(sources: list[str], translations: list[str]) 
     Two short cues collapsing ("Yes." / "Yes!" -> "כן.") is real; three or more
     distinct sources all yielding the same output is a broken response.
     """
-    if len(translations) < 3:
+    if len(translations) < 2:
         return False
     from collections import Counter
 
@@ -108,7 +142,7 @@ def _batch_collapsed_to_one_answer(sources: list[str], translations: list[str]) 
     if not counts:
         return False
     repeated_output, repeats = counts.most_common(1)[0]
-    if repeats < 3:
+    if repeats < 2:
         return False
     # How many DISTINCT sources produced that one output?
     distinct_sources = {
@@ -116,7 +150,18 @@ def _batch_collapsed_to_one_answer(sources: list[str], translations: list[str]) 
         for i, t in enumerate(translations)
         if (t or "").strip() == repeated_output
     }
-    return len(distinct_sources) >= 3
+    if repeats >= 3 and len(distinct_sources) >= 3:
+        return True
+    # Tail-batch hole, found live: a 2-line final batch broke entirely and slid
+    # under the >=3 rule — two cues shipped as Google's error page. When an
+    # ENTIRE multi-line batch of distinct sources collapses to one LONG
+    # identical string, that is the same broken response; length keeps the
+    # legitimate tiny collapse ("Yes!" / "Yes." -> "כן.") out of reach.
+    return (
+        len(distinct_sources) >= 2
+        and repeats == len(translations)
+        and len(repeated_output) > 40
+    )
 
 
 class GoogleTranslator(Translator):
@@ -168,6 +213,30 @@ class GoogleTranslator(Translator):
                             f"distinct lines twice in a row — the response is an "
                             f"error page, not a translation",
                         )
+
+                # Per-line last defence: retry any line whose "translation" has
+                # no target-script letters despite real length, and if the retry
+                # is just as wrong, return "" — the SRT writer then keeps the
+                # SOURCE text and counts a visible gap, instead of shipping
+                # whatever the provider actually sent back.
+                if batch_translations and len(batch_translations) == len(batch):
+                    for j, line in enumerate(batch_translations):
+                        if not _looks_untranslated(line, processed_target_language):
+                            continue
+                        logger.warning(
+                            f"Google batch {batch_num} line {j + 1}: output has no "
+                            f"target-script letters — retrying the line alone"
+                        )
+                        try:
+                            retried = translator.translate(batch[j])
+                        except Exception:  # noqa: BLE001 - fall through to gap
+                            retried = None
+                        if retried and not _looks_untranslated(
+                            retried, processed_target_language
+                        ):
+                            batch_translations[j] = retried
+                        else:
+                            batch_translations[j] = ""
 
                 if not batch_translations or len(batch_translations) != len(batch):
                     # NEVER pad with the source. The old branch filled a short or

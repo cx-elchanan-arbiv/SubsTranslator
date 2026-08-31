@@ -1280,6 +1280,16 @@ def process_video_task(
 
         failure = {"status": "FAILURE", "error": str(e)}
         if isinstance(e, TranslationFailedWithSalvage):
+            # WHICH provider was on the job — the user could not tell from the
+            # failure card whether Google or OpenAI was the one that fell over.
+            # After the choice-wins enforcement: v2 translation == OpenAI,
+            # otherwise the requested service is the one that actually ran.
+            try:
+                failure["provider"] = (
+                    "openai" if flags.get("translation_v2") else translation_service
+                )
+            except NameError:
+                failure["provider"] = translation_service
             code, english = classify_translation_failure(str(e))
             failure["code"] = code
             failure["user_facing_message"] = english
