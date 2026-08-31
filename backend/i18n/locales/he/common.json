@@ -40,7 +40,7 @@
   },
   "translationServices": {
     "google": {
-      "description": "שירות תרגום חינמי של Google. שימו לב: במסלול האיכות הנוכחי התרגום מתבצע בפועל ב-OpenAI"
+      "description": "שירות תרגום חינמי של Google. בבחירת Google התרגום רץ במסלול הרגיל — שיפורי \"תרגום עם הקשר מלא\" זמינים רק עם OpenAI"
     },
     "openai": {
       "description": "תרגום מתקדם באמצעות GPT-4o",

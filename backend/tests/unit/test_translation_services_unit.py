@@ -120,3 +120,41 @@ class TestOpenAIKeyValidation:
             assert (
                 _is_valid_openai_key(placeholder) is False
             ), f"Placeholder should be detected: {placeholder}"
+
+
+class TestCollapsedBatchGuard:
+    """A broken response wearing a valid shape: Google once answered with its
+    HTTP 500 error PAGE, and every line in the batch "translated" to that same
+    page text — right count, text present, both existing guards blind. Caught
+    live on a real run (19 of 30 cues shipped as "Error 500 (Server Error)!!1"
+    inside a burned video). The invariant: distinct sources do not legitimately
+    collapse to one identical output."""
+
+    def test_error_page_repeated_for_distinct_lines_is_flagged(self):
+        from services.translation_services import _batch_collapsed_to_one_answer
+
+        sources = ["We met for hours.", "It went well.", "They agreed to talk."]
+        translations = ["Error 500 (Server Error)!!1"] * 3
+        assert _batch_collapsed_to_one_answer(sources, translations) is True
+
+    def test_identical_short_lines_collapsing_is_legitimate(self):
+        from services.translation_services import _batch_collapsed_to_one_answer
+
+        # Three IDENTICAL sources may of course share one translation.
+        sources = ["Yes.", "Yes.", "Yes."]
+        translations = ["כן.", "כן.", "כן."]
+        assert _batch_collapsed_to_one_answer(sources, translations) is False
+
+    def test_a_normal_batch_passes(self):
+        from services.translation_services import _batch_collapsed_to_one_answer
+
+        sources = ["Good morning.", "How are you?", "See you tomorrow."]
+        translations = ["בוקר טוב.", "מה שלומך?", "נתראה מחר."]
+        assert _batch_collapsed_to_one_answer(sources, translations) is False
+
+    def test_two_repeats_are_not_enough_to_flag(self):
+        from services.translation_services import _batch_collapsed_to_one_answer
+
+        sources = ["Yes!", "Yes.", "We signed the deal."]
+        translations = ["כן.", "כן.", "חתמנו על העסקה."]
+        assert _batch_collapsed_to_one_answer(sources, translations) is False

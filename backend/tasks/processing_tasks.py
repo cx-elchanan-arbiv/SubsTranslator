@@ -116,7 +116,16 @@ TRANSLATION_FAILURE_CODES: tuple[tuple[tuple[str, ...], str, str], ...] = (
         "the same way.",
     ),
     (
-        ("timeout", "timed out", "connection", "temporarily unavailable"),
+        # "identical answer for distinct lines" is the collapsed-batch guard's
+        # signature: the provider answered with an error page instead of a
+        # translation — transient by nature, worth trying again later.
+        (
+            "timeout",
+            "timed out",
+            "connection",
+            "temporarily unavailable",
+            "identical answer for distinct lines",
+        ),
         "TRANSLATION_UNREACHABLE",
         "The translation service could not be reached. Check the connection and "
         "run it again.",
@@ -331,6 +340,21 @@ def process_video_task(
             render_v2=render_v2,
         )
         subtitle_position = parse_subtitle_position(subtitle_position)
+
+        # The user's provider choice WINS (their design, closing bug #13 for real):
+        # full-context translation is built on OpenAI and has no Google variant, so
+        # choosing Google switches the TRANSLATION stage to the regular path. The UI
+        # disables the toggle when Google is selected; this enforces the same rule
+        # for stale clients and direct API calls. Spotting and render stay as set —
+        # they do not depend on the translation provider.
+        if flags["translation_v2"] and str(translation_service).lower() == "google":
+            flags["translation_v2"] = False
+            logger.info(
+                f"translation_v2 disabled [task={task_id}]: Google was selected as "
+                f"the translation service, and full-context translation runs on "
+                f"OpenAI only — the translation stage takes the regular path"
+            )
+
         logger.info(f"Subtitle quality flags [task={task_id}]: {flags_summary(flags)}")
         recorder.update_meta(**flags, subtitle_position=subtitle_position)
 

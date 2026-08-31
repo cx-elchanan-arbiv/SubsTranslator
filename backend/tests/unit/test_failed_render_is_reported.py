@@ -145,6 +145,7 @@ def run_job(tmp_path):
         whisper_model="large",
         last_model_used=None,
         transcription_model_used=None,
+        translation_service="google",
     ):
         from services import subtitle_service as subtitle_service_module
         from tasks import processing_tasks
@@ -241,7 +242,7 @@ def run_job(tmp_path):
                     target_lang,
                     True,  # auto_create_video
                     whisper_model,
-                    translation_service="google",
+                    translation_service=translation_service,
                     watermark_config=watermark_config,
                     spotting_v2=spotting_v2,
                     render_v2=render_v2,
@@ -599,13 +600,34 @@ class TestTranslationProviderHonesty:
             translate_cues=fake_translate_cues,
             enforce_cps=fake_enforce_cps,
         ):
-            run = run_job(spotting_v2=True, translation_v2=True)
+            run = run_job(
+                spotting_v2=True, translation_v2=True, translation_service="openai"
+            )
 
         assert run.result["status"] == "SUCCESS"
-        # The user asked for google; OpenAI is what the v2 path actually runs.
         assert run.result["result"]["translation_service_used"] == "openai"
         stats = run.stats[0]
         assert stats["translation_service"] == "openai"
+        assert stats["translation_service_requested"] == "openai"
+
+    def test_choosing_google_wins_over_the_v2_toggle(self, run_job):
+        """The user's design for closing #13: picking Google switches the
+        TRANSLATION stage to the regular (free) path even when the full-context
+        toggle arrives enabled — the server enforces what the UI shows. The
+        run must succeed with google as the recorded provider, and the
+        resolved flags must say translation_v2 was off."""
+        run = run_job(
+            spotting_v2=True, translation_v2=True, translation_service="google"
+        )
+
+        assert run.result["status"] == "SUCCESS"
+        payload = run.result["result"]
+        assert payload["translation_service_used"] == "google"
+        assert payload["user_choices"]["translation_v2"] is False
+        # Spotting is provider-independent and must survive the redirect.
+        assert payload["user_choices"]["spotting_v2"] is True
+        stats = run.stats[0]
+        assert stats["translation_service"] == "google"
         assert stats["translation_service_requested"] == "google"
 
 

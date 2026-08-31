@@ -369,22 +369,28 @@ const Options: React.FC<OptionsProps> = ({
           </span>
         </div>
 
+        {/* Full-context translation is built on OpenAI and has no Google variant.
+            When Google is the chosen provider the toggle shows OFF and locks —
+            the user asked to SEE the trade, not discover it in the result. The
+            backend enforces the same rule regardless of what a client sends. */}
         <div className="checkbox-option">
           <input
             type="checkbox"
             id="translationV2"
-            checked={subtitleFlags.translation_v2}
+            checked={translationService === 'google' ? false : subtitleFlags.translation_v2}
             onChange={(e) => onSubtitleFlagsChange({ ...subtitleFlags, translation_v2: e.target.checked })}
-            disabled={disabled || transcriptionOnly}
+            disabled={disabled || transcriptionOnly || translationService === 'google'}
           />
           <label htmlFor="translationV2">{t('options.translationV2')}</label>
           <span className="option-hint" style={{ fontSize: '0.8em', color: '#666' }}>
-            {t('options.translationV2Hint')}
+            {translationService === 'google'
+              ? t('options.translationV2NeedsOpenai')
+              : t('options.translationV2Hint')}
           </span>
         </div>
 
         {/* Style is a property of translation_v2, so it is only live while that is on. */}
-        <div className={`translation-style-selection ${!subtitleFlags.translation_v2 ? 'disabled-section' : ''}`}>
+        <div className={`translation-style-selection ${(!subtitleFlags.translation_v2 || translationService === 'google') ? 'disabled-section' : ''}`}>
           <label htmlFor="translationStyle">{t('options.translationStyle')}</label>
           <div className="model-controls">
             <select
@@ -396,7 +402,7 @@ const Options: React.FC<OptionsProps> = ({
                   translation_style: e.target.value as TranslationStyle,
                 })
               }
-              disabled={disabled || !subtitleFlags.translation_v2}
+              disabled={disabled || !subtitleFlags.translation_v2 || translationService === 'google'}
             >
               <option value="clean">{t('options.translationStyleClean')}</option>
               <option value="faithful">{t('options.translationStyleFaithful')}</option>

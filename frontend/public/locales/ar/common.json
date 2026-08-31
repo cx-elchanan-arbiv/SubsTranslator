@@ -143,6 +143,7 @@
     "downloadVideoButton": "تحميل الفيديو",
     "downloadAudioButton": "تنزيل الصوت",
     "audioReady": "الصوت جاهز للتنزيل!",
+    "downloadTook": "مدة التنزيل من البداية إلى النهاية:",
     "translatedWith": "تمت الترجمة فعليًا بواسطة:",
     "translationGaps": "{{gaps}} أسطر لم تُترجم وبقيت بلغة المصدر داخل ملف الترجمة.",
     "summarizeButton": "تلخيص المحتوى حسب المواضيع",

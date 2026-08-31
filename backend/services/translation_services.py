@@ -87,6 +87,38 @@ class Translator(ABC):
         pass
 
 
+def _batch_collapsed_to_one_answer(sources: list[str], translations: list[str]) -> bool:
+    """True when a translation batch is a broken response wearing a valid shape.
+
+    Observed live: Google answered a batch with its own HTTP 500 error PAGE, and
+    the library returned that page's text as the "translation" of every line —
+    right count, text present, so both existing guards passed, and 19 of 30 cues
+    shipped as "Error 500 (Server Error)!!1..." inside a burned video.
+
+    The invariant that catches this without knowing anything about error pages:
+    DISTINCT source lines do not legitimately translate to one IDENTICAL string.
+    Two short cues collapsing ("Yes." / "Yes!" -> "כן.") is real; three or more
+    distinct sources all yielding the same output is a broken response.
+    """
+    if len(translations) < 3:
+        return False
+    from collections import Counter
+
+    counts = Counter(t.strip() for t in translations if (t or "").strip())
+    if not counts:
+        return False
+    repeated_output, repeats = counts.most_common(1)[0]
+    if repeats < 3:
+        return False
+    # How many DISTINCT sources produced that one output?
+    distinct_sources = {
+        (sources[i] or "").strip()
+        for i, t in enumerate(translations)
+        if (t or "").strip() == repeated_output
+    }
+    return len(distinct_sources) >= 3
+
+
 class GoogleTranslator(Translator):
     """Google Translate implementation using the deep_translator library."""
 
@@ -119,6 +151,23 @@ class GoogleTranslator(Translator):
                     source=source_language, target=processed_target_language
                 )
                 batch_translations = translator.translate_batch(batch)
+
+                if _batch_collapsed_to_one_answer(batch, batch_translations):
+                    # A transient 500 usually clears immediately — one retry
+                    # before failing turns most of these into a normal success.
+                    logger.warning(
+                        f"Google batch {batch_num} collapsed to one repeated "
+                        f"answer (broken response) — retrying once"
+                    )
+                    time.sleep(2)
+                    batch_translations = translator.translate_batch(batch)
+                    if _batch_collapsed_to_one_answer(batch, batch_translations):
+                        raise TranslationServiceError(
+                            "google",
+                            f"batch {batch_num} returned one identical answer for "
+                            f"distinct lines twice in a row — the response is an "
+                            f"error page, not a translation",
+                        )
 
                 if not batch_translations or len(batch_translations) != len(batch):
                     # NEVER pad with the source. The old branch filled a short or

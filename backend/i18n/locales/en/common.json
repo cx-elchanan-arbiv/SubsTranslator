@@ -40,7 +40,7 @@
   },
   "translationServices": {
     "google": {
-      "description": "Free Google translation service. Note: on the current quality path, translation actually runs on OpenAI"
+      "description": "Free Google translation service. With Google, translation runs on the regular path — the \"full-context translation\" upgrades are available with OpenAI only"
     },
     "openai": {
       "description": "Advanced translation using GPT-4o",
