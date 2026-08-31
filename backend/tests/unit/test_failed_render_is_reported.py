@@ -532,7 +532,9 @@ class TestStructuredFailuresKeepTheirStory:
         assert run.result["status"] == "SUCCESS"
         assert run.result["result"]["translation_gaps"] == 2
         # The holes were filled with SOURCE text (the file is usable), not dropped.
-        with open(run.path("clip_translated.srt"), encoding="utf-8") as handle:
+        # Output names carry a slice of the task id (bug #9 fix) — the fixture
+        # pins the id to "test-task-000000", so the slice is "test-tas".
+        with open(run.path("clip_test-tas_translated.srt"), encoding="utf-8") as handle:
             translated = handle.read()
         assert "two" in translated
         assert "three" in translated

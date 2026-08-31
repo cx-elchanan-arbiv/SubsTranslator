@@ -292,7 +292,13 @@ def process_video_task(
 
         timing_summary = initial_timing_summary or {}
         raw_base_name = os.path.splitext(os.path.basename(video_path))[0]
-        base_name = clean_filename(raw_base_name)
+        # Two names on purpose (bug #9): the TITLE is for humans, the FILE base
+        # carries a slice of the task id — two concurrent jobs on the same-named
+        # video used to write the same SRT paths and overwrite each other's
+        # subtitles mid-run. The id slice makes every job's files its own; the
+        # title stays clean on screen.
+        display_title = clean_filename(raw_base_name)
+        base_name = f"{display_title}_{task_id[:8]}" if task_id else display_title
         progress_manager.log(f"Cleaned filename: '{raw_base_name}' -> '{base_name}'")
 
         progress_manager.set_step_status(0, "in_progress")
@@ -1058,7 +1064,7 @@ def process_video_task(
         }
 
         final_result = {
-            "title": base_name,
+            "title": display_title,
             "detected_language": detected_language,
             "files": files_result,
             "timing_summary": timing_summary,
