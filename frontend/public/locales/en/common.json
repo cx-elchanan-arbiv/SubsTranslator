@@ -78,6 +78,8 @@
     "urlDescription": "Enter a video link or a webpage that has video — we'll find it automatically",
     "quickDownload": "Quick Download",
     "processWithSubtitles": "Process with Subtitles",
+    "previewBadge": "Preview",
+    "previewChannel": "Channel:",
     "downloadFormat": "Download format:",
     "downloadFormat_mp4": "Video (MP4)",
     "downloadFormat_mp3": "Audio (MP3)"

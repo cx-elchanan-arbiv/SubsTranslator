@@ -274,26 +274,6 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
           )}
         </div>
 
-        {preview && !validationError && (
-          <div className="mt-2 p-2.5 bg-white border border-gray-200 rounded-xl flex items-center gap-3 animate-fadeIn" dir="rtl">
-            <img
-              src={`https://i.ytimg.com/vi/${preview.id}/hqdefault.jpg`}
-              alt=""
-              className="rounded-lg object-cover flex-shrink-0"
-              style={{ width: '96px', height: '54px' }}
-              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-            />
-            <div className="min-w-0 text-right">
-              <div className="text-sm font-medium text-gray-800 truncate">
-                {preview.title || t('videoPicker.resolving')}
-              </div>
-              {preview.author && (
-                <div className="text-xs text-gray-500 truncate">{preview.author}</div>
-              )}
-            </div>
-          </div>
-        )}
-
         {validationError && (
           <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm animate-fadeIn" dir="rtl">
             <div className="flex items-start gap-2">
@@ -359,6 +339,46 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Telegram-style instant preview, on its own full-width row (the
+          input-group above is a flex ROW — anything inside it becomes a column
+          and shoves the buttons aside). Styled after the "מידע על הסרטון"
+          card that appears once processing starts, so the two feel related. */}
+      {preview && !validationError && (
+        <div
+          className="mt-4 bg-indigo-50/70 border border-indigo-100 rounded-2xl p-4 animate-fadeIn"
+          dir="rtl"
+        >
+          {/* Under the app's RTL, the FIRST flex child lands on the RIGHT.
+              Text first (right, like the reference card), image second (left). */}
+          <div className="flex items-center gap-4">
+            <div className="flex-1 min-w-0" style={{ textAlign: 'right' }}>
+              <span className="inline-block text-xs font-medium text-indigo-600 bg-indigo-100 rounded-full px-3 py-1 mb-2">
+                {/* eslint-disable-next-line i18next/no-literal-string */}
+                <span>📺 </span>
+                {t('youtube.previewBadge')}
+              </span>
+              <div className="text-lg font-bold text-gray-800 leading-snug">
+                {preview.title || t('videoPicker.resolving')}
+              </div>
+              {preview.author && (
+                <div className="text-sm text-gray-500 mt-1">
+                  {/* eslint-disable-next-line i18next/no-literal-string */}
+                  <span>👤 </span>
+                  {t('youtube.previewChannel')} {preview.author}
+                </div>
+              )}
+            </div>
+            <img
+              src={`https://i.ytimg.com/vi/${preview.id}/hqdefault.jpg`}
+              alt=""
+              className="rounded-xl object-cover flex-shrink-0 shadow-md"
+              style={{ width: '160px', height: '90px' }}
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
+          </div>
+        </div>
+      )}
 
       {candidates && (
         <div

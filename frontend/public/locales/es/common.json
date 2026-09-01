@@ -79,6 +79,8 @@
     "urlDescription": "Ingresa una URL de video de YouTube para extraer y traducir subtítulos",
     "quickDownload": "Descarga Rápida",
     "processWithSubtitles": "Procesar con Subtítulos",
+    "previewBadge": "Vista previa",
+    "previewChannel": "Canal:",
     "downloadFormat": "Formato de descarga:",
     "downloadFormat_mp4": "Vídeo (MP4)",
     "downloadFormat_mp3": "Audio (MP3)"

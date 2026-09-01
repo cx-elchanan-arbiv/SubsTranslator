@@ -78,6 +78,8 @@
     "urlDescription": "הכניסו קישור לסרטון או לדף אתר שיש בו וידאו — נמצא אותו אוטומטית",
     "quickDownload": "הורדה מהירה",
     "processWithSubtitles": "עיבוד עם כתוביות",
+    "previewBadge": "תצוגה מקדימה",
+    "previewChannel": "ערוץ:",
     "downloadFormat": "פורמט הורדה:",
     "downloadFormat_mp4": "וידאו (MP4)",
     "downloadFormat_mp3": "אודיו (MP3)"
