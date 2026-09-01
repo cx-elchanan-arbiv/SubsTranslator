@@ -116,7 +116,8 @@
     "processingFile": "Procesando Archivo",
     "preparingFile": "Preparando archivo para procesar",
     "processingVideo": "Procesando Video en Línea",
-    "downloadingVideo": "Descargando Video en Línea"
+    "downloadingVideo": "Descargando Video en Línea",
+    "downloadingAudio": "Descargando audio"
   },
   "steps": {
     "uploading": "Subiendo Video",

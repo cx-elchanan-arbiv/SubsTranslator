@@ -90,7 +90,19 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
 
             {initialRequest && (
               <div className="text-sm text-gray-600">
-                <div>📋 {t('processing.actionType')}: {initialRequest.type === 'download_only' ? t('processing.downloadOnly') : t('processing.fullProcessing')}</div>
+                <div>
+                  {/* eslint-disable-next-line i18next/no-literal-string */}
+                  <span>📋 </span>
+                  {t('processing.actionType')}: {initialRequest.type === 'download_only' ? t('processing.downloadOnly') : t('processing.fullProcessing')}
+                  {initialRequest.type === 'download_only' && initialRequest.media_format && (
+                    <span className="font-medium">
+                      {' — '}
+                      {initialRequest.media_format === 'mp3'
+                        ? <>🎵 {t('youtube.downloadFormat_mp3')}</>
+                        : <>🎬 {t('youtube.downloadFormat_mp4')}</>}
+                    </span>
+                  )}
+                </div>
                 <div>🎬 {t('processing.quality')}: {initialRequest.quality}</div>
               </div>
             )}
@@ -164,15 +176,22 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
       return estimatedSteps;
     }
 
-    // For YouTube download, use the actual steps from backend
+    // For YouTube download, use the actual steps from backend.
+    // Same label translation as the full-processing branch below — this one
+    // used the legacy t.steps map, which lacks "Downloading Video", so the
+    // step name reached a Hebrew screen in English (user report).
     if (currentProcessingType === 'youtube_download' && progress.steps.length > 0) {
-      return progress.steps.map((step, index) => ({
-        id: index + 1,
-        label: t.steps[step.label] || step.label,
-        status: step.status === 'waiting' ? 'pending' : step.status,
-        weight: step.weight || 100 / progress.steps.length,
-        progress: step.progress / 100
-      }));
+      return progress.steps.map((step, index) => {
+        const i18nKey = BACKEND_LABEL_TO_I18N_KEY[step.label];
+        const translated = i18nKey ? t(`processingSteps.${i18nKey}`) : null;
+        return {
+          id: index + 1,
+          label: (translated && translated !== `processingSteps.${i18nKey}` ? translated : (t.steps[step.label] || step.label)),
+          status: step.status === 'waiting' ? 'pending' : step.status,
+          weight: step.weight || 100 / progress.steps.length,
+          progress: step.progress / 100
+        };
+      });
     }
 
     // Convert actual steps to enhanced steps
@@ -206,7 +225,12 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
     switch (currentProcessingType) {
       case 'file_upload': return `📁 ${t('processing.processingFile')}`;
       case 'youtube_full': return `📺 ${t('processing.processingVideo')}`;
-      case 'youtube_download': return `⬇️ ${t('processing.downloadingVideo')}`;
+      case 'youtube_download':
+        // Say WHAT is being downloaded — the header claimed "video" while an
+        // MP3 was on its way (user report).
+        return initialRequest?.media_format === 'mp3'
+          ? `⬇️ ${t('processing.downloadingAudio')}`
+          : `⬇️ ${t('processing.downloadingVideo')}`;
       default: return `🔄 ${t('status.processing')}`;
     }
   };

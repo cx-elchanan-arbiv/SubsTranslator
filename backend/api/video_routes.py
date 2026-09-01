@@ -511,6 +511,9 @@ def download_video_only():
                         "url": url,
                         "quality": "high",
                         "type": "download_only",
+                        # So the progress screen can say WHAT is being downloaded
+                        # (🎬/🎵) from the very first render, not only at the end.
+                        "media_format": media_format,
                     },
                     "video_metadata": None,
                     "progress": {"overall_percent": 0, "steps": []},

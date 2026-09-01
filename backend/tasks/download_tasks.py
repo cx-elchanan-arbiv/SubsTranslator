@@ -508,6 +508,10 @@ def download_youtube_only_task(
                 "url": url,
                 "quality": quality,
                 "type": "download_only",
+                # The progress screen shows the requested format (🎬/🎵) — until
+                # now there was no indication before the very end whether this
+                # was a video or an audio download.
+                "media_format": media_format,
             }
             if start_time and end_time:
                 initial_request["start_time"] = start_time

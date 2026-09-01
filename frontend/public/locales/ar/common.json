@@ -116,7 +116,8 @@
     "processingFile": "معالجة الملف",
     "preparingFile": "تجهيز الملف للمعالجة",
     "processingVideo": "معالجة فيديو عبر الإنترنت",
-    "downloadingVideo": "تنزيل فيديو عبر الإنترنت"
+    "downloadingVideo": "تنزيل فيديو عبر الإنترنت",
+    "downloadingAudio": "جارٍ تنزيل الصوت"
   },
   "steps": {
     "uploading": "رفع الفيديو",
