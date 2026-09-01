@@ -2,6 +2,7 @@
 
 > AI-powered video subtitle generation, translation, and burn-in tool with professional RTL support
 
+
 **SubsTranslator** is an advanced AI-powered video subtitle generation and translation system. Built with `faster-whisper` for lightning-fast transcription and OpenAI GPT-4o for accurate multilingual translation, it features a sophisticated React frontend and robust Flask backend with async processing.
 
 The entire application is containerized using Docker with professional-grade Hebrew/RTL text support and intelligent model selection.
