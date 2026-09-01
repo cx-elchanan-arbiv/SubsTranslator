@@ -17,11 +17,16 @@ const UploadForm: React.FC<UploadFormProps> = ({ selectedFile, onFileSelect, isP
   const { t } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [fileMetadata, setFileMetadata] = useState<FileMetadata>({});
+  // A real frame from the selected video (data URL), shown instead of the
+  // generic 📄 — the same preview Finder shows. Extracted locally in the
+  // browser: no upload, no server, no cost.
+  const [thumbnail, setThumbnail] = useState<string | null>(null);
 
   // Extract video metadata when file is selected
   useEffect(() => {
     if (!selectedFile) {
       setFileMetadata({});
+      setThumbnail(null);
       return;
     }
 
@@ -31,12 +36,23 @@ const UploadForm: React.FC<UploadFormProps> = ({ selectedFile, onFileSelect, isP
 
     if (!fileExtension || !videoExtensions.includes(fileExtension)) {
       setFileMetadata({});
+      setThumbnail(null);
       return;
     }
 
-    // Create video element to read metadata
+    // Create video element to read metadata + capture one frame
     const video = document.createElement('video');
     video.preload = 'metadata';
+    video.muted = true;
+    const objectUrl = URL.createObjectURL(selectedFile);
+    let done = false;
+
+    const cleanup = () => {
+      if (!done) {
+        done = true;
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
 
     video.onloadedmetadata = () => {
       setFileMetadata({
@@ -44,17 +60,41 @@ const UploadForm: React.FC<UploadFormProps> = ({ selectedFile, onFileSelect, isP
         width: video.videoWidth,
         height: video.videoHeight,
       });
+      // Seek to a representative frame: 10% in, but between 0.5s and 3s —
+      // frame 0 is very often black or a fade-in.
+      try {
+        video.currentTime = Math.min(Math.max(video.duration * 0.1, 0.5), 3);
+      } catch {
+        cleanup();
+      }
+    };
 
-      // Clean up
-      URL.revokeObjectURL(video.src);
+    video.onseeked = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        const scale = Math.min(1, 320 / (video.videoWidth || 320));
+        canvas.width = Math.round((video.videoWidth || 320) * scale);
+        canvas.height = Math.round((video.videoHeight || 180) * scale);
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          setThumbnail(canvas.toDataURL('image/jpeg', 0.8));
+        }
+      } catch {
+        // Frame capture is a nicety — the icon fallback is fine.
+      }
+      cleanup();
     };
 
     video.onerror = () => {
       // If video fails to load, just skip metadata
       setFileMetadata({});
+      setThumbnail(null);
+      cleanup();
     };
 
-    video.src = URL.createObjectURL(selectedFile);
+    video.src = objectUrl;
+    return cleanup;
   }, [selectedFile]);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -106,7 +146,16 @@ const UploadForm: React.FC<UploadFormProps> = ({ selectedFile, onFileSelect, isP
       ) : (
         <div className="file-preview-container">
           <div className="file-preview">
-            <div className="file-icon">📄</div>
+            {thumbnail ? (
+              <img
+                src={thumbnail}
+                alt=""
+                className="file-icon rounded-lg object-cover"
+                style={{ width: '96px', height: '54px' }}
+              />
+            ) : (
+              <div className="file-icon">📄</div>
+            )}
             <div className="file-details">
               <div className="file-name">{selectedFile.name}</div>
               <div className="file-meta-grid">

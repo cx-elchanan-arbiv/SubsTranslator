@@ -371,6 +371,47 @@ def process_youtube_async():
         return jsonify({"error": str(e)}), 500
 
 
+@video_bp.route("/youtube-preview", methods=["GET"])
+def youtube_preview():
+    """Instant title+thumbnail for a YouTube id — the Telegram trick.
+
+    Telegram's sub-second link preview is not magic: YouTube thumbnails live at
+    a DETERMINISTIC url (i.ytimg.com/vi/<id>/hqdefault.jpg, no API involved),
+    and the title comes from the public, key-less oEmbed endpoint. This route
+    proxies that one oEmbed call server-side (the browser cannot, for CORS
+    reasons) so the form can show a preview the moment a link is pasted —
+    without waking the heavyweight yt-dlp probe in /resolve-url.
+    """
+    import requests as _requests
+
+    video_id = request.args.get("video_id", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        return jsonify({"error": "invalid video id"}), 400
+    try:
+        resp = _requests.get(
+            "https://www.youtube.com/oembed",
+            params={
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+                "format": "json",
+            },
+            timeout=4,
+        )
+    except Exception:
+        return jsonify({"error": "unavailable"}), 502
+    if resp.status_code != 200:
+        # Private/removed videos have no oEmbed — the form just skips the card.
+        return jsonify({"error": "unavailable"}), 404
+    data = resp.json()
+    return jsonify(
+        {
+            "title": data.get("title"),
+            "author": data.get("author_name"),
+            "thumbnail": data.get("thumbnail_url")
+            or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+        }
+    )
+
+
 @video_bp.route("/resolve-url", methods=["POST"])
 def resolve_url():
     """

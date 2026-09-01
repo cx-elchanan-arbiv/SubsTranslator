@@ -46,6 +46,10 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
   const [validationError, setValidationError] = useState('');
   const [isValidating, setIsValidating] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState<DownloadMediaFormat>('mp4');
+  // The Telegram-style instant preview: a YouTube id has a deterministic
+  // thumbnail URL, and the title comes from one cheap key-less oEmbed call
+  // proxied by the backend. Appears within ~a second of pasting, costs nothing.
+  const [preview, setPreview] = useState<{ id: string; title?: string; author?: string } | null>(null);
 
   // Page-URL resolution + multi-video picker state
   const [resolving, setResolving] = useState(false);
@@ -55,6 +59,43 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
   // Set when the server capped a long playlist, so the picker can say so
   // instead of silently pretending the list is all of it.
   const [candidatesTotal, setCandidatesTotal] = useState<number | null>(null);
+
+  // Extract a YouTube video id from any of the common URL shapes.
+  const extractYoutubeId = (url: string): string | null => {
+    const match = url.match(
+      /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/
+    );
+    return match ? match[1] : null;
+  };
+
+  // Instant preview on paste (debounced with the validation below).
+  useEffect(() => {
+    const id = extractYoutubeId(youtubeUrl.trim());
+    if (!id) {
+      setPreview(null);
+      return;
+    }
+    if (preview?.id === id) return;
+    // Thumbnail renders immediately from the deterministic URL; the title
+    // fills in when the oEmbed answer arrives.
+    setPreview({ id });
+    let cancelled = false;
+    const timeoutId = setTimeout(() => {
+      fetch(`${API_BASE_URL}/youtube-preview?video_id=${id}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!cancelled && data?.title) {
+            setPreview({ id, title: data.title, author: data.author });
+          }
+        })
+        .catch(() => {});
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [youtubeUrl]);
 
   // Validate URL in real-time with debounce
   useEffect(() => {
@@ -232,6 +273,26 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
             </div>
           )}
         </div>
+
+        {preview && !validationError && (
+          <div className="mt-2 p-2.5 bg-white border border-gray-200 rounded-xl flex items-center gap-3 animate-fadeIn" dir="rtl">
+            <img
+              src={`https://i.ytimg.com/vi/${preview.id}/hqdefault.jpg`}
+              alt=""
+              className="rounded-lg object-cover flex-shrink-0"
+              style={{ width: '96px', height: '54px' }}
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
+            <div className="min-w-0 text-right">
+              <div className="text-sm font-medium text-gray-800 truncate">
+                {preview.title || t('videoPicker.resolving')}
+              </div>
+              {preview.author && (
+                <div className="text-xs text-gray-500 truncate">{preview.author}</div>
+              )}
+            </div>
+          </div>
+        )}
 
         {validationError && (
           <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm animate-fadeIn" dir="rtl">
