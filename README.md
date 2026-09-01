@@ -1,4 +1,4 @@
-# subtitles-ai 🎬
+# SubsTranslator 🎬
 
 > AI-powered video subtitle generation, translation, and burn-in tool with professional RTL support
 
@@ -25,9 +25,9 @@ The entire application is containerized using Docker with professional-grade Heb
 
 
 ### **Core Functionality**
--   **⚡ Ultra-Fast Transcription:** Uses `faster-whisper` with intelligent model selection (tiny/base/medium/large)
+-   **⚡ Ultra-Fast Transcription:** Uses `faster-whisper` with intelligent model selection (base/medium/large, plus experimental Gemini)
 -   **🎯 Smart Model Selection:** Automatically chooses optimal Whisper model based on language and content
--   **🌍 Advanced Multi-language Support:** 11+ languages with specialized Hebrew/Arabic RTL processing
+-   **🌍 Advanced Multi-language Support:** 14 languages with specialized Hebrew/Arabic RTL processing
 -   **📱 Dual Input Methods:** YouTube URL processing + local file upload support
 -   **🔄 Asynchronous Processing:** Celery + Redis for scalable background task processing
 
@@ -39,7 +39,8 @@ The entire application is containerized using Docker with professional-grade Heb
 
 ### **Professional Features**
 -   **🖼️ Watermark System:** Automatic logo overlay with customizable positioning and transparency
--   **⬇️ Quick Download Mode:** YouTube video download without processing
+-   **⬇️ Quick Download Mode:** YouTube download without processing — video (MP4) or audio only (MP3)
+-   **🔎 Instant Link Preview:** paste a YouTube link and see the thumbnail, title and channel within a second
 -   **📊 Real-time Progress:** Live processing updates with detailed status information
 -   **🗂️ Multiple Output Formats:** Original SRT, translated SRT, and video with subtitles
 -   **🧹 Automated Cleanup:** Background file management and cleanup tasks
@@ -48,15 +49,9 @@ The entire application is containerized using Docker with professional-grade Heb
 -   **🐳 Full Docker Setup:** One-command deployment with docker-compose
 -   **🔒 Security Features:** Path traversal protection and file validation
 -   **📈 Monitoring Ready:** Health checks and comprehensive logging
--   **🌐 Bilingual UI:** Hebrew/English interface with RTL support
+-   **🌐 Multilingual UI:** Hebrew/English/Arabic/Spanish interface with RTL support
 
 ## Getting Started
-
-
-4. **View logs:**
-   ```bash
-   docker-compose logs -f
-   ```
 
 ### Prerequisites
 
@@ -64,8 +59,8 @@ The entire application is containerized using Docker with professional-grade Heb
 -   [Docker](https://docs.docker.com/get-docker/) 20.10+
 -   [Docker Compose](https://docs.docker.com/compose/install/) 2.0+
 -   **API Keys:**
-    - OpenAI API key ([Get one here](https://platform.openai.com/api-keys))
-    - Firebase project for authentication ([Setup guide](https://firebase.google.com/docs/web/setup))
+    - OpenAI API key ([Get one here](https://platform.openai.com/api-keys)) — for the quality translation path; Google Translate works with no key
+    - *(Optional)* Firebase project for sign-in features ([Setup guide](https://firebase.google.com/docs/web/setup)) — the app runs fully without it
 
 **For local development (without Docker):**
 -   Python 3.12+
@@ -77,8 +72,8 @@ The entire application is containerized using Docker with professional-grade Heb
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/cx-elchanan-arbiv/subtitles-ai.git
-    cd subtitles-ai
+    git clone https://github.com/cx-elchanan-arbiv/SubsTranslator.git
+    cd SubsTranslator
     ```
 
 2.  **Configure environment variables:**
@@ -122,7 +117,7 @@ The entire application is containerized using Docker with professional-grade Heb
 ### Stopping the Application
 
 ```bash
-./stop.sh
+docker-compose down
 ```
 
 ### Troubleshooting
@@ -144,13 +139,13 @@ docker-compose up -d --build
 
 ## 📚 Documentation
 
-- **📖 [Project Overview](docs/PROJECT_OVERVIEW.md)** - What subtitles-ai is and how it works
+- **📖 [Project Overview](docs/PROJECT_OVERVIEW.md)** - What SubsTranslator is and how it works
 - **🏗️ [Architecture Guide](docs/ARCHITECTURE.md)** - Technical architecture and system design  
 - **⚙️ [Development Guide](docs/DEV_GUIDE.md)** - Setup, workflow, and contribution guidelines
-- **🧪 [Testing Guide](TESTING.md)** - Complete testing documentation and structure
+- **🧪 [Testing Guide](docs/TESTING.md)** - Complete testing documentation and structure
 - **🔧 [Testing Troubleshooting](docs/TESTING_TROUBLESHOOTING.md)** - Solutions to common testing issues
 
-**🚨 IMPORTANT: Before modifying ANY code, read [CODE_MODIFICATION_POLICY.md](CODE_MODIFICATION_POLICY.md)**
+**🚨 IMPORTANT: Before modifying ANY code, read [docs/CODE_MODIFICATION_POLICY.md](docs/CODE_MODIFICATION_POLICY.md)**
 
 ## 🔌 API Documentation
 
@@ -163,9 +158,9 @@ curl -X POST -H "Content-Type: application/json" \
   -d '{"url":"https://youtu.be/VIDEO_ID","target_lang":"he","auto_create_video":true,"whisper_model":"large"}' \
   http://localhost:8081/youtube
 
-# Quick download only (no processing)
+# Quick download only (no processing). media_format: "mp4" (default) or "mp3"
 curl -X POST -H "Content-Type: application/json" \
-  -d '{"url":"https://youtu.be/VIDEO_ID"}' \
+  -d '{"url":"https://youtu.be/VIDEO_ID","media_format":"mp3"}' \
   http://localhost:8081/download-video-only
 ```
 
@@ -184,7 +179,7 @@ curl -X POST -F "file=@video.mp4" \
 curl -X POST -F "video=@video.mp4" \
   -F "srt_text=[00:10 - 00:15] Hello world
 [00:20 - 00:25] This is a test" \
-  http://localhost:8081/embed_subtitles
+  http://localhost:8081/embed-subtitles
 ```
 
 ### **Status & Download Endpoints**
@@ -203,7 +198,7 @@ curl http://localhost:8081/languages
 ```
 
 ### **Supported Parameters**
-- **whisper_model**: `tiny`, `base`, `medium`, `large` (default: `large`)
+- **whisper_model**: `base`, `medium`, `large`, `gemini` (default: `large`)
 - **source_lang**: Language code or `auto` for detection
 - **target_lang**: Target language code (default: `he`)
 - **auto_create_video**: `true`/`false` for video with subtitles creation
@@ -211,41 +206,40 @@ curl http://localhost:8081/languages
 ## 📁 Project Architecture
 
 ```
-subtitles-ai/
+SubsTranslator/
 ├── 🐳 Docker Configuration
 │   ├── docker-compose.yml       # Multi-service orchestration
-│   ├── backend.Dockerfile       # Python Flask + Celery container
+│   ├── backend.Dockerfile       # Python Flask + Celery container (ffmpeg, deno, Hebrew fonts)
 │   ├── frontend.Dockerfile      # React + Nginx container
-│   └── nginx.conf               # Reverse proxy configuration
+│   └── nginx.conf               # Frontend web server configuration
 │
 ├── 🔧 Backend (Python Flask + Celery)
 │   ├── app.py                   # Main Flask application
-│   ├── tasks.py                 # Celery background tasks
-│   ├── celery_worker.py         # Celery worker configuration
+│   ├── api/                     # HTTP routes (video, editing, health)
+│   ├── tasks/                   # Celery background tasks
+│   ├── services/                # Transcription, translation, subtitles, yt-dlp
+│   ├── core/                    # Structured exceptions and shared contracts
+│   ├── utils/                   # File, video and probing helpers
+│   ├── i18n/                    # Backend translations (he/en/ar/es)
+│   ├── celery_worker.py         # Celery app + task registration
 │   ├── celery_config.py         # Celery settings and queues
 │   ├── config.py                # Application configuration
-│   ├── whisper_smart.py         # Smart Whisper model management
-│   ├── rtl_utils.py             # Hebrew/RTL text processing
-│   └── requirements.txt         # Python dependencies
+│   ├── requirements.txt         # Python dependencies
+│   └── tests/                   # Unit / integration / e2e suites
 │
 ├── 🎨 Frontend (React + TypeScript)
 │   ├── src/
 │   │   ├── App.tsx              # Main application component
 │   │   ├── components/          # Reusable React components
 │   │   ├── hooks/               # Custom React hooks
-│   │   ├── i18n/                # Internationalization (Hebrew/English)
+│   │   ├── i18n/                # Internationalization (he/en/ar/es)
 │   │   └── types/               # TypeScript type definitions
 │   ├── package.json             # Node.js dependencies
-│   └── public/                  # Static assets
+│   └── public/                  # Static assets + locale files
 │
-├── 🛠️ Scripts & Utilities
-│   ├── scripts/                 # Docker data utilities
-│   └── e2e_subtitle_test.py     # End-to-end testing
-│
-└── 📚 Documentation
-    ├── README.md                # This file
-    ├── DEVELOPMENT_GUIDE.md     # Development instructions
-    └── CODE_MODIFICATION_POLICY.md # Code change guidelines
+├── 📦 standalone-downloader/    # Separate Windows downloader tool (shares no code)
+├── 🛠️ scripts/                  # Docker data utilities
+└── 📚 docs/                     # Architecture, operations, guides
 ```
 
 ### **Key Components**
@@ -266,7 +260,8 @@ subtitles-ai/
 - **Celery 5.3+** - Distributed task queue
 - **Redis 6.0+** - Message broker & caching
 - **faster-whisper** - AI transcription (OpenAI Whisper optimized)
-- **OpenAI GPT-4o / GPT-4o-mini** - Translation & summarization
+- **OpenAI GPT-4o / GPT-4o-mini** - Quality translation (full-scene context) & summarization
+- **Google Translate (free)** - Alternative line-by-line translation path
 - **Google Gemini** - Alternative transcription provider
 - **FFmpeg** - Video processing & subtitle burn-in
 - **yt-dlp** - YouTube video download
@@ -277,7 +272,7 @@ subtitles-ai/
 - **Create React App** (react-scripts 5) - Build tool
 - **Tailwind CSS** - Styling
 - **Firebase** - Authentication & user management
-- **i18next** - Internationalization (Hebrew/English)
+- **i18next** - Internationalization (Hebrew/English/Arabic/Spanish)
 
 ### Infrastructure
 - **Docker & Docker Compose** - Containerization
@@ -300,7 +295,7 @@ Contributions are welcome! This project follows standard open source contributio
 6. Push to the branch (`git push origin feature/AmazingFeature`)
 7. Open a Pull Request
 
-For detailed guidelines, see [CONTRIBUTING.md](docs/CONTRIBUTING.md) and [CODE_MODIFICATION_POLICY.md](CODE_MODIFICATION_POLICY.md).
+For detailed guidelines, see [CONTRIBUTING.md](docs/CONTRIBUTING.md) and [docs/CODE_MODIFICATION_POLICY.md](docs/CODE_MODIFICATION_POLICY.md).
 
 **Code Style:**
 - Python: Follow PEP 8, use `black` formatter
@@ -325,12 +320,12 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 ## 💬 Support & Contact
 
 **Found a bug or have a feature request?**
-- 🐛 [Open an issue](https://github.com/cx-elchanan-arbiv/subtitles-ai/issues)
-- 💡 [Feature requests](https://github.com/cx-elchanan-arbiv/subtitles-ai/issues/new?labels=enhancement)
+- 🐛 [Open an issue](https://github.com/cx-elchanan-arbiv/SubsTranslator/issues)
+- 💡 [Feature requests](https://github.com/cx-elchanan-arbiv/SubsTranslator/issues/new?labels=enhancement)
 
 **Need help?**
 - 📖 Check the [Documentation](docs/)
-- 💬 Start a [Discussion](https://github.com/cx-elchanan-arbiv/subtitles-ai/discussions)
+- 💬 Start a [Discussion](https://github.com/cx-elchanan-arbiv/SubsTranslator/discussions)
 
 **Security Issues:**
 - 🔒 Please report security vulnerabilities privately
