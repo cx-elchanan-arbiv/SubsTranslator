@@ -14,7 +14,7 @@
     "@types/react-dom": "^19.1.7",
     "autoprefixer": "^10.4.21",
     "dompurify": "^3.3.1",
-    "firebase": "^12.1.0",
+    "firebase": "^12.18.0",
     "framer-motion": "^12.23.12",
     "http-proxy-middleware": "^2.0.6",
     "i18next": "^23.16.8",
