@@ -128,3 +128,15 @@ services:
 volumes:
   downloads:
   storage:  # Persistent storage (stats + whisper models)
+
+# IPv6 on the compose network. YouTube (Google's "unusual traffic" gate) flags the
+# home IPv4 address from time to time; the host escapes it because macOS prefers
+# IPv6 to youtube.com, but a plain compose network is IPv4-only, so every yt-dlp
+# call from the containers hit "Sign in to confirm you're not a bot" (2026-09-22).
+# This line only gives the containers an IPv6 route (a Docker ULA); on its own
+# glibc would still pick IPv4 first — the image's /etc/gai.conf (see gai.conf at
+# the repo root) is what makes the containers actually prefer IPv6. Both halves
+# are needed. Needs `docker compose down && up -d` to take effect.
+networks:
+  default:
+    enable_ipv6: true

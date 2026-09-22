@@ -71,7 +71,17 @@ RUN chmod +x /app/start.sh
 # Create necessary directories and set ownership to non-root user
 RUN mkdir -p /app/uploads /app/downloads /app/whisper_models /app/fast_work /app/assets && \
     chown -R appuser:appgroup /app && \
-    chmod 755 /app/uploads /app/downloads /app/fast_work
+    chmod 755 /app/uploads /app/fast_work && \
+    chmod 1777 /app/downloads
+# /app/downloads is a *named volume* in docker-compose: a fresh volume copies this
+# directory's owner/mode from the image, and compose then runs the processes as
+# `user: "501:20"` — not appuser. With 755 the worker downloads fine and then dies
+# on the final move ("Permission denied: /app/downloads/..."). Sticky world-writable
+# (like /tmp) lets whichever uid compose picks write there. Fixed 2026-09-22.
+
+# Prefer IPv6 to dual-stack hosts (YouTube). See the header of gai.conf for why
+# a container on a Docker ULA network otherwise always picks IPv4.
+COPY gai.conf /etc/gai.conf
 
 # Render injects $PORT; keep a sane default for local runs
 ENV PORT=10000
