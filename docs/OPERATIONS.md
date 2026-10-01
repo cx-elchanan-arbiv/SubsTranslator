@@ -160,22 +160,47 @@ docker compose exec worker celery -A celery_worker.celery_app purge
 
 ### File Management
 
+Where things live in Docker, and how long they stay (verified 2026-10-01):
+
+| Path (container) | Host side | What | Kept |
+|---|---|---|---|
+| `/app/fast_work` | `backend/fast_work` | downloads in progress (`<job tag>_<title>.*`) | until the job ends; a failed or stopped job deletes its own; the daily sweep removes anything untouched for 6 h (`FAST_WORK_MAX_AGE`) |
+| `/app/downloads` | named volume `downloads` | finished videos, MP3s, SRTs, rendered videos | 24 h (`MAX_FILE_AGE`, checked every 6 h) |
+| `/app/uploads` | `backend/uploads` | uploaded files (top level) | 24 h, same task |
+| `/app/storage/research` | named volume `storage` | one text-only record per processing run (no video since 2026-08-10) | permanent, by design (~80 KB a run) |
+| `/app/storage/whisper_models` | named volume `storage` | the Whisper models the app loads (`WHISPER_MODELS_DIR`) | permanent |
+| `/app/yt_dlp_cache` | `backend/yt_dlp_cache` | yt-dlp's cache (`YTDLP_CACHE_DIR`) | permanent |
+| Redis | — | task status / results | 1 h (`CELERY_RESULT_EXPIRES`) |
+
+Every file a job writes carries the head of its task id (`<title>_<8 hex>`), so a
+cleanup can tell whose file it is. `backend/downloads` and `backend/whisper_models`
+on the host are NOT used under Docker (the named volume / `WHISPER_MODELS_DIR` win).
+
 ```bash
 # Check storage usage
-du -sh backend/uploads backend/downloads backend/whisper_models
+docker compose exec worker du -sh /app/fast_work /app/downloads /app/uploads /app/storage/*
 
-# Manual cleanup (if automated cleanup fails)
-find backend/uploads -type f -mtime +1 -delete
-find backend/downloads -type f -mtime +1 -delete
-
-# Refresh Whisper models cache
-rm -rf backend/whisper_models/*
-# Models will re-download automatically on next transcription
-
-# Manual retention policy enforcement
-python scripts/cleanup_expired_files.py --dry-run
-python scripts/cleanup_expired_files.py --force
+# Manual cleanup (if the scheduled one is not running)
+docker compose exec worker find /app/uploads /app/downloads -maxdepth 1 -type f -mmin +1440 -delete
+docker compose exec worker find /app/fast_work -maxdepth 1 -type f -mmin +360 -delete
 ```
+
+### Stopping a job
+
+The UI's Stop button calls `POST /cancel/<task_id>`. The job stops at its next
+progress update (usually within a second), deletes its partial files and reports
+`FAILURE` with code `CANCELLED`. If it does not answer within 30 s (stuck in one long
+call), it gets Celery's soft signal; 30 s after that, it is killed and the web process
+deletes its files. A job still in the queue never starts. Details:
+`backend/services/job_cancel.py`.
+
+```bash
+curl -X POST http://localhost:8081/cancel/<task_id>
+```
+
+Restarting the worker is NOT a way to stop a job: tasks are acknowledged only when
+they finish (`task_acks_late`), so a job interrupted by a restart can be delivered
+again.
 
 ### Task Management
 
@@ -765,9 +790,9 @@ SubsTranslator/
 │   └── frontend/build/static/       # Static assets + source maps
 │
 ├── 💾 Runtime Data  
-│   ├── backend/uploads/             # Temporary input files
-│   ├── backend/downloads/           # Output artifacts (24h retention)
-│   ├── backend/whisper_models/      # ML model cache (persistent)
+│   ├── backend/uploads/             # Temporary input files (24h retention)
+│   ├── downloads volume             # Output artifacts (24h retention) — see File Management
+│   ├── storage volume               # Whisper models + research records (persistent)
 │   └── backend/assets/              # Static resources (logos, fonts)
 │
 ├── 🛠️ Operations Scripts
@@ -823,7 +848,7 @@ A: 500MB default, configurable via `MAX_FILE_SIZE` environment variable
 A: Set `WORKER_CONCURRENCY=4` in .env, restart worker service
 
 **Q: Where are processed files stored?**
-A: `backend/downloads/` with 24-hour retention via automated cleanup
+A: In the `downloads` Docker volume (`/app/downloads`), with 24-hour retention via automated cleanup — see "File Management"
 
 **Q: How to enable GPU acceleration?**
 A: Add GPU support to Docker Compose + set `WHISPER_DEVICE=cuda` in config

@@ -40,10 +40,13 @@ The entire application is containerized using Docker with professional-grade Heb
 ### **Professional Features**
 -   **🖼️ Watermark System:** Automatic logo overlay with customizable positioning and transparency
 -   **⬇️ Quick Download Mode:** YouTube download without processing — video (MP4) or audio only (MP3)
+-   **🌐 Page Links:** paste a news article or live page, pick one of the videos found on it — only that video is downloaded
+-   **⚡ Download Quality:** fast (720p, the default — ~40% smaller files) or high quality (1080p)
+-   **⏹ Stop Button:** stop a running job at any stage; its partial files are deleted
 -   **🔎 Instant Link Preview:** paste a YouTube link and see the thumbnail, title and channel within a second
 -   **📊 Real-time Progress:** Live processing updates with detailed status information
 -   **🗂️ Multiple Output Formats:** Original SRT, translated SRT, and video with subtitles
--   **🧹 Automated Cleanup:** Background file management and cleanup tasks
+-   **🧹 Automated Cleanup:** outputs expire after 24 h; a failed or stopped job removes its own partial files
 
 ### **Developer & Production Ready**
 -   **🐳 Full Docker Setup:** One-command deployment with docker-compose
@@ -158,10 +161,18 @@ curl -X POST -H "Content-Type: application/json" \
   -d '{"url":"https://youtu.be/VIDEO_ID","target_lang":"he","auto_create_video":true,"whisper_model":"large"}' \
   http://localhost:8081/youtube
 
-# Quick download only (no processing). media_format: "mp4" (default) or "mp3"
+# Quick download only (no processing). media_format: "mp4" (default) or "mp3";
+# quality: "fast" (720p, default) or "high" (1080p)
 curl -X POST -H "Content-Type: application/json" \
   -d '{"url":"https://youtu.be/VIDEO_ID","media_format":"mp3"}' \
   http://localhost:8081/download-video-only
+
+# A page that holds several videos: list them first, then send the chosen one's
+# "url" — plus its "item_id" when the list gives one (pages whose videos share the
+# page's own URL, e.g. CNN live pages)
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/article-with-videos"}' \
+  http://localhost:8081/resolve-url
 ```
 
 #### **File Upload Processing**
@@ -187,6 +198,9 @@ curl -X POST -F "video=@video.mp4" \
 # Check processing status
 curl http://localhost:8081/status/{task_id}
 
+# Stop a running job (it reports state FAILURE with code CANCELLED)
+curl -X POST http://localhost:8081/cancel/{task_id}
+
 # Download processed files
 curl http://localhost:8081/download/{filename}
 
@@ -202,6 +216,8 @@ curl http://localhost:8081/languages
 - **source_lang**: Language code or `auto` for detection
 - **target_lang**: Target language code (default: `he`)
 - **auto_create_video**: `true`/`false` for video with subtitles creation
+- **quality** (online video): `fast` (720p, default) or `high` (1080p)
+- **item_id** (online video): which video of a multi-video page, as returned by `/resolve-url`
 
 ## 📁 Project Architecture
 
