@@ -285,6 +285,10 @@ class TestMetadataDescribesTheChosenVideo:
 
         service = VideoMetadataService()
         service.cache_ttl = 3600
+        # Domain validation is not under test here, and whether a news site passes it
+        # depends on ALLOW_UNKNOWN_DOMAINS in the environment (on in the local .env,
+        # off on the CI runner — where these tests first failed with INVALID_URL).
+        service._validate_url = lambda _url: True
         return service
 
     def test_two_videos_from_one_page_are_cached_apart(self):
