@@ -3,9 +3,11 @@ YouTube download service for SubsTranslator
 Handles video downloads from YouTube with metadata extraction
 """
 
+import glob
 import os
 import shutil
 import time
+import uuid
 
 import yt_dlp
 
@@ -16,6 +18,8 @@ from performance_monitor import (
     log_move_performance,
     performance_monitor,
 )
+from services.download_quality import format_for_quality
+from services.video_selection import item_filter_opts, single_video
 from utils.file_utils import clean_filename, parse_time_to_seconds
 from ytdlp_hooks import create_clean_progress_hook
 
@@ -26,19 +30,77 @@ logger = get_logger(__name__)
 DOWNLOADS_FOLDER = config.DOWNLOADS_FOLDER
 
 
+def _job_tag(job_id=None) -> str:
+    """Eight characters that make a job's files its own: the head of its task id."""
+    return str(job_id or uuid.uuid4().hex)[:8]
+
+
+def _remove_job_leftovers(work_dir, tag) -> int:
+    """
+    Delete what a failed or stopped download left in the working folder.
+
+    Every file a download writes there starts with its tag (see the output templates
+    below) — partial streams, HLS fragments, resume files, a half-merged result — so
+    this removes exactly this job's and never another's. Before, they waited for the
+    daily wipe: the CNN run of 2026-10-01 left 424 MB behind.
+    """
+    removed = 0
+    for path in glob.glob(os.path.join(work_dir, f"{tag}_*")):
+        try:
+            os.remove(path)
+            removed += 1
+        except OSError as e:
+            logger.warning(f"Could not remove leftover {path}: {e}")
+    if removed:
+        logger.info(f"🧹 Removed {removed} leftover file(s) of job {tag}")
+    return removed
+
+
+def _download_one_video(ydl, url, item_id=None):
+    """
+    Download exactly one video and return ITS info dict.
+
+    Resolve first, check, then download. ``extract_info(url, download=True)`` on a
+    page holding several videos treats it as a playlist and downloads every one of
+    them (``noplaylist`` does not prevent that — it only applies to a URL naming a
+    video AND a list), and the info it returns is the playlist's, so no file matches
+    it afterwards. Checking before the download turns that into an immediate, clear
+    error, and the returned dict is always the video's own (title, file path).
+
+    Re-processing a resolved info dict is yt-dlp's own path for ``--load-info-json``.
+    """
+    info = ydl.extract_info(url, download=False)
+    info = single_video(info, url, item_id)
+    return ydl.process_ie_result(info, download=True)
+
+
 def download_youtube_video(
-    url, quality="medium", progress_callback=None, start_time=None, end_time=None
+    url,
+    quality="medium",
+    progress_callback=None,
+    start_time=None,
+    end_time=None,
+    item_id=None,
+    job_id=None,
 ):
     """
     Download video from YouTube and extract comprehensive metadata.
 
     Args:
         url: Video URL
-        quality: Video quality
+        quality: "fast" (720p, the default) or "high" (1080p) — services.download_quality
         progress_callback: Optional callback for progress updates
         start_time: Optional start time for partial download (format: HH:MM:SS, MM:SS, or SS)
         end_time: Optional end time for partial download (format: HH:MM:SS, MM:SS, or SS)
+        item_id: The video chosen in the picker when ``url`` is a page holding several
+            (see services.video_selection).
+        job_id: The task id. Its head prefixes every file this download writes in the
+            working folder, so a failure removes exactly its own leftovers. The
+            downloaded file itself keeps the plain title: the processing step shows
+            that name as the video's title, and its outputs carry their own task id.
     """
+    work_dir = config.FAST_WORK_DIR
+    tag = _job_tag(job_id)
     try:
         # FAKE mode: return deterministic metadata and copy a local test video
         if config.USE_FAKE_YTDLP or (isinstance(url, str) and "mocked_video" in url):
@@ -68,7 +130,6 @@ def download_youtube_video(
             return dst_path, metadata
 
         # Phase A: Use fast workspace for I/O operations
-        work_dir = config.FAST_WORK_DIR
         final_dir = DOWNLOADS_FOLDER
         os.makedirs(work_dir, exist_ok=True)
         os.makedirs(final_dir, exist_ok=True)
@@ -76,15 +137,19 @@ def download_youtube_video(
         start_time_ts = time.time()
 
         ydl_opts = {
-            "format": config.YTDLP_OPTIMIZED_FORMAT,  # Phase A: Optimized for remux-only
-            "outtmpl": f"{work_dir}/%(title).120B.%(ext)s",  # Phase A: Use fast workspace
+            "format": format_for_quality(quality),
+            # Fast workspace; the tag makes every file of this job findable (cleanup).
+            "outtmpl": f"{work_dir}/{tag}_%(title).100B.%(ext)s",
             "extract_flat": False,
             "noplaylist": True,
-            "restrict_filenames": True,
+            # yt-dlp's own option names. These were passed as restrict_filenames /
+            # continue_dl / cache_dir, which yt-dlp does not know and silently ignored.
+            "restrictfilenames": config.YTDLP_RESTRICT_FILENAMES,
+            "continuedl": config.YTDLP_CONTINUE_DL,
+            "cachedir": config.YTDLP_CACHE_DIR,
             "retries": config.YTDLP_RETRIES,  # Phase A: Reduced retries
             "fragment_retries": config.YTDLP_FRAGMENT_RETRIES,  # Phase A: Reduced retries
             "socket_timeout": config.YTDLP_SOCKET_TIMEOUT,  # Phase A: Faster timeout
-            "continue_dl": True,
             "merge_output_format": "mp4",
             # Log cleanup: Reduce yt-dlp verbosity
             "quiet": not config.DEBUG,  # Only show yt-dlp logs in DEBUG mode
@@ -93,6 +158,7 @@ def download_youtube_video(
             # full format ladder without a 403 — see config.YTDLP_PLAYER_CLIENT,
             # which documents why the answer keeps changing.
             "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
+            **item_filter_opts(item_id),
             # Phase A: Only faststart, no re-encoding
             "postprocessor_args": {
                 "ffmpeg": [
@@ -160,7 +226,7 @@ def download_youtube_video(
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             if config.DEBUG:
                 logger.debug(f"📡 Extracting info from URL: {url}")
-            info = ydl.extract_info(url, download=True)
+            info = _download_one_video(ydl, url, item_id)
             work_filename = ydl.prepare_filename(info)
 
             if os.path.exists(work_filename):
@@ -260,10 +326,16 @@ def download_youtube_video(
         return filename, metadata
     except Exception as e:
         logger.error(f"YouTube download failed: {e}")
+        _remove_job_leftovers(work_dir, tag)
         # Convert to structured exception with proper error codes
         from core.exceptions import handle_youtube_error
 
         raise handle_youtube_error(e, url)
+    except BaseException:
+        # Stopped by the user (services.job_cancel.JobCancelled): nothing to
+        # classify, but this job's partial files go all the same.
+        _remove_job_leftovers(work_dir, tag)
+        raise
 
 
 #: Audio-only download settings, applied when ``media_format="mp3"``.
@@ -285,21 +357,31 @@ def download_youtube_video_with_progress(
     start_time=None,
     end_time=None,
     media_format="mp4",
+    item_id=None,
+    job_id=None,
 ):
     """
     Download video from YouTube with real-time progress updates.
 
     Args:
         url: Video URL
-        quality: Video quality (high, medium, low)
+        quality: "fast" (720p, the default) or "high" (1080p) — services.download_quality
         progress_manager: Optional progress tracking manager
         start_time: Optional start time for partial download (format: HH:MM:SS, MM:SS, or SS)
         end_time: Optional end time for partial download (format: HH:MM:SS, MM:SS, or SS)
         media_format: ``"mp4"`` for the video as before, or ``"mp3"`` to keep only the
             audio. Anything unrecognised is treated as ``"mp4"``, so a caller that
             does not know about this argument behaves exactly as it did.
+        item_id: The video chosen in the picker when ``url`` is a page holding several
+            (see services.video_selection).
+        job_id: The task id. Its head prefixes every file this download writes — in
+            the working folder, so a failure removes exactly its own leftovers, and in
+            the delivered name, so two downloads of one video (720p and 1080p, video
+            and a trimmed range) no longer overwrite each other.
     """
     audio_only = str(media_format or "mp4").lower() == AUDIO_ONLY_CODEC
+    work_dir = config.FAST_WORK_DIR
+    tag = _job_tag(job_id)
     try:
         # FAKE mode shortcut
         if config.USE_FAKE_YTDLP or (isinstance(url, str) and "mocked_video" in url):
@@ -335,22 +417,22 @@ def download_youtube_video_with_progress(
             return dst_path, metadata
 
         # Phase A: Use fast workspace for download-only tasks too
-        work_dir = config.FAST_WORK_DIR
         final_dir = DOWNLOADS_FOLDER
         os.makedirs(work_dir, exist_ok=True)
         os.makedirs(final_dir, exist_ok=True)
 
         ydl_opts = {
             "format": (
-                AUDIO_ONLY_FORMAT if audio_only else config.YTDLP_OPTIMIZED_FORMAT
+                AUDIO_ONLY_FORMAT if audio_only else format_for_quality(quality)
             ),
-            "outtmpl": f"{work_dir}/%(title)s.%(ext)s",  # Phase A: Use fast workspace
+            # Fast workspace; the tag makes every file of this job findable (cleanup).
+            "outtmpl": f"{work_dir}/{tag}_%(title).100B.%(ext)s",
             "extract_flat": False,
             "noplaylist": True,  # Force single video download only
             "socket_timeout": config.YTDLP_SOCKET_TIMEOUT,
             "fragment_retries": config.YTDLP_FRAGMENT_RETRIES,
             "retries": config.YTDLP_RETRIES,
-            "cache_dir": config.YTDLP_CACHE_DIR,
+            "cachedir": config.YTDLP_CACHE_DIR,
             # No second stream to merge when only the audio was requested, and the
             # value would otherwise ask ffmpeg for an MP4 container around an MP3.
             **(
@@ -365,6 +447,7 @@ def download_youtube_video_with_progress(
             # full format ladder without a 403 — see config.YTDLP_PLAYER_CLIENT,
             # which documents why the answer keeps changing.
             "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
+            **item_filter_opts(item_id),
             # Video: only faststart, no re-encoding. Audio starts from an empty list
             # (`+faststart` is an MP4 container flag that ffmpeg rejects on an MP3
             # write) which the time-range block below can still extend.
@@ -387,8 +470,10 @@ def download_youtube_video_with_progress(
                 if audio_only
                 else {}
             ),
-            "restrict_filenames": config.YTDLP_RESTRICT_FILENAMES,
-            "continue_dl": config.YTDLP_CONTINUE_DL,
+            # yt-dlp's own option names (were restrict_filenames / continue_dl /
+            # cache_dir — unknown to yt-dlp and silently ignored).
+            "restrictfilenames": config.YTDLP_RESTRICT_FILENAMES,
+            "continuedl": config.YTDLP_CONTINUE_DL,
         }
 
         # Add time range support via postprocessor (more reliable than download_ranges)
@@ -505,7 +590,7 @@ def download_youtube_video_with_progress(
                 progress_manager.log("📡 Extracting info from URL...")
 
             logger.info(f"📡 Extracting info from URL: {url}")
-            info = ydl.extract_info(url, download=True)
+            info = _download_one_video(ydl, url, item_id)
 
             if progress_manager:
                 bump(92, "Download complete, processing...")
@@ -539,7 +624,7 @@ def download_youtube_video_with_progress(
                 work_dir_path = os.path.dirname(original_filename)
                 ext = os.path.splitext(original_filename)[1]
                 cleaned_work_filename = os.path.join(
-                    work_dir_path, f"{cleaned_title}{ext}"
+                    work_dir_path, f"{cleaned_title}_{tag}{ext}"
                 )
 
                 if original_filename != cleaned_work_filename:
@@ -621,7 +706,13 @@ def download_youtube_video_with_progress(
 
     except Exception as e:
         logger.error(f"YouTube download failed: {e}")
+        _remove_job_leftovers(work_dir, tag)
         # Convert to structured exception with proper error codes
         from core.exceptions import handle_youtube_error
 
         raise handle_youtube_error(e, url)
+    except BaseException:
+        # Stopped by the user (services.job_cancel.JobCancelled): nothing to
+        # classify, but this job's partial files go all the same.
+        _remove_job_leftovers(work_dir, tag)
+        raise

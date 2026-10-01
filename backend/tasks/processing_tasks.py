@@ -3,6 +3,7 @@ Video processing tasks for SubsTranslator
 Handles transcription, translation, and video creation
 """
 
+import glob
 import os
 import shutil
 import time
@@ -15,6 +16,12 @@ from logging_config import (
     log_task_complete,
     log_task_error,
     log_task_start,
+)
+from services.job_cancel import (
+    CANCELLED_MESSAGE,
+    JobCancelled,
+    cancelled_failure,
+    is_cancel_requested,
 )
 from services.research_recorder import start_run
 from services.stats_service import save_video_stats
@@ -52,6 +59,34 @@ config = get_config()
 logger = get_logger(__name__)
 
 DOWNLOADS_FOLDER = config.DOWNLOADS_FOLDER
+
+
+def _stop_job(progress_manager, recorder, base_name):
+    """
+    The user stopped this job (services.job_cancel). Its own partial outputs go —
+    every one starts with ``base_name``, which carries the task id, so no other
+    job's file can match. The source video stays: it may be another job's too, and
+    the 24 h cleanup takes it. The archive records the run as stopped.
+    """
+    progress_manager.acknowledge_cancel()
+    removed = 0
+    if base_name:
+        pattern = os.path.join(
+            glob.escape(DOWNLOADS_FOLDER), glob.escape(base_name) + "*"
+        )
+        for path in glob.glob(pattern):
+            try:
+                os.remove(path)
+                removed += 1
+            except OSError as e:
+                logger.warning(f"Could not remove partial output {path}: {e}")
+    progress_manager.log(f"{CANCELLED_MESSAGE} Removed {removed} partial file(s).")
+    for i, step in enumerate(progress_manager.steps):
+        if step["status"] == "in_progress":
+            progress_manager.set_step_error(i, CANCELLED_MESSAGE)
+            break
+    recorder.finish(success=False, error="JobCancelled: stopped by the user")
+    return cancelled_failure()
 
 
 class TranslationFailedWithSalvage(Exception):
@@ -277,6 +312,10 @@ def process_video_task(
         watermark_enabled=bool((watermark_config or {}).get("enabled", False)),
     )
     recorder.record_source_video(video_path)
+
+    # Every output of this job starts with it — set once known, so a Stop can delete
+    # exactly this job's partial files (see _stop_job).
+    base_name = None
 
     try:
         # Structured logging for task start
@@ -1264,8 +1303,15 @@ def process_video_task(
         recorder.finish(success=True)
 
         return {"status": "SUCCESS", "result": final_result}
+    except JobCancelled:
+        return _stop_job(progress_manager, recorder, base_name)
     except Exception as e:
         import traceback
+
+        if is_cancel_requested(task_id, fresh=True):
+            # A Stop the job did not answer in time arrives as SoftTimeLimitExceeded
+            # (services.job_cancel, level 2) — still a stop, not a processing error.
+            return _stop_job(progress_manager, recorder, base_name)
 
         error_msg = f"Error in process_video_task: {e}\n{traceback.format_exc()}"
         progress_manager.log(error_msg)

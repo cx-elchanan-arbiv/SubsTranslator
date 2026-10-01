@@ -83,7 +83,11 @@
     "previewChannel": "Canal:",
     "downloadFormat": "Formato de descarga:",
     "downloadFormat_mp4": "Vídeo (MP4)",
-    "downloadFormat_mp3": "Audio (MP3)"
+    "downloadFormat_mp3": "Audio (MP3)",
+    "downloadQuality": "Calidad de vídeo:",
+    "downloadQuality_fast": "Rápido (720p)",
+    "downloadQuality_high": "Alta calidad (1080p)",
+    "downloadQuality_hint": "Rápido: un archivo ~40% más pequeño, descarga más rápida e imagen menos nítida. Alta calidad: imagen más nítida y descarga más larga. Se aplica a la descarga y al vídeo subtitulado."
   },
   "options": {
     "autoCreateVideo": "Crear video con subtítulos integrados",

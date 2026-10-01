@@ -83,7 +83,11 @@
     "previewChannel": "القناة:",
     "downloadFormat": "صيغة التنزيل:",
     "downloadFormat_mp4": "فيديو (MP4)",
-    "downloadFormat_mp3": "صوت (MP3)"
+    "downloadFormat_mp3": "صوت (MP3)",
+    "downloadQuality": "جودة الفيديو:",
+    "downloadQuality_fast": "سريع (720p)",
+    "downloadQuality_high": "جودة عالية (1080p)",
+    "downloadQuality_hint": "سريع: ملف أصغر بنحو 40%، تنزيل أسرع وصورة أقل وضوحًا. جودة عالية: صورة أوضح وتنزيل أطول. ينطبق على التنزيل وعلى الفيديو المترجم."
   },
   "options": {
     "autoCreateVideo": "إنشاء فيديو مع ترجمات مرئية مدمجة",
@@ -297,7 +301,9 @@
     "processing": "جاري المعالجة...",
     "downloadOnly": "تحميل فقط",
     "processButton": "معالجة مع الترجمات المرئية",
-    "retryButton": "إعادة المحاولة"
+    "retryButton": "إعادة المحاولة",
+    "stop": "إيقاف",
+    "stopping": "جارٍ الإيقاف…"
   },
   "tabs": {
     "uploadTab": "رفع ملف",

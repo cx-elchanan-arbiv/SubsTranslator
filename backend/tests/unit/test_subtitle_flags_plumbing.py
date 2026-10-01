@@ -70,6 +70,9 @@ from services.subtitle_pipeline import (  # noqa: E402
 ALL_FLAG_KEYS = {"spotting_v2", "translation_v2", "translation_style", "render_v2"}
 ALL_JOB_SETTING_KEYS = ALL_FLAG_KEYS | {"subtitle_position"}
 JOB_DEFAULTS = {**FLAG_DEFAULTS, "subtitle_position": "bottom"}
+#: A /youtube job also carries the download quality — "fast" (720p) unless the
+#: client asked for "high" (services.download_quality).
+YOUTUBE_JOB_DEFAULTS = {**JOB_DEFAULTS, "quality": "fast"}
 
 
 # =====================================================================================
@@ -683,7 +686,7 @@ class TestYoutubeRouteFlagParsing:
             json={"url": self.URL, "target_lang": "he", "whisper_model": "base"},
         )
         assert response.status_code == 202
-        assert _captured_kwargs(youtube_route) == JOB_DEFAULTS
+        assert _captured_kwargs(youtube_route) == YOUTUBE_JOB_DEFAULTS
 
     def test_json_booleans(self, flask_client, youtube_route):
         response = flask_client.post(
@@ -705,6 +708,7 @@ class TestYoutubeRouteFlagParsing:
             "translation_style": "clean",
             "render_v2": True,
             "subtitle_position": "bottom",
+            "quality": "fast",
         }
 
     def test_json_false_stays_off(self, flask_client, youtube_route):
@@ -746,7 +750,21 @@ class TestYoutubeRouteFlagParsing:
             "translation_style": "faithful",
             "render_v2": True,
             "subtitle_position": "side",
+            "quality": "fast",
         }
+
+    def test_high_quality_is_forwarded(self, flask_client, youtube_route):
+        response = flask_client.post(
+            "/youtube",
+            json={
+                "url": self.URL,
+                "target_lang": "he",
+                "whisper_model": "base",
+                "quality": "high",
+            },
+        )
+        assert response.status_code == 202
+        assert _captured_kwargs(youtube_route)["quality"] == "high"
 
     def test_subtitle_position_is_forwarded(self, flask_client, youtube_route):
         response = flask_client.post(

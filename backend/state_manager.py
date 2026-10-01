@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any
 
+from services.job_cancel import JobCancelled, raise_if_cancelled
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,6 +68,7 @@ class EnterpriseStateManager:
 
     def __init__(self, celery_task, steps_config: list[dict[str, Any]]):
         self.task = celery_task
+        self._cancel_raised = False
         self.steps = [
             TaskStep(
                 label=step["label"],
@@ -125,8 +128,28 @@ class EnterpriseStateManager:
 
         return meta
 
+    def _check_cancel(self):
+        """
+        The Stop button (services.job_cancel). Every progress update passes here, so
+        a stopped job ends at its next update — in yt-dlp's hook, between
+        transcription segments, between translation batches. Raised once; after
+        that the job's own cancel handler may still log and update state freely.
+        """
+        if self._cancel_raised:
+            return
+        try:
+            raise_if_cancelled(getattr(getattr(self.task, "request", None), "id", None))
+        except JobCancelled:
+            self._cancel_raised = True
+            raise
+
+    def acknowledge_cancel(self):
+        """The job is handling its stop: progress updates no longer raise."""
+        self._cancel_raised = True
+
     def _update_celery_state(self) -> None:
         """Atomic Celery state update."""
+        self._check_cancel()
         try:
             meta = self._build_state_meta()
             self.task.update_state(state=TaskState.PROGRESS.value, meta=meta)

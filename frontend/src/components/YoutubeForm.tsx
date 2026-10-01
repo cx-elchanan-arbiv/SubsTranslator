@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from '../i18n/TranslationContext';
-import type { WhisperModel, TranslationService, DownloadMediaFormat } from '../types';
+import type { WhisperModel, TranslationService, DownloadMediaFormat, DownloadQuality } from '../types';
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8081';
 
@@ -11,6 +11,9 @@ interface VideoCandidate {
   duration_string: string;
   thumbnail: string;
   uploader: string;
+  // Set when `url` alone does not say which video this is — some sites give every
+  // video on a page the page's own URL. The server picks the video by this id.
+  item_id?: string;
 }
 
 interface YoutubeFormProps {
@@ -20,9 +23,16 @@ interface YoutubeFormProps {
     targetLang: string,
     autoCreateVideo: boolean,
     whisperModel: WhisperModel,
-    translationService: TranslationService
+    translationService: TranslationService,
+    itemId?: string,
+    quality?: DownloadQuality
   ) => void;
-  onQuickDownload: (url: string, mediaFormat: DownloadMediaFormat) => void;
+  onQuickDownload: (
+    url: string,
+    mediaFormat: DownloadMediaFormat,
+    itemId?: string,
+    quality?: DownloadQuality
+  ) => void;
   isProcessing: boolean;
   sourceLang: string;
   targetLang: string;
@@ -46,6 +56,9 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
   const [validationError, setValidationError] = useState('');
   const [isValidating, setIsValidating] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState<DownloadMediaFormat>('mp4');
+  // 720p unless the user asks for 1080p — and not remembered between visits, so
+  // the default really is the fast one every time.
+  const [downloadQuality, setDownloadQuality] = useState<DownloadQuality>('fast');
   // The Telegram-style instant preview: a YouTube id has a deterministic
   // thumbnail URL, and the title comes from one cheap key-less oEmbed call
   // proxied by the backend. Appears within ~a second of pasting, costs nothing.
@@ -55,7 +68,7 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
   const [resolving, setResolving] = useState(false);
   const [candidates, setCandidates] = useState<VideoCandidate[] | null>(null);
   // The action to run once a single video URL is known (process or download).
-  const [pendingRun, setPendingRun] = useState<((url: string) => void) | null>(null);
+  const [pendingRun, setPendingRun] = useState<((url: string, itemId?: string) => void) | null>(null);
   // Set when the server capped a long playlist, so the picker can say so
   // instead of silently pretending the list is all of it.
   const [candidatesTotal, setCandidatesTotal] = useState<number | null>(null);
@@ -161,7 +174,7 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
   // video runs immediately; a page with several videos opens the picker; a page
   // with no video shows a friendly message. Falls back to running the raw URL
   // if the probe itself fails (network), to preserve existing behavior.
-  const resolveThenRun = async (url: string, run: (finalUrl: string) => void) => {
+  const resolveThenRun = async (url: string, run: (finalUrl: string, itemId?: string) => void) => {
     setResolving(true);
     setValidationError('');
     try {
@@ -179,7 +192,7 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
       }
 
       if (data.type === 'single' && data.video) {
-        run(data.video.url || url);
+        run(data.video.url || url, data.video.item_id);
       } else if (data.type === 'multiple' && Array.isArray(data.videos)) {
         setCandidates(data.videos);
         setCandidatesTotal(data.truncated ? data.total : null);
@@ -205,7 +218,7 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
     setCandidates(null);
     setCandidatesTotal(null);
     setPendingRun(null);
-    if (run) run(video.url);
+    if (run) run(video.url, video.item_id);
   };
 
   const handleCancelPicker = () => {
@@ -227,8 +240,8 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
       return;
     }
 
-    resolveThenRun(trimmedUrl, (finalUrl) =>
-      onYoutubeSubmit(finalUrl, sourceLang, targetLang, autoCreateVideo, whisperModel, translationService)
+    resolveThenRun(trimmedUrl, (finalUrl, itemId) =>
+      onYoutubeSubmit(finalUrl, sourceLang, targetLang, autoCreateVideo, whisperModel, translationService, itemId, downloadQuality)
     );
   };
 
@@ -245,7 +258,9 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
       return;
     }
 
-    resolveThenRun(trimmedUrl, (finalUrl) => onQuickDownload(finalUrl, downloadFormat));
+    resolveThenRun(trimmedUrl, (finalUrl, itemId) =>
+      onQuickDownload(finalUrl, downloadFormat, itemId, downloadQuality)
+    );
   };
 
   const busy = isProcessing || resolving;
@@ -315,7 +330,14 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
           </button>
         </div>
 
-        <div className="mt-3 flex items-center gap-2 flex-wrap" dir="rtl">
+      </div>
+
+      {/* Download options on their own full-width row. Inside the input group they
+          were a third (now fourth) column of a flex ROW and got squeezed into a
+          sliver beside the link — the same reason the preview card below lives
+          outside it. */}
+      <div className="youtube-options mt-3 flex flex-wrap items-center justify-center gap-x-6 gap-y-2">
+        <div className="flex items-center gap-2 flex-wrap" dir="rtl">
           <span className="text-sm text-gray-600">{t('youtube.downloadFormat')}</span>
           <div className="inline-flex rounded-xl border border-gray-300 overflow-hidden">
             {(['mp4', 'mp3'] as DownloadMediaFormat[]).map((format) => (
@@ -334,6 +356,31 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
                 {format === 'mp4'
                   ? <>🎬 {t('youtube.downloadFormat_mp4')}</>
                   : <>🎵 {t('youtube.downloadFormat_mp3')}</>}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Applies to both buttons: the download, and the source of a subtitled video. */}
+        <div className="flex items-center gap-2 flex-wrap" dir="rtl" title={t('youtube.downloadQuality_hint')}>
+          <span className="text-sm text-gray-600">{t('youtube.downloadQuality')}</span>
+          <div className="inline-flex rounded-xl border border-gray-300 overflow-hidden">
+            {(['fast', 'high'] as DownloadQuality[]).map((quality) => (
+              <button
+                key={quality}
+                type="button"
+                onClick={() => setDownloadQuality(quality)}
+                disabled={busy}
+                aria-pressed={downloadQuality === quality}
+                className={`px-3 py-1.5 text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  downloadQuality === quality
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                {quality === 'fast'
+                  ? <>⚡ {t('youtube.downloadQuality_fast')}</>
+                  : <>🎯 {t('youtube.downloadQuality_high')}</>}
               </button>
             ))}
           </div>
@@ -401,7 +448,7 @@ const YoutubeForm: React.FC<YoutubeFormProps> = ({
 
             <ul className="space-y-2">
               {candidates.map((video, idx) => (
-                <li key={video.url || idx}>
+                <li key={`${idx}:${video.item_id ?? video.url}`}>
                   <button
                     onClick={() => handlePick(video)}
                     className="w-full flex items-center gap-3 p-2 rounded-xl border border-gray-200 hover:border-blue-400 hover:bg-blue-50 transition-all text-right"

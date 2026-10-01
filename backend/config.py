@@ -71,6 +71,10 @@ class Config:
     # File Processing Limits
     MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 500 * 1024 * 1024))  # 500MB default
     MAX_FILE_AGE = int(os.getenv("MAX_FILE_AGE", 24 * 3600))  # 24 hours default
+    #: How long a file in FAST_WORK_DIR must sit untouched before the daily sweep
+    #: treats it as abandoned. Comfortably above the hard task time limit (.env: 1 h),
+    #: so it can never be a download that is still running.
+    FAST_WORK_MAX_AGE = int(os.getenv("FAST_WORK_MAX_AGE", 6 * 3600))
     ALLOWED_EXTENSIONS: set[str] = {"mp4", "mkv", "mov", "webm", "avi", "mp3", "wav"}
 
     # Whisper Model Configuration
@@ -231,7 +235,14 @@ class Config:
         # ...single muxed file as last resort (sources with no separate streams).
         "best[ext=mp4]/best",
     )
-    YTDLP_CACHE_DIR = os.getenv("YTDLP_CACHE_DIR", "/tmp/yt-dlp")
+    #: yt-dlp's cache (YouTube player code, signature functions). It lives under
+    #: XDG_CACHE_HOME — /app/yt_dlp_cache, bind-mounted, so it survives restarts —
+    #: which is where yt-dlp puts it when told nothing. The old default, /tmp/yt-dlp,
+    #: was passed under a key yt-dlp ignores ("cache_dir"), so the cache has always
+    #: lived here; now that the key is right, the default must not move it to /tmp.
+    YTDLP_CACHE_DIR = os.getenv("YTDLP_CACHE_DIR") or os.path.join(
+        os.getenv("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "yt-dlp"
+    )
     YTDLP_RESTRICT_FILENAMES = (
         os.getenv("YTDLP_RESTRICT_FILENAMES", "True").lower() == "true"
     )
@@ -293,10 +304,11 @@ class Config:
     RESEARCH_RECORDER_ENABLED = (
         os.getenv("RESEARCH_RECORDER_ENABLED", "True").lower() == "true"
     )
-    #: Largest single output file the recorder will copy, in MB. The final MP4 is
-    #: archived on purpose (owner-approved: the rendered frames ARE the evidence), but a
-    #: pathological multi-GB input must not fill the volume silently — over this it is
-    #: skipped with a WARNING and recorded as skipped in meta.json.
+    #: Largest single output file the recorder will copy, in MB — over this it is
+    #: skipped with a WARNING and recorded as skipped in meta.json. Video is never
+    #: copied (since 2026-08-10 it is only referenced in meta.json; the copies made
+    #: before that were pruned on 2026-10-01, see RESEARCH_DIR/PRUNED.md), so this
+    #: bounds the SRT/.ass copies.
     RESEARCH_MAX_COPY_MB = int(os.getenv("RESEARCH_MAX_COPY_MB", 4096))
 
     # Testing/CI Fake Mode Configuration

@@ -56,23 +56,37 @@ def cleanup_old_files_task(self, days=14):
                 removed_count += 1
                 total_size_mb += size_mb
 
-    # Ensure fast_work is completely clean
+    # fast_work leftovers: only files nobody has written to for FAST_WORK_MAX_AGE.
+    # This used to delete EVERY file here, age regardless — safe only because the
+    # worker runs one job at a time; with more it would delete downloads still in
+    # progress. A running download keeps touching its files, and a failed one now
+    # removes its own (youtube_service._remove_job_leftovers), so what is left for
+    # this sweep is what a killed worker or a crash abandoned.
+    fast_work_cutoff = time.time() - config.FAST_WORK_MAX_AGE
+    fast_work_removed = 0
+    fast_work_size_mb = 0
     fast_work_path = Path(config.FAST_WORK_DIR)
     if fast_work_path.exists():
         for leftover in fast_work_path.glob("*"):
-            if leftover.is_file():
-                logger.warning(f"Removing leftover temp file: {leftover}")
+            if leftover.is_file() and leftover.stat().st_mtime < fast_work_cutoff:
+                logger.warning(f"Removing abandoned temp file: {leftover}")
+                fast_work_size_mb += leftover.stat().st_size / (1024 * 1024)
                 leftover.unlink(missing_ok=True)
+                fast_work_removed += 1
 
     logger.info(
         "Cleanup completed",
         removed_files=removed_count,
         freed_space_mb=round(total_size_mb, 1),
         retention_days=days,
+        fast_work_removed=fast_work_removed,
+        fast_work_freed_mb=round(fast_work_size_mb, 1),
     )
 
     return {
         "status": "SUCCESS",
         "removed_files": removed_count,
         "freed_space_mb": round(total_size_mb, 1),
+        "fast_work_removed": fast_work_removed,
+        "fast_work_freed_mb": round(fast_work_size_mb, 1),
     }

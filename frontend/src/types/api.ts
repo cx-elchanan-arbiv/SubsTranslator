@@ -49,6 +49,10 @@ export type TranslationService = 'openai' | 'google';
 // Download-only feature. The processing pipeline always needs the video,
 // so 'mp3' is offered on the quick-download path alone.
 export type DownloadMediaFormat = 'mp4' | 'mp3';
+// Resolution a video is downloaded in: 'fast' = 720p (the default — downloads from
+// video sites are slow here, and the file is ~40% smaller), 'high' = 1080p.
+// Server side: backend/services/download_quality.py.
+export type DownloadQuality = 'fast' | 'high';
 
 /**
  * "clean" removes spoken filler ("uh", "you know") — subtitles are read, not heard.

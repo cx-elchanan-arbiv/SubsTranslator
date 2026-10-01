@@ -592,31 +592,48 @@ class SubtitleService:
 
         stderr_data = ""
 
-        while True:
-            stderr_line = process.stderr.readline()
-            if stderr_line:
-                stderr_data += stderr_line
-                if "time=" in stderr_line and total_duration > 0:
-                    try:
-                        time_str = stderr_line.split("time=")[1].split()[0]
-                        if ":" in time_str:
-                            time_parts = time_str.split(":")
-                            current_seconds = (
-                                float(time_parts[0]) * 3600
-                                + float(time_parts[1]) * 60
-                                + float(time_parts[2])
-                            )
-                            progress_percent = min(
-                                95, (current_seconds / total_duration) * 100
-                            )
-                            progress_callback(30 + int(progress_percent * 0.45))
-                    except:
-                        pass
+        try:
+            while True:
+                stderr_line = process.stderr.readline()
+                if stderr_line:
+                    stderr_data += stderr_line
+                    if "time=" in stderr_line and total_duration > 0:
+                        progress_percent = None
+                        try:
+                            time_str = stderr_line.split("time=")[1].split()[0]
+                            if ":" in time_str:
+                                time_parts = time_str.split(":")
+                                current_seconds = (
+                                    float(time_parts[0]) * 3600
+                                    + float(time_parts[1]) * 60
+                                    + float(time_parts[2])
+                                )
+                                progress_percent = min(
+                                    95, (current_seconds / total_duration) * 100
+                                )
+                        except (ValueError, IndexError, ZeroDivisionError):
+                            pass  # an ffmpeg line we cannot read; the next one will do
+                        if progress_percent is not None:
+                            # Outside the parse guard, which used to be a bare
+                            # `except:` around this call too: it swallowed the Stop
+                            # button's JobCancelled (a BaseException, raised from the
+                            # progress update) and the render ran on to the end.
+                            # Ordinary update failures stay non-fatal.
+                            try:
+                                progress_callback(30 + int(progress_percent * 0.45))
+                            except Exception as e:  # noqa: BLE001
+                                self.logger.debug(f"Render progress update failed: {e}")
 
-            if process.poll() is not None:
-                break
+                if process.poll() is not None:
+                    break
 
-        stdout_data, remaining_stderr = process.communicate()
+            stdout_data, remaining_stderr = process.communicate()
+        except BaseException:
+            # Stopped (JobCancelled, or the soft signal behind it): the render must
+            # not outlive the job that asked for it.
+            process.kill()
+            process.wait(timeout=10)
+            raise
         stderr_data += remaining_stderr
 
         if process.returncode != 0:

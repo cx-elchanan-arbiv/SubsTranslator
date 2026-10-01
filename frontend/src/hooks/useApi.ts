@@ -14,6 +14,7 @@ import type {
   SubtitlePosition,
   Step,
   DownloadMediaFormat,
+  DownloadQuality,
 } from '../types';
 import { DEFAULT_SUBTITLE_QUALITY_FLAGS } from '../types/api';
 
@@ -54,6 +55,8 @@ export const useApi = () => {
   const [result, setResult] = useState<TaskResult | null>(null);
   const [salvagedResult, setSalvagedResult] = useState<{ files?: Record<string, string> } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Between pressing Stop and the job reporting CANCELLED through /status.
+  const [isCancelling, setIsCancelling] = useState(false);
   const [videoMetadata, setVideoMetadata] = useState<VideoMetadata | undefined>(undefined);
   const [fileMetadata, setFileMetadata] = useState<FileMetadata | undefined>(undefined);
   const [userChoices, setUserChoices] = useState<UserChoices | undefined>(undefined);
@@ -674,7 +677,11 @@ export const useApi = () => {
     startTime?: string,
     endTime?: string,
     subtitleFlags?: SubtitleQualityFlags,
-    subtitlePosition: SubtitlePosition = 'bottom'
+    subtitlePosition: SubtitlePosition = 'bottom',
+    // Which video of a multi-video page the picker chose (server: video_selection).
+    itemId?: string,
+    // 'fast' (720p) or 'high' (1080p); the server defaults to 'fast' when absent.
+    quality?: DownloadQuality
   ) => {
     // Check if we have a custom logo (either file or saved URL) - if so, use FormData
     const hasCustomLogo = watermarkConfig?.enabled && (watermarkConfig?.logoFile || watermarkConfig?.logoUrl);
@@ -683,6 +690,8 @@ export const useApi = () => {
       // Use FormData when we have a custom logo file
       const formData = new FormData();
       formData.append('url', youtubeUrl);
+      if (itemId) formData.append('item_id', itemId);
+      if (quality) formData.append('quality', quality);
       formData.append('source_lang', sourceLang);
       formData.append('target_lang', targetLang);
       formData.append('auto_create_video', String(autoCreateVideo));
@@ -728,6 +737,8 @@ export const useApi = () => {
       // Use JSON when no custom logo
       const requestBody: any = {
         url: youtubeUrl,
+        ...(itemId ? { item_id: itemId } : {}),
+        ...(quality ? { quality } : {}),
         source_lang: sourceLang,
         target_lang: targetLang,
         auto_create_video: autoCreateVideo,
@@ -768,10 +779,23 @@ export const useApi = () => {
     startTime?: string,
     endTime?: string,
     mediaFormat: DownloadMediaFormat = 'mp4',
+    // Which video of a multi-video page the picker chose (server: video_selection).
+    itemId?: string,
+    // 'fast' (720p) or 'high' (1080p); the server defaults to 'fast' when absent.
+    quality?: DownloadQuality,
   ) => {
-    const requestBody: {url: string; start_time?: string; end_time?: string; media_format: DownloadMediaFormat} = {
+    const requestBody: {
+      url: string;
+      start_time?: string;
+      end_time?: string;
+      media_format: DownloadMediaFormat;
+      item_id?: string;
+      quality?: DownloadQuality;
+    } = {
       url: youtubeUrl,
       media_format: mediaFormat,
+      ...(itemId ? { item_id: itemId } : {}),
+      ...(quality ? { quality } : {}),
     };
 
     // Add time range if provided
@@ -834,8 +858,34 @@ export const useApi = () => {
     window.history.replaceState({}, '', newUrl.toString());
   }, [safeSetResult]);
   
+  // A finished job (stopped or not) leaves nothing to stop.
+  useEffect(() => {
+    if (!isProcessing) setIsCancelling(false);
+  }, [isProcessing]);
+
+  // The Stop button (server: backend/services/job_cancel.py). This only asks; the
+  // job reports the outcome itself — a CANCELLED failure on its /status — so the
+  // normal polling turns it into the "job stopped" card.
+  const cancelTask = useCallback(async () => {
+    const taskId = activeTaskIdRef.current;
+    if (!taskId) return;
+    setIsCancelling(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/cancel/${taskId}`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      // 409: it finished on its own meanwhile; polling shows that result.
+      if (!response.ok && response.status !== 409) setIsCancelling(false);
+    } catch {
+      setIsCancelling(false);
+    }
+  }, []);
+
   return {
     isProcessing,
+    isCancelling,
+    cancelTask,
     progress,
     result,
     error,

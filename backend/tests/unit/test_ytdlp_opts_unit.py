@@ -53,6 +53,10 @@ class DummyYDL:
             "filesize": 0,
         }
 
+    def process_ie_result(self, info, download=True):
+        # The download step: the service resolves first, then downloads what it got.
+        return info
+
     def prepare_filename(self, info):
         return os.path.join("/tmp/test_downloads", f"{info.get('title','Unit')}.mp4")
 
@@ -161,11 +165,20 @@ def test_download_youtube_video_with_progress_builds_opts(monkeypatch, tmp_path)
     opts = DummyYDL.last_opts
     assert opts is not None, "YoutubeDL was not called"
 
-    # Verify config values are used (YTDLP_OPTIMIZED_FORMAT is the Phase A format)
-    assert opts["format"] == real_config.YTDLP_OPTIMIZED_FORMAT
+    # "medium" is a legacy value: it means the default, "fast" — the Phase A format
+    # with the cap at 720p (services.download_quality).
+    from services.download_quality import format_for_quality
+
+    assert opts["format"] == format_for_quality("fast")
+    assert "height<=720" in opts["format"] and "height<=1080" not in opts["format"]
     assert opts["socket_timeout"] == real_config.YTDLP_SOCKET_TIMEOUT
     assert opts["fragment_retries"] == real_config.YTDLP_FRAGMENT_RETRIES
     assert opts["retries"] == real_config.YTDLP_RETRIES
     assert opts["merge_output_format"] == real_config.YTDLP_MERGE_OUTPUT_FORMAT
-    assert opts["restrict_filenames"] == real_config.YTDLP_RESTRICT_FILENAMES
-    assert opts["continue_dl"] == real_config.YTDLP_CONTINUE_DL
+    # yt-dlp's own spellings. restrict_filenames / continue_dl / cache_dir were
+    # silently ignored by yt-dlp; asserting them pinned the bug in place.
+    assert opts["restrictfilenames"] == real_config.YTDLP_RESTRICT_FILENAMES
+    assert opts["continuedl"] == real_config.YTDLP_CONTINUE_DL
+    assert opts["cachedir"] == real_config.YTDLP_CACHE_DIR
+    for ignored_by_ytdlp in ("restrict_filenames", "continue_dl", "cache_dir"):
+        assert ignored_by_ytdlp not in opts

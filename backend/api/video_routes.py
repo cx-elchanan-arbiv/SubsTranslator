@@ -16,9 +16,18 @@ from i18n.translations import t
 from logging_config import get_logger
 from logo_manager import LogoManager
 from services import task_registry
+from services.download_quality import parse_quality
+from services.job_cancel import (
+    ACTIVE_STATES,
+    CANCELLED_CODE,
+    CANCELLED_MESSAGE,
+    escalate_later,
+    request_cancel,
+)
 from services.subtitle_pipeline import parse_subtitle_flags, parse_subtitle_position
 from services.token_service import use_download_token
 from services.url_resolver_service import resolve_video_url
+from services.video_selection import parse_item_id
 from tasks import (
     download_and_process_youtube_task,
     download_youtube_only_task,
@@ -285,6 +294,10 @@ def process_youtube_async():
         auto_create_video = data.get("auto_create_video", False)
         whisper_model = data.get("whisper_model", config.DEFAULT_WHISPER_MODEL)
         translation_service = data.get("translation_service", "google")
+        # Which video of a multi-video page was picked (see services.video_selection).
+        item_id = parse_item_id(data.get("item_id"))
+        # "fast" (720p, the default) or "high" (1080p) — services.download_quality.
+        quality = parse_quality(data.get("quality"))
 
         # Opt-in subtitle-quality toggles. `data` is a JSON dict (real booleans) OR a
         # FormData dict (strings); parse_subtitle_flags accepts both.
@@ -336,7 +349,13 @@ def process_youtube_async():
                 translation_service,
                 watermark_config,
             ],
-            kwargs={**subtitle_flags, "subtitle_position": subtitle_position},
+            kwargs={
+                **subtitle_flags,
+                "subtitle_position": subtitle_position,
+                # Only when a video was picked: an ordinary link sends what it always did.
+                **({"item_id": item_id} if item_id else {}),
+                "quality": quality,
+            },
             queue="processing",
         )
 
@@ -355,6 +374,8 @@ def process_youtube_async():
                         "url": url,
                         "subtitle_position": subtitle_position,
                         **subtitle_flags,
+                        **({"item_id": item_id} if item_id else {}),
+                        "quality": quality,
                     },
                     "initial_request": {},
                     "video_metadata": None,
@@ -496,8 +517,15 @@ def download_video_only():
         if media_format not in ("mp4", "mp3"):
             media_format = "mp4"
 
+        # Which video of a multi-video page was picked (see services.video_selection).
+        item_id = parse_item_id(data.get("item_id"))
+        # "fast" (720p, the default) or "high" (1080p) — services.download_quality.
+        quality = parse_quality(data.get("quality"))
+
         task = download_youtube_only_task.apply_async(
-            args=[url, "high", None, None, media_format], queue="processing"
+            args=[url, quality, None, None, media_format],
+            kwargs={"item_id": item_id} if item_id else {},
+            queue="processing",
         )
 
         # Return 202 with unified schema as per spec
@@ -509,11 +537,12 @@ def download_video_only():
                     "user_choices": {},
                     "initial_request": {
                         "url": url,
-                        "quality": "high",
+                        "quality": quality,
                         "type": "download_only",
                         # So the progress screen can say WHAT is being downloaded
                         # (🎬/🎵) from the very first render, not only at the end.
                         "media_format": media_format,
+                        **({"item_id": item_id} if item_id else {}),
                     },
                     "video_metadata": None,
                     "progress": {"overall_percent": 0, "steps": []},
@@ -527,6 +556,47 @@ def download_video_only():
     except Exception as e:
         logger.error(f"Download-only task failed: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+#: A Celery task id (uuid4) — the only thing /cancel accepts.
+_TASK_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+@video_bp.route("/cancel/<task_id>", methods=["POST"])
+def cancel_task(task_id):
+    """
+    The Stop button. Asks the job to stop at its next progress update, and arranges
+    a soft signal and then a kill if it does not (services.job_cancel). A job still
+    in the queue is revoked and never starts. Answers at once; the job's own /status
+    then turns into a CANCELLED failure.
+    """
+    if not _TASK_ID_RE.match(task_id or ""):
+        return jsonify({"error": "invalid task id"}), 400
+    if not task_registry.is_known(task_id):
+        return jsonify({"error": "unknown task", "code": "TASK_UNKNOWN"}), 404
+
+    celery_app = process_video_task.app
+    state = AsyncResult(task_id, app=celery_app).state
+    if state not in ACTIVE_STATES:
+        # Already over — nothing to stop, and the result must not be touched.
+        return jsonify({"task_id": task_id, "state": state, "stopping": False}), 409
+
+    try:
+        request_cancel(task_id)
+    except Exception as e:  # noqa: BLE001 - without the flag there is no gentle stop
+        logger.error(f"Stop: could not record the request for {task_id}: {e}")
+        return jsonify({"error": "could not record the stop request"}), 503
+
+    if state in ("PENDING", "RECEIVED"):
+        # Not started yet: drop it from the queue. (A RUNNING task is not revoked
+        # here — the flag stops it cleanly; revoking would only add a race.)
+        celery_app.control.revoke(task_id)
+    escalate_later(celery_app, task_id)
+
+    logger.info(f"Stop requested for {task_id} (state {state})")
+    return jsonify({"task_id": task_id, "state": state, "stopping": True}), 202
 
 
 @video_bp.route("/status/<task_id>", methods=["GET"])
@@ -668,6 +738,19 @@ def get_task_status(task_id):
                 "recoverable": True,
             }
         logger.error(f"Task {task_id} failed with error: {error_message}")
+
+    elif status == "REVOKED":
+        # Only the Stop button revokes, and only after the job ignored the gentle
+        # request (services.job_cancel, levels 2-3). Reported like a stop the job
+        # answered itself, rather than as a state the frontend does not know — it
+        # used to keep polling REVOKED forever.
+        status = "FAILURE"
+        error_info = {
+            "code": CANCELLED_CODE,
+            "message": CANCELLED_MESSAGE,
+            "user_facing_message": CANCELLED_MESSAGE,
+            "recoverable": True,
+        }
 
     elif status == "PROGRESS":
         if task_result.info and isinstance(task_result.info, dict):

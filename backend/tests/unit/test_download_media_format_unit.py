@@ -38,9 +38,9 @@ pytestmark = pytest.mark.unit
 class RecordingYDL:
     """Captures the options dict and pretends the download produced a file.
 
-    ``extract_info`` reports the pre-postprocessing extension the way yt-dlp does,
-    and writes the *post*-postprocessing file, so the filename resolution under test
-    is exercised rather than assumed.
+    ``prepare_filename`` reports the pre-postprocessing extension the way yt-dlp
+    does, and the download (``process_ie_result``) writes the *post*-postprocessing
+    file, so the filename resolution under test is exercised rather than assumed.
     """
 
     last_opts = None
@@ -59,9 +59,6 @@ class RecordingYDL:
         return False
 
     def extract_info(self, url, download=True):
-        written = os.path.join(RecordingYDL.work_dir, f"Unit Video{self.written_ext}")
-        with open(written, "wb") as handle:
-            handle.write(b"audio")
         info = {
             "title": "Unit Video",
             "duration": 1,
@@ -76,6 +73,14 @@ class RecordingYDL:
             "fps": 30,
             "filesize": 0,
         }
+        return self.process_ie_result(info) if download else info
+
+    def process_ie_result(self, info, download=True):
+        # The download itself (the service resolves first, then downloads).
+        written = os.path.join(RecordingYDL.work_dir, f"Unit Video{self.written_ext}")
+        with open(written, "wb") as handle:
+            handle.write(b"audio")
+        info = dict(info)
         if self.report_filepath:
             info["requested_downloads"] = [{"filepath": written}]
         return info

@@ -89,6 +89,8 @@ function App() {
     onYoutubeSubmit,
     handleQuickDownload,
     resetState,
+    cancelTask,
+    isCancelling,
   } = useApi();
 
   useEffect(() => {
@@ -217,6 +219,8 @@ function App() {
               initialRequest={initialRequest}
               processingType={currentProcessingType}
               salvagedResult={salvagedResult}
+              onCancel={cancelTask}
+              isCancelling={isCancelling}
               onRetry={() => {
                 resetState({ reason: 'retry-after-error', force: true });
                 setSelectedFile(null);
@@ -312,7 +316,7 @@ function App() {
               )}
               {activeTab === 'youtube' && (
                 <YoutubeForm
-                  onYoutubeSubmit={(url) => onYoutubeSubmit(
+                  onYoutubeSubmit={(url, _sourceLang, _targetLang, _autoCreateVideo, _whisperModel, _translationService, itemId, quality) => onYoutubeSubmit(
                     url,
                     sourceLang,
                     transcriptionOnly ? '' : targetLang,
@@ -324,12 +328,16 @@ function App() {
                     undefined,
                     subtitleFlags,
                     subtitlePosition,
+                    itemId,
+                    quality,
                   )}
-                  onQuickDownload={(url, mediaFormat) => handleQuickDownload(
+                  onQuickDownload={(url, mediaFormat, itemId, quality) => handleQuickDownload(
                     url,
                     undefined,
                     undefined,
                     mediaFormat,
+                    itemId,
+                    quality,
                   )}
                   isProcessing={isProcessing}
                   sourceLang={sourceLang}

@@ -82,7 +82,11 @@
     "previewChannel": "Channel:",
     "downloadFormat": "Download format:",
     "downloadFormat_mp4": "Video (MP4)",
-    "downloadFormat_mp3": "Audio (MP3)"
+    "downloadFormat_mp3": "Audio (MP3)",
+    "downloadQuality": "Video quality:",
+    "downloadQuality_fast": "Fast (720p)",
+    "downloadQuality_high": "High quality (1080p)",
+    "downloadQuality_hint": "Fast: a file ~40% smaller, so a quicker download and a less sharp picture. High quality: a sharper picture and a longer download. Applies to the download and to the subtitled video."
   },
   "videoPicker": {
     "resolving": "Looking for video on the page…",
@@ -454,6 +458,21 @@
         "body": "YouTube flagged the download as automated activity and is temporarily blocking it.",
         "action": "Wait a few minutes and try again."
       },
+      "PAGE_HAS_MULTIPLE_VIDEOS": {
+        "title": "This page has several videos",
+        "body": "The link leads to a page with several videos and none of them was chosen, so nothing was downloaded.",
+        "action": "Paste the link again and choose a video from the list."
+      },
+      "VIDEO_NOT_ON_PAGE": {
+        "title": "The chosen video is no longer on the page",
+        "body": "The page changed after the list was shown and the video was removed from it. This happens mostly on live news pages.",
+        "action": "Paste the link again to get an updated list."
+      },
+      "CANCELLED": {
+        "title": "The job was stopped",
+        "body": "You stopped the job, and its partial files were deleted.",
+        "action": "Start a new task, or run the same one again."
+      },
       "TRANSLATION_SERVICE_ERROR": {
         "title": "The translation service failed",
         "body": "The translation provider returned an error and did not deliver a complete translation. The original transcript was already produced and is offered below.",
@@ -518,7 +537,9 @@
     "processing": "Processing...",
     "downloadOnly": "Download Only",
     "processButton": "Process with Subtitles",
-    "retryButton": "Try Again"
+    "retryButton": "Try Again",
+    "stop": "Stop",
+    "stopping": "Stopping…"
   },
   "help": {
     "tips": "Tips"

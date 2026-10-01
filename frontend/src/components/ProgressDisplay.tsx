@@ -16,6 +16,10 @@ interface ProgressDisplayProps {
   initialRequest?: any;
   processingType?: 'file_upload' | 'youtube_full' | 'youtube_download' | null;
   onRetry?: () => void;
+  /** The Stop button: asks the server to stop the running job (services/job_cancel.py). */
+  onCancel?: () => void;
+  /** True between pressing Stop and the job reporting that it stopped. */
+  isCancelling?: boolean;
   /** Files that survived a failed run — the task marks these `salvaged`. */
   salvagedResult?: { files?: Record<string, string> } | null;
 }
@@ -46,7 +50,7 @@ const BACKEND_LABEL_TO_I18N_KEY: Record<string, string> = {
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8081';
 
-const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progress, error, videoMetadata, fileMetadata, userChoices, initialRequest, processingType, onRetry, salvagedResult }) => {
+const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progress, error, videoMetadata, fileMetadata, userChoices, initialRequest, processingType, onRetry, onCancel, isCancelling, salvagedResult }) => {
   const { t } = useTranslation();
   const [showLogs, setShowLogs] = useState(false);
   const subtitlePositionLabel = userChoices?.subtitle_position
@@ -55,6 +59,28 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
   const subtitlePositionIcon = String.fromCodePoint(0x2195, 0xfe0f);
 
   if (!isProcessing && !error) return null;
+
+  // Stop: on every view of a running job, including the loaders before the first
+  // progress update — a wrong link is best stopped right away.
+  const stopButton = isProcessing && !error && onCancel ? (
+    <div className="mt-4 flex justify-center">
+      <button
+        type="button"
+        onClick={onCancel}
+        disabled={isCancelling}
+        className="px-4 py-2 rounded-xl border border-red-300 text-red-600 bg-white hover:bg-red-50 text-sm font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+      >
+        {isCancelling ? <>⏳ {t('buttons.stopping')}</> : <>⏹ {t('buttons.stop')}</>}
+      </button>
+    </div>
+  ) : null;
+
+  // The download quality as words, not the API value ('fast' / 'high').
+  const qualityLabel = initialRequest?.quality === 'high'
+    ? t('youtube.downloadQuality_high')
+    : initialRequest?.quality === 'fast'
+    ? t('youtube.downloadQuality_fast')
+    : initialRequest?.quality;
 
   // For YouTube processing, show AI loader with context while waiting for video metadata
   const isYouTubeProcessing = processingType === 'youtube_full' || processingType === 'youtube_download';
@@ -103,10 +129,11 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
                     </span>
                   )}
                 </div>
-                <div>🎬 {t('processing.quality')}: {initialRequest.quality}</div>
+                <div>🎬 {t('processing.quality')}: {qualityLabel}</div>
               </div>
             )}
           </div>
+          {stopButton}
         </div>
       );
     }
@@ -114,6 +141,7 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
     return (
       <div className="max-w-4xl mx-auto">
         <AILoader message={t('processing.analyzingYoutube')} />
+        {stopButton}
       </div>
     );
   }
@@ -124,6 +152,7 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
     return (
       <div className="max-w-4xl mx-auto">
         <AILoader message={t('processing.preparingFile')} />
+        {stopButton}
       </div>
     );
   }
@@ -711,6 +740,8 @@ const ProgressDisplay: React.FC<ProgressDisplayProps> = ({ isProcessing, progres
               </motion.div>
             ))}
           </div>
+
+          {stopButton}
 
           {/* Logs Section */}
           {progress.logs && progress.logs.length > 0 && (

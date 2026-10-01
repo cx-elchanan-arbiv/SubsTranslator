@@ -172,6 +172,44 @@ class YouTubeBotDetectionError(YouTubeDownloadError):
         self.url = url
 
 
+class PageHasMultipleVideosError(YouTubeDownloadError):
+    """A page URL holding several videos reached the download with no choice made.
+
+    The picker in the UI exists to prevent this. Without it, yt-dlp treats the page as
+    a playlist and downloads EVERY video on it before the task fails looking for one
+    file (a CNN live page: 10 videos, ~900 MB, ~an hour, then a generic error). This is
+    raised before any byte is downloaded instead.
+    """
+
+    def __init__(self, url: str, count: int):
+        super().__init__(
+            message=f"{url} holds {count} videos and no single one was chosen",
+            error_code="PAGE_HAS_MULTIPLE_VIDEOS",
+            recoverable=False,  # the same request fails the same way every time
+            user_message="This page has several videos. Paste the link again and choose one.",
+        )
+        self.url = url
+        self.count = count
+
+
+class VideoNotOnPageError(YouTubeDownloadError):
+    """The video chosen in the picker is no longer on the page.
+
+    Live pages (news live-blogs) add and drop videos between the moment the list was
+    shown and the moment the download starts.
+    """
+
+    def __init__(self, url: str, item_id: str):
+        super().__init__(
+            message=f"Video {item_id} is no longer on {url}",
+            error_code="VIDEO_NOT_ON_PAGE",
+            recoverable=False,
+            user_message="The chosen video is no longer on the page. Paste the link again for a fresh list.",
+        )
+        self.url = url
+        self.item_id = item_id
+
+
 class TranscriptionError(VideoProcessingError):
     """Base class for transcription errors."""
 
@@ -345,6 +383,11 @@ def handle_subprocess_error(e: Exception, operation: str) -> VideoProcessingErro
 
 def handle_youtube_error(e: Exception, url: str) -> YouTubeDownloadError:
     """Convert yt-dlp errors to structured exceptions."""
+    # Already classified (e.g. PageHasMultipleVideosError): re-guessing from the
+    # message text would turn "is no longer on" into a generic access error.
+    if isinstance(e, YouTubeDownloadError):
+        return e
+
     error_str = str(e).lower()
 
     # Check for bot detection first (most specific)

@@ -9,14 +9,24 @@ downloading, using yt-dlp's generic extractor, and reports what was found:
   {"type": "none",     "reason": "<key>"}           # no extractable video
 
 "Several" means the URL itself is a collection: a page carrying more than one
-embedded video, or a playlist. A URL that names ONE video is always "single" —
-even when it also carries playlist context, which is what a YouTube link copied
-mid-playlist looks like (``watch?v=X&list=RD...``).
+embedded video, or a playlist.
+
+A candidate's "url" is what the browser sends back to process or download it. When
+that URL does not single the video out — some extractors give every entry the page's
+own URL (CNN does, for all ten videos of a live page) — the candidate also carries
+"item_id", the entry's id, and the download picks that entry from the page
+(services.video_selection). Without it, choosing any video downloaded all of them.
+
+A URL that names ONE video is always "single" — even when it also carries playlist
+context, which is what a YouTube link copied mid-playlist looks like
+(``watch?v=X&list=RD...``).
 
 This is the entry point for "paste a page URL, not just a direct video link".
 It does NOT handle JS-rendered / signed-token pages (e.g. Maven) — those need a
 headless browser and are explicitly out of scope here (see docs/URL_PAGE_EXTRACTION_POC.md).
 """
+
+from collections import Counter
 
 import yt_dlp
 
@@ -53,6 +63,18 @@ def _candidate(entry: dict, fallback_url: str) -> dict:
         "thumbnail": entry.get("thumbnail") or "",
         "uploader": entry.get("uploader") or "",
     }
+
+
+def _mark_ambiguous(videos: list[dict], entries: list[dict], page_urls: set) -> None:
+    """
+    Give ``item_id`` to every candidate whose URL does not identify it alone: one
+    shared with another candidate, or the page's own URL. ``videos[i]`` was built
+    from ``entries[i]``.
+    """
+    counts = Counter(video["url"] for video in videos)
+    for video, entry in zip(videos, entries):
+        if (counts[video["url"]] > 1 or video["url"] in page_urls) and entry.get("id"):
+            video["item_id"] = entry["id"]
 
 
 def resolve_video_url(url: str) -> dict:
@@ -109,7 +131,12 @@ def resolve_video_url(url: str) -> dict:
     entries = info.get("entries")
     if entries is not None:
         # Filter out empty/None entries that flat extraction sometimes yields.
-        videos = [_candidate(e, url) for e in entries if e]
+        entries = [e for e in entries if e]
+        videos = [_candidate(e, url) for e in entries]
+        page_urls = {
+            u for u in (url, info.get("webpage_url"), info.get("original_url")) if u
+        }
+        _mark_ambiguous(videos, entries, page_urls)
         if len(videos) == 0:
             return {"type": "none", "reason": "no_video"}
         if len(videos) == 1:

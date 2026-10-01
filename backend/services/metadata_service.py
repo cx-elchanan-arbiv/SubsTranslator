@@ -13,6 +13,8 @@ from urllib.parse import parse_qs, urlparse
 import yt_dlp
 
 from config import get_config
+from core.exceptions import VideoProcessingError
+from services.video_selection import item_filter_opts, single_video
 
 logger = logging.getLogger(__name__)
 
@@ -128,9 +130,14 @@ class VideoMetadataService:
             return False
         return (time.time() - self._extraction_timestamps[cache_key]) < self.cache_ttl
 
-    def extract_metadata(self, url: str) -> tuple[VideoMetadata, str | None]:
+    def extract_metadata(
+        self, url: str, item_id: str | None = None
+    ) -> tuple[VideoMetadata, str | None]:
         """
         Extract video metadata with comprehensive error handling.
+
+        ``item_id`` names the video chosen in the picker when ``url`` is a page
+        holding several (see services.video_selection).
 
         Returns:
             Tuple[VideoMetadata, Optional[error_code]]
@@ -146,6 +153,9 @@ class VideoMetadataService:
 
             # Check cache
             cache_key = self._get_cache_key(url)
+            if item_id:
+                # Two videos picked from one page share the URL; only the id differs.
+                cache_key = f"{cache_key}#{item_id}"
             if self._is_cache_valid(cache_key):
                 logger.info(f"Using cached metadata for {cache_key}")
                 return self._extraction_cache[cache_key], None
@@ -161,21 +171,26 @@ class VideoMetadataService:
                 "retries": 10,
                 "fragment_retries": 10,
                 "extract_flat": False,
-                "restrict_filenames": True,
+                "restrictfilenames": True,
                 "extractor_args": self.config.YTDLP_EXTRACTOR_ARGS,
+                **item_filter_opts(item_id),
             }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info_dict = ydl.extract_info(url, download=False)
+                # A page is a playlist with no title of its own ("Unknown Title",
+                # 00:00, 0x0 on the card). Describe the one video that will be
+                # downloaded — or stop here if there is no single one.
+                info_dict = single_video(info_dict, url, item_id)
 
                 # Build structured metadata
                 metadata = VideoMetadata(
-                    title=info_dict.get("title", "Unknown Title")[:100],  # Limit length
+                    title=(info_dict.get("title") or "Unknown Title")[:100],
                     duration=info_dict.get("duration", 0),
                     duration_string=info_dict.get("duration_string", "00:00"),
                     view_count=info_dict.get("view_count", 0) or 0,
                     upload_date=info_dict.get("upload_date", ""),
-                    uploader=info_dict.get("uploader", "Unknown")[:50],  # Limit length
+                    uploader=(info_dict.get("uploader") or "Unknown")[:50],
                     thumbnail=info_dict.get("thumbnail", ""),
                     description=self._safe_description(
                         info_dict.get("description", "")
@@ -233,6 +248,15 @@ class VideoMetadataService:
                     "DOWNLOAD_ERROR",
                     recoverable=True,
                 )
+
+        except MetadataExtractionError:
+            # Raised above with a precise code (INVALID_URL); the catch-all below
+            # used to relabel it EXTRACTION_ERROR.
+            raise
+
+        except VideoProcessingError as e:
+            # Already classified, e.g. PAGE_HAS_MULTIPLE_VIDEOS / VIDEO_NOT_ON_PAGE.
+            raise MetadataExtractionError(e.user_message, e.error_code, e.recoverable)
 
         except Exception as e:
             logger.error(f"Unexpected metadata extraction error: {e}")

@@ -11,9 +11,19 @@ import yt_dlp
 
 from celery_worker import celery_app
 from config import get_config
+from core.exceptions import VideoProcessingError
 from logging_config import get_logger
+from services.download_quality import parse_quality
+from services.job_cancel import (
+    CANCELLED_CODE,
+    CANCELLED_MESSAGE,
+    JobCancelled,
+    cancelled_failure,
+    is_cancel_requested,
+)
 from services.subtitle_pipeline import parse_subtitle_position, resolve_flags
 from services.video_processing_service import verify_and_convert_video_format
+from services.video_selection import item_filter_opts, single_video
 from services.youtube_service import (
     download_youtube_video,
     download_youtube_video_with_progress,
@@ -28,6 +38,27 @@ config = get_config()
 logger = get_logger(__name__)
 
 DOWNLOADS_FOLDER = config.DOWNLOADS_FOLDER
+
+
+def _stopped_download_only(state_manager):
+    """A download-only job was stopped (services.job_cancel); its partial files are
+    already gone (youtube_service removes them on the way out)."""
+    state_manager.acknowledge_cancel()
+    return state_manager.fail_task(
+        CANCELLED_CODE, CANCELLED_MESSAGE, CANCELLED_MESSAGE, recoverable=True
+    )
+
+
+def _stopped_download(progress_manager):
+    """
+    The download stage of a subtitle job was stopped (services.job_cancel). Its
+    partial files are already gone (youtube_service removes them on the way out),
+    and the processing task is never chained.
+    """
+    progress_manager.acknowledge_cancel()
+    progress_manager.log(CANCELLED_MESSAGE, step_index=0)
+    progress_manager.set_step_error(0, CANCELLED_MESSAGE)
+    return cancelled_failure()
 
 
 @celery_app.task(bind=True, name="download_and_process_youtube_task")
@@ -47,6 +78,8 @@ def download_and_process_youtube_task(
     translation_style="clean",
     render_v2=True,
     subtitle_position="bottom",
+    item_id=None,
+    quality=None,
 ):
     """
     Downloads a video from YouTube and then triggers the main processing task.
@@ -61,7 +94,12 @@ def download_and_process_youtube_task(
             pipeline for every YouTube job. See :mod:`services.subtitle_pipeline`.
         subtitle_position: burned-in subtitle placement, forwarded unchanged after
             validation. Defaults to the historical bottom-centre placement.
+        item_id: the video chosen in the picker when ``url`` is a page holding
+            several (see services.video_selection).
+        quality: "fast" (720p, the default) or "high" (1080p) — the resolution the
+            source is downloaded in, and therefore of a rendered video too.
     """
+    quality = parse_quality(quality)
     # One resolved copy of the four toggles: forwarded to process_video_task AND
     # reported back as user choices, so a YouTube job can be attributed to the
     # settings that produced it exactly like an upload can.
@@ -97,9 +135,12 @@ def download_and_process_youtube_task(
                 "noplaylist": True,
                 "quiet": True,
                 "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
+                **item_filter_opts(item_id),
             }
             with yt_dlp.YoutubeDL(temp_ydl_opts) as temp_ydl:
                 info_dict = temp_ydl.extract_info(url, download=False)
+                # Describe the one video that will be downloaded, not the page.
+                info_dict = single_video(info_dict, url, item_id)
 
                 # Check if this is a playlist URL
                 if "list=" in url and "&index=" in url:
@@ -152,6 +193,8 @@ def download_and_process_youtube_task(
                         "translation_service": translation_service,
                         "subtitle_position": subtitle_position,
                         **subtitle_flags,
+                        **({"item_id": item_id} if item_id else {}),
+                        "quality": quality,
                     },
                 )
 
@@ -159,6 +202,10 @@ def download_and_process_youtube_task(
 
                 progress_manager.log("Starting download...", step_index=0)
 
+        except VideoProcessingError:
+            # No single video to process (a page with several and none chosen, or
+            # the chosen one gone). The download would fail the same way.
+            raise
         except Exception as e:
             progress_manager.log(
                 f"Could not extract early info: {str(e)}", step_index=0
@@ -184,19 +231,23 @@ def download_and_process_youtube_task(
             # If we have metadata, just download without re-extracting
             video_path, _ = download_youtube_video(
                 url,
-                "high",
+                quality,
                 progress_callback=download_progress_callback,
                 start_time=start_time,
                 end_time=end_time,
+                item_id=item_id,
+                job_id=self.request.id,
             )
         else:
             # Fallback: download and extract metadata together
             video_path, video_metadata = download_youtube_video(
                 url,
-                "high",
+                quality,
                 progress_callback=download_progress_callback,
                 start_time=start_time,
                 end_time=end_time,
+                item_id=item_id,
+                job_id=self.request.id,
             )
         download_time = f"{time.time() - download_start_time:.1f}"
         progress_manager.log("Finalizing download...", step_index=0)
@@ -222,6 +273,9 @@ def download_and_process_youtube_task(
                     if start_time and end_time
                     else {}
                 ),
+                # A page URL alone does not say which of its videos this job was.
+                **({"item_id": item_id} if item_id else {}),
+                "quality": quality,
             },
         }
 
@@ -249,14 +303,29 @@ def download_and_process_youtube_task(
             "video_metadata": video_metadata,
             "user_choices": processing_info["user_choices"],
         }
+    except JobCancelled:
+        return _stopped_download(progress_manager)
     except Exception as e:
         import traceback
+
+        if is_cancel_requested(self.request.id, fresh=True):
+            # A Stop the job did not answer in time arrives as SoftTimeLimitExceeded
+            # (services.job_cancel, level 2) — still a stop, not an error.
+            return _stopped_download(progress_manager)
 
         error_msg = f"YouTube Task failed: {str(e)}"
         traceback_msg = traceback.format_exc()
         progress_manager.log(error_msg)
         progress_manager.set_step_error(0, str(e))
-        return {"status": "FAILURE", "error": error_msg, "traceback": traceback_msg}
+        failure = {"status": "FAILURE", "error": error_msg, "traceback": traceback_msg}
+        if isinstance(e, VideoProcessingError):
+            # Classified failures get their coded card instead of the generic one.
+            failure.update(
+                code=e.error_code,
+                user_facing_message=e.user_message,
+                recoverable=e.recoverable,
+            )
+        return failure
 
 
 @celery_app.task(bind=True)
@@ -304,10 +373,10 @@ def download_highest_quality_video_task(self, url):
             "socket_timeout": 60,
             "fragment_retries": 10,
             "retries": 10,
-            "cache_dir": "/tmp/yt-dlp",
+            "cachedir": config.YTDLP_CACHE_DIR,
             "merge_output_format": "mp4",
-            "restrict_filenames": True,
-            "continue_dl": True,
+            "restrictfilenames": True,
+            "continuedl": True,
             "hls_prefer_native": True,
             # Player client selection lives in config.YTDLP_PLAYER_CLIENT
             "extractor_args": config.YTDLP_EXTRACTOR_ARGS,
@@ -439,7 +508,13 @@ def download_highest_quality_video_task(self, url):
 
 @celery_app.task(bind=True, name="download_youtube_only_task")
 def download_youtube_only_task(
-    self, url, quality="high", start_time=None, end_time=None, media_format="mp4"
+    self,
+    url,
+    quality=None,
+    start_time=None,
+    end_time=None,
+    media_format="mp4",
+    item_id=None,
 ):
     """
     Enterprise-grade YouTube video download with robust error handling.
@@ -451,6 +526,9 @@ def download_youtube_only_task(
         end_time: Optional end time for partial download (format: HH:MM:SS, MM:SS, or SS)
         media_format: "mp4" (default, unchanged behaviour) or "mp3" for audio only.
             Download-only feature; the processing pipeline needs the video.
+        item_id: the video chosen in the picker when ``url`` is a page holding
+            several (see services.video_selection).
+        quality: "fast" (720p, the default) or "high" (1080p) — services.download_quality.
     """
     import os
     import sys
@@ -467,6 +545,7 @@ def download_youtube_only_task(
     ]
 
     state_manager = EnterpriseStateManager(self, steps_config)
+    quality = parse_quality(quality)
 
     try:
         # Step 1: Extract metadata
@@ -475,7 +554,7 @@ def download_youtube_only_task(
         state_manager.set_step_progress(0, 5, "Extracting initial info...")
 
         try:
-            video_metadata, error_code = metadata_service.extract_metadata(url)
+            video_metadata, error_code = metadata_service.extract_metadata(url, item_id)
 
             if error_code:
                 return state_manager.fail_task(
@@ -513,6 +592,8 @@ def download_youtube_only_task(
                 # was a video or an audio download.
                 "media_format": media_format,
             }
+            if item_id:
+                initial_request["item_id"] = item_id
             if start_time and end_time:
                 initial_request["start_time"] = start_time
                 initial_request["end_time"] = end_time
@@ -528,10 +609,16 @@ def download_youtube_only_task(
             state_manager.set_step_progress(0, 10, "Preparing download...")
 
         except MetadataExtractionError as e:
+            if is_cancel_requested(self.request.id, fresh=True):
+                # The soft signal of a Stop (services.job_cancel, level 2) landed
+                # inside the metadata lookup, which filed it as a lookup failure.
+                return _stopped_download_only(state_manager)
             return state_manager.fail_task(
                 e.error_code, e.message, e.message, e.recoverable
             )
         except Exception as e:
+            if is_cancel_requested(self.request.id, fresh=True):
+                return _stopped_download_only(state_manager)
             return state_manager.fail_task(
                 "METADATA_EXTRACTION_ERROR",
                 str(e),
@@ -548,7 +635,14 @@ def download_youtube_only_task(
 
         download_start_time = time.time()
         video_path, _ = download_youtube_video_with_progress(
-            url, quality, state_manager, start_time, end_time, media_format
+            url,
+            quality,
+            state_manager,
+            start_time,
+            end_time,
+            media_format,
+            item_id,
+            job_id=self.request.id,
         )
 
         download_time = f"{time.time() - download_start_time:.1f}"
@@ -600,8 +694,25 @@ def download_youtube_only_task(
             "timing": {"download_video": download_time},
         }
 
+    except JobCancelled:
+        return _stopped_download_only(state_manager)
     except Exception as e:
         import traceback
+
+        if is_cancel_requested(self.request.id, fresh=True):
+            # A Stop the job did not answer in time arrives as SoftTimeLimitExceeded
+            # (services.job_cancel, level 2) — still a stop, not a download error.
+            return _stopped_download_only(state_manager)
+
+        if isinstance(e, VideoProcessingError) and e.error_code in (
+            "PAGE_HAS_MULTIPLE_VIDEOS",
+            "VIDEO_NOT_ON_PAGE",
+        ):
+            # Classified by services.video_selection; the text matching below would
+            # file "is no longer on the page" under a generic download error.
+            return state_manager.fail_task(
+                e.error_code, e.message, e.user_message, e.recoverable
+            )
 
         error_str = str(e)
         traceback_msg = traceback.format_exc()
